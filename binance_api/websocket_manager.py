@@ -1,7 +1,106 @@
-import json
 import time
 import logging
 from binance.websocket.spot.websocket_stream import SpotWebsocketStreamClient
+from msgspec import Struct, json as msgspec_json
+
+# Define message schemas for fast parsing
+class KlineData(Struct):
+    t: int          # Kline start time
+    T: int          # Kline close time
+    s: str          # Symbol
+    i: str          # Interval
+    f: int          # First trade ID
+    L: int          # Last trade ID
+    o: str          # Open price
+    c: str          # Close price
+    h: str          # High price
+    l: str          # Low price
+    v: str          # Volume
+    n: int          # Number of trades
+    x: bool         # Is closed
+    q: str          # Quote volume
+    V: str          # Taker buy volume
+    Q: str          # Taker buy quote volume
+    B: str          # Ignore
+
+class KlineMessage(Struct):
+    e: str          # Event type
+    E: int          # Event time
+    s: str          # Symbol
+    k: KlineData    # Kline data
+
+class TradeMessage(Struct):
+    e: str          # Event type
+    E: int          # Event time
+    s: str          # Symbol
+    t: int          # Trade ID
+    p: str          # Price
+    q: str          # Quantity
+    b: int          # Buyer order ID
+    a: int          # Seller order ID
+    T: int          # Trade time
+    m: bool         # Is buyer market maker
+    M: bool         # Ignore
+
+class ExecutionReportMessage(Struct):
+    e: str          # Event type
+    E: int          # Event time
+    s: str          # Symbol
+    c: str          # Client order ID
+    S: str          # Side
+    o: str          # Order type
+    f: str          # Time in force
+    q: str          # Order quantity
+    p: str          # Order price
+    P: str          # Stop price
+    F: str          # Iceberg quantity
+    g: int          # Order listen key
+    C: str          # Original client order ID
+    x: str          # Current execution type
+    X: str          # Current order status
+    r: str          # Order reject reason
+    i: int          # Order ID
+    l: str          # Last executed quantity
+    z: str          # Cumulative filled quantity
+    L: str          # Last executed price
+    n: str          # Commission amount
+    N: str          # Commission asset
+    T: int          # Transaction time
+    t: int          # Trade ID
+    I: int          # Ignore
+    w: bool         # Is working
+    m: bool         # Is maker
+    M: bool         # Ignore
+    O: int          # Order creation time
+    Z: str          # Cumulative quote asset transacted quantity
+    Y: str          # Last quote asset transacted quantity
+    Q: str          # Quote order quantity
+
+class ListStatusMessage(Struct):
+    e: str          # Event type
+    E: int          # Event time
+    s: str          # Symbol
+    g: int          # OrderListId
+    c: str          # Contingency type
+    l: str          # List status type
+    L: str          # List order status
+    r: str          # List reject reason
+    C: str          # List client order ID
+    T: int          # Transaction time
+    O: list         # Orders
+
+class BookTickerMessage(Struct):
+    s: str                # Symbol
+    b: str                # Best bid price
+    B: str                # Best bid quantity
+    a: str                # Best ask price
+    A: str                # Best ask quantity
+    u: int | None = None  # Update ID, now optional with default None
+
+class CombinedStreamMessage(Struct):
+    stream: str     # Stream name
+    data: object    # Data payload
+
 
 class WebsocketManager:
     def __init__(self, on_message_callback, on_error_callback=None):
@@ -18,29 +117,70 @@ class WebsocketManager:
     
     def _message_handler(self, _, message):
         try:
-            # If message is a string, parse it as JSON
+            # Process message based on format and type
             if isinstance(message, str):
-                message = json.loads(message)
+                # Always try generic parsing first to check message format
+                try:
+                    generic_msg = msgspec_json.decode(message)
+                    
+                    # Handle special message types that don't follow event format
+                    # Connection messages, status updates, and heartbeats
+                    if any(key in generic_msg for key in ['ping', 'pong', 'welcome', 'action', 'result', 'id', 'status']):
+                        self.on_message_callback(generic_msg)
+                        return
+                        
+                    # Detect combined stream format
+                    if 'stream' in generic_msg and 'data' in generic_msg:
+                        # Process the combined stream format
+                        self.on_message_callback(CombinedStreamMessage(
+                            stream=generic_msg['stream'], 
+                            data=generic_msg['data']
+                        ))
+                        # Also process the inner data
+                        self._message_handler(_, msgspec_json.encode(generic_msg['data']))
+                        return
+                        
+                    # Only continue with schema validation if we have an event type
+                    if 'e' in generic_msg:
+                        # Try using the appropriate schema based on event type
+                        event_type = generic_msg['e']
+                        if event_type == 'kline':
+                            parsed = msgspec_json.decode(message, type=KlineMessage)
+                        elif event_type == 'trade':
+                            parsed = msgspec_json.decode(message, type=TradeMessage)
+                        elif event_type == 'executionReport':
+                            parsed = msgspec_json.decode(message, type=ExecutionReportMessage)
+                        elif event_type == 'listStatus':
+                            parsed = msgspec_json.decode(message, type=ListStatusMessage)
+                        else:
+                            # Unknown event type, use generic parsing
+                            parsed = generic_msg
+                            
+                        self.on_message_callback(parsed)
+                        return
+                        
+                    # Handle bookTicker format which doesn't have 'e' field
+                    if all(key in generic_msg for key in ['s', 'b', 'B', 'a', 'A']):
+                        parsed = msgspec_json.decode(message, type=BookTickerMessage)
+                        self.on_message_callback(parsed)
+                        return
+                        
+                    # If we got here, it's a message format we don't have a specific schema for
+                    self.on_message_callback(generic_msg)
+                    
+                except Exception as decode_error:
+                    self.logger.debug(f"Schema parsing failed: {decode_error}, using generic parsing")
+                    # Fallback to completely generic parsing
+                    parsed = msgspec_json.decode(message)
+                    self.on_message_callback(parsed)
+            else:
+                # Already parsed message or non-string input
+                self.on_message_callback(message)
                 
-            # Process different types of messages based on their format
-            if isinstance(message, dict):
-                # Handle user data events
-                if "e" in message:
-                    self.logger.debug(f"Received user data event: {message['e']}")
-                    if message["e"] == "listenKeyExpired":
-                        self.logger.warning("Listen key expired notification received")
-                        # Pass this to callback so client code can handle refreshing the listen key
-                # Handle combined stream messages
-                elif "stream" in message and "data" in message:
-                    self.logger.debug(f"Received stream data: {message['stream']}")
-                # Keep message format as-is for backwards compatibility
-            
-            # Forward the message to the callback
-            self.on_message_callback(message)
-            
         except Exception as e:
             self.logger.error(f"Error handling message: {e}")
-            self.logger.debug(f"Raw message: {message}")
+            if isinstance(message, str) and len(message) < 1000:  # Only log if message is reasonably sized
+                self.logger.debug(f"Raw message that caused error: {message}")
     
     def _error_handler(self, _, error):
         self.logger.error(f"WebSocket error: {error}")
