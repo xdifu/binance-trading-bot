@@ -9,10 +9,10 @@ class RiskManager:
         self.binance_client = binance_client
         self.telegram_bot = telegram_bot
         self.symbol = config.SYMBOL
-        self.trailing_stop_loss_percent = config.TRAILING_STOP_LOSS_PERCENT / 100  # 转换为小数
-        self.trailing_take_profit_percent = config.TRAILING_TAKE_PROFIT_PERCENT / 100  # 转换为小数
+        self.trailing_stop_loss_percent = config.TRAILING_STOP_LOSS_PERCENT / 100  # Convert to decimal
+        self.trailing_take_profit_percent = config.TRAILING_TAKE_PROFIT_PERCENT / 100  # Convert to decimal
         
-        # 获取交易对信息并设置精度
+        # Get symbol information and set precision
         self.symbol_info = self.binance_client.get_symbol_info(self.symbol)
         self.price_precision = self._get_price_precision()
         self.quantity_precision = self._get_quantity_precision()
@@ -27,43 +27,43 @@ class RiskManager:
         self.logger = logging.getLogger(__name__)
 
     def _get_price_precision(self):
-        """获取价格精度"""
+        """Get price precision"""
         if not self.symbol_info or 'filters' not in self.symbol_info:
-            return 2  # 默认价格精度
+            return 2  # Default price precision
         return get_precision_from_filters(self.symbol_info['filters'], 'PRICE_FILTER', 'tickSize')
     
     def _get_quantity_precision(self):
-        """获取数量精度"""
+        """Get quantity precision"""
         if not self.symbol_info or 'filters' not in self.symbol_info:
-            return 5  # 默认数量精度
+            return 5  # Default quantity precision
         return get_precision_from_filters(self.symbol_info['filters'], 'LOT_SIZE', 'stepSize')
         
     def _adjust_price_precision(self, price):
-        """调整价格精度"""
+        """Adjust price precision"""
         return format_price(price, self.price_precision)
     
     def _adjust_quantity_precision(self, quantity):
-        """调整数量精度"""
+        """Adjust quantity precision"""
         return format_quantity(quantity, self.quantity_precision)
         
     def activate(self, grid_lowest, grid_highest):
-        """激活风险管理"""
+        """Activate risk management"""
         try:
-            # 获取当前价格
+            # Get current price
             current_price = self.binance_client.get_symbol_price(self.symbol)
             
-            # 设置初始止损价和止盈价
+            # Set initial stop loss and take profit prices
             self.stop_loss_price = grid_lowest * (1 - self.trailing_stop_loss_percent)
             self.take_profit_price = grid_highest * (1 + self.trailing_take_profit_percent)
             
-            # 设置历史最高最低价格
+            # Set historical high and low prices
             self.highest_price = current_price
             self.lowest_price = current_price
             
-            message = (f"风险管理已激活\n"
-                       f"当前价格: {current_price}\n"
-                       f"止损价: {self.stop_loss_price}\n"
-                       f"止盈价: {self.take_profit_price}")
+            message = (f"Risk Management Activated\n"
+                       f"Current price: {current_price}\n"
+                       f"Stop loss price: {self.stop_loss_price}\n"
+                       f"Take profit price: {self.take_profit_price}")
             
             self.logger.info(message)
             if self.telegram_bot:
@@ -71,19 +71,19 @@ class RiskManager:
             
             self.is_active = True
             
-            # 创建初始OCO单
+            # Create initial OCO order
             self._place_oco_orders()
             
         except Exception as e:
-            self.logger.error(f"激活风险管理失败: {e}")
+            self.logger.error(f"Failed to activate risk management: {e}")
             
     def deactivate(self):
-        """停用风险管理"""
+        """Deactivate risk management"""
         if not self.is_active:
             return
         
         try:
-            # 取消现有OCO订单
+            # Cancel existing OCO orders
             self._cancel_oco_orders()
             
             self.is_active = False
@@ -93,54 +93,56 @@ class RiskManager:
             self.lowest_price = None
             self.oco_order_id = None
             
-            message = "风险管理已停用"
+            message = "Risk Management Deactivated"
             self.logger.info(message)
             if self.telegram_bot:
                 self.telegram_bot.send_message(message)
         except Exception as e:
-            self.logger.error(f"停用风险管理失败: {e}")
+            self.logger.error(f"Failed to deactivate risk management: {e}")
 
     def check_price(self, current_price):
-        """检查价格是否需要更新追踪止损或止盈"""
+        """Check if price requires updating trailing stop loss or take profit"""
         if not self.is_active:
             return None
         
         update_required = False
         
-        # 更新历史最高价和最低价
+        # Update historical high and low prices
         if current_price > self.highest_price:
             self.highest_price = current_price
-            # 更新追踪止盈价格
-            new_take_profit = current_price * (1 - self.trailing_take_profit_percent)
+            # Update trailing take profit price - FIXED: using addition instead of subtraction
+            new_take_profit = current_price * (1 + self.trailing_take_profit_percent)
+            # FIXED: only update if new take profit is higher (trailing behavior)
             if new_take_profit > self.take_profit_price:
                 self.take_profit_price = new_take_profit
                 update_required = True
-                self.logger.info(f"更新追踪止盈价格: {self.take_profit_price}")
+                self.logger.info(f"Updated trailing take profit price: {self.take_profit_price}")
         
         if current_price < self.lowest_price:
             self.lowest_price = current_price
-            # 更新追踪止损价格
+            # Update trailing stop loss price
             new_stop_loss = current_price * (1 - self.trailing_stop_loss_percent)
-            if new_stop_loss > self.stop_loss_price:
+            # Only update if new stop loss is lower than current one (trailing behavior)
+            if new_stop_loss < self.stop_loss_price:
                 self.stop_loss_price = new_stop_loss
                 update_required = True
-                self.logger.info(f"更新追踪止损价格: {self.stop_loss_price}")
+                self.logger.info(f"Updated trailing stop loss price: {self.stop_loss_price}")
         
-        # 如果需要更新订单
+        # Update orders if needed
         if update_required and self.oco_order_id:
             self._cancel_oco_orders()
             self._place_oco_orders()
             
-        return None  # 不再直接返回操作，而是通过OCO订单执行
+        return None  # No direct operation is returned, executed via OCO orders
 
     def _place_oco_orders(self):
-        """创建OCO订单对（止损和止盈）"""
+        """Create OCO (One-Cancels-the-Other) order pair for stop loss and take profit"""
         try:
-            # 获取账户余额
+            # Get account balance
             balance = self.binance_client.get_account_info()
             asset = self.symbol.replace('USDT', '')
             
-            # 查找对应资产余额
+            # Find corresponding asset balance
             asset_balance = None
             for item in balance['balances']:
                 if item['asset'] == asset:
@@ -148,46 +150,46 @@ class RiskManager:
                     break
             
             if not asset_balance or asset_balance <= 0:
-                self.logger.info(f"没有可用的{asset}资产进行风险管理")
+                self.logger.info(f"No available {asset} for risk management")
                 return
             
-            # 设置数量（全部可用资产）并格式化
+            # Set quantity (all available assets) and format
             quantity = self._adjust_quantity_precision(asset_balance)
             
-            # 获取当前价格
+            # Get current price
             current_price = self.binance_client.get_symbol_price(self.symbol)
             
-            # 格式化止损和止盈价格
+            # Format stop loss and take profit prices
             stop_price = self._adjust_price_precision(self.stop_loss_price)
             stop_limit_price = self._adjust_price_precision(self.stop_loss_price * 0.99)
             limit_price = self._adjust_price_precision(self.take_profit_price)
             
-            # 下OCO订单
+            # Place OCO order
             response = self.binance_client.new_oco_order(
                 symbol=self.symbol,
-                side="SELL",  # 卖出资产
+                side="SELL",  # Sell assets
                 quantity=quantity,
-                price=limit_price,  # 止盈价格
-                stopPrice=stop_price,  # 止损触发价
-                stopLimitPrice=stop_limit_price,  # 止损限价
+                price=limit_price,  # Take profit price
+                stopPrice=stop_price,  # Stop loss trigger price
+                stopLimitPrice=stop_limit_price,  # Stop limit price
                 stopLimitTimeInForce="GTC"  # Good Till Cancel
             )
             
             self.oco_order_id = response.get('orderListId')
             
-            message = (f"已设置风险管理OCO订单\n"
-                      f"数量: {quantity} {asset}\n"
-                      f"止损触发价: {stop_price}\n"
-                      f"止盈价: {limit_price}")
+            message = (f"Risk Management OCO Order Created\n"
+                      f"Quantity: {quantity} {asset}\n"
+                      f"Stop loss trigger: {stop_price}\n"
+                      f"Take profit price: {limit_price}")
             self.logger.info(message)
             if self.telegram_bot:
                 self.telegram_bot.send_message(message)
                 
         except Exception as e:
-            self.logger.error(f"创建OCO订单失败: {e}")
+            self.logger.error(f"Failed to create OCO order: {e}")
 
     def _cancel_oco_orders(self):
-        """取消现有OCO订单"""
+        """Cancel existing OCO orders"""
         if not self.oco_order_id:
             return
             
@@ -196,21 +198,21 @@ class RiskManager:
                 symbol=self.symbol,
                 orderListId=self.oco_order_id
             )
-            self.logger.info(f"已取消OCO订单 ID: {self.oco_order_id}")
+            self.logger.info(f"Cancelled OCO order ID: {self.oco_order_id}")
             self.oco_order_id = None
         except Exception as e:
-            # 忽略找不到订单的错误，可能已经执行或取消
-            self.logger.warning(f"取消OCO订单失败: {e}")
+            # Ignore errors for orders that can't be found - likely already executed or cancelled
+            self.logger.warning(f"Failed to cancel OCO order: {e}")
             self.oco_order_id = None
 
     def execute_stop_loss(self):
-        """执行止损操作"""
+        """Execute stop loss operation"""
         try:
-            # 获取账户余额，平掉所有仓位
+            # Get account balance and close all positions
             balance = self.binance_client.get_account_info()
             asset = self.symbol.replace('USDT', '')
             
-            # 查找对应资产余额
+            # Find corresponding asset balance
             asset_balance = None
             for item in balance['balances']:
                 if item['asset'] == asset:
@@ -218,26 +220,26 @@ class RiskManager:
                     break
             
             if asset_balance and asset_balance > 0:
-                # 格式化数量
+                # Format quantity
                 formatted_quantity = self._adjust_quantity_precision(asset_balance)
                 
-                # 市价卖出全部资产
+                # Market sell all assets
                 self.binance_client.place_market_order(self.symbol, "SELL", formatted_quantity)
-                message = f"执行止损: 已市价卖出 {formatted_quantity} {asset}"
+                message = f"Stop Loss Executed: Market sold {formatted_quantity} {asset}"
                 self.logger.info(message)
                 if self.telegram_bot:
                     self.telegram_bot.send_message(message)
         except Exception as e:
-            self.logger.error(f"执行止损失败: {e}")
+            self.logger.error(f"Failed to execute stop loss: {e}")
 
     def execute_take_profit(self):
-        """执行止盈操作"""
+        """Execute take profit operation"""
         try:
-            # 获取账户余额，平掉所有仓位
+            # Get account balance and close all positions
             balance = self.binance_client.get_account_info()
             asset = self.symbol.replace('USDT', '')
             
-            # 查找对应资产余额
+            # Find corresponding asset balance
             asset_balance = None
             for item in balance['balances']:
                 if item['asset'] == asset:
@@ -245,14 +247,14 @@ class RiskManager:
                     break
             
             if asset_balance and asset_balance > 0:
-                # 格式化数量
+                # Format quantity
                 formatted_quantity = self._adjust_quantity_precision(asset_balance)
                 
-                # 市价卖出全部资产
+                # Market sell all assets
                 self.binance_client.place_market_order(self.symbol, "SELL", formatted_quantity)
-                message = f"执行止盈: 已市价卖出 {formatted_quantity} {asset}"
+                message = f"Take Profit Executed: Market sold {formatted_quantity} {asset}"
                 self.logger.info(message)
                 if self.telegram_bot:
                     self.telegram_bot.send_message(message)
         except Exception as e:
-            self.logger.error(f"执行止盈失败: {e}")
+            self.logger.error(f"Failed to execute take profit: {e}")
