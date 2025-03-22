@@ -9,7 +9,7 @@ PRIVATE_KEY = os.getenv("PRIVATE_KEY", "")
 PRIVATE_KEY_PASS = os.getenv("PRIVATE_KEY_PASS")
 
 # 其他配置
-BASE_URL = "https://api.binance.com"
+BASE_URL = "https://api1.binance.com"
 USE_TESTNET = os.getenv("USE_TESTNET", "false").lower() == "true"
 
 # 交易设置
