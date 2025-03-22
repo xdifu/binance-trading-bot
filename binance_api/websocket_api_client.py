@@ -17,28 +17,26 @@ class BinanceWebSocketAPIClient:
     """
     Binance WebSocket API Client
     
-    Implements the Binance WebSocket API for trading operations with proper
-    protocol handling, authentication, and session management.
+    Implements the Binance WebSocket API for trading operations with Ed25519
+    signing, proper connection management and thread safety.
     """
     
     def __init__(
         self, 
         api_key: str = None, 
-        api_secret: str = None,
         private_key_path: str = None,
         private_key_pass: str = None,
         use_testnet: bool = False,
         auto_reconnect: bool = True,
         ping_interval: int = 20,
-        timeout: int = 20  # Increased default timeout to 20 seconds
+        timeout: int = 20
     ):
         """
-        Initialize the WebSocket API client
+        Initialize the WebSocket API client with Ed25519 authentication
         
         Args:
             api_key: Binance API key
-            api_secret: Binance API secret (HMAC authentication)
-            private_key_path: Path to Ed25519 private key file (preferred for WebSocket API)
+            private_key_path: Path to Ed25519 private key file
             private_key_pass: Password for private key if encrypted
             use_testnet: Whether to use testnet instead of production
             auto_reconnect: Whether to automatically reconnect on disconnection
@@ -49,37 +47,13 @@ class BinanceWebSocketAPIClient:
         
         # Authentication details
         self.api_key = api_key
-        self.api_secret = api_secret
         self.private_key_path = private_key_path
         self.private_key_pass = private_key_pass
         self.private_key = None
         
-        # Load private key if provided
-        if private_key_path and os.path.isfile(private_key_path):
-            try:
-                with open(private_key_path, 'rb') as f:
-                    private_key_data = f.read()
-                    
-                # Correctly handle private_key_pass, especially when it's "None"
-                if private_key_pass and private_key_pass.lower() != 'none':
-                    password = private_key_pass.encode('utf-8')
-                else:
-                    password = None
-                    
-                self.private_key = load_pem_private_key(
-                    private_key_data, 
-                    password=password
-                )
-                
-                # Verify the key type is Ed25519
-                if not isinstance(self.private_key, ed25519.Ed25519PrivateKey):
-                    self.logger.warning("Loaded key is not an Ed25519 private key. WebSocket API requires Ed25519 keys.")
-                    self.logger.warning("Will fall back to HMAC authentication if API secret is provided.")
-                    self.private_key = None
-            except Exception as e:
-                self.logger.error(f"Failed to load private key: {e}")
-                self.private_key = None
-                self.logger.warning("Will fall back to HMAC authentication if API secret is provided.")
+        # Load Ed25519 private key
+        if private_key_path:
+            self._load_ed25519_key()
         
         # Connection details
         self.ws_base_url = "wss://testnet.binance.vision/ws-api/v3" if use_testnet else "wss://ws-api.binance.com/ws-api/v3"
@@ -87,29 +61,66 @@ class BinanceWebSocketAPIClient:
         self.ping_interval = ping_interval
         self.auto_reconnect = auto_reconnect
         
-        # WebSocket state
+        # WebSocket state with thread safety
         self.ws = None
-        self.ws_connected = False
-        self.last_received_time = 0
-        self.last_ping_time = 0
-        self.max_request_attempts = 3  # Added retry attempts
+        self.state_lock = threading.RLock()
+        with self.state_lock:
+            self.ws_connected = False
+            self.last_received_time = 0
+            self.last_ping_time = 0
+            self._running = False
+            self.is_closed_by_user = False
+            self.session_authenticated = False
         
         # Request-response management
         self.request_callbacks = {}
         self.response_queue = Queue()
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         
         # Background threads
         self.listen_thread = None
         self.ping_thread = None
-        self._running = False
-        self.is_closed_by_user = False
         
-        # Session status
-        self.session_authenticated = False
+        # Configuration
+        self.max_request_attempts = 3
+        self.max_reconnect_attempts = 5
+        self.exponential_backoff_base = 2
         
         # Connect to WebSocket
         self.connect()
+    
+    def _load_ed25519_key(self):
+        """Load the Ed25519 private key from file"""
+        if not self.private_key_path or not os.path.isfile(self.private_key_path):
+            self.logger.error(f"Private key file not found: {self.private_key_path}")
+            raise FileNotFoundError(f"Private key file not found: {self.private_key_path}")
+        
+        try:
+            with open(self.private_key_path, 'rb') as f:
+                private_key_data = f.read()
+                
+            # Handle password correctly
+            password = None
+            if self.private_key_pass and self.private_key_pass.lower() != 'none':
+                password = self.private_key_pass.encode('utf-8')
+                
+            # Load the private key
+            loaded_key = load_pem_private_key(
+                private_key_data, 
+                password=password
+            )
+            
+            # Verify it's an Ed25519 key
+            if not isinstance(loaded_key, ed25519.Ed25519PrivateKey):
+                self.logger.error("The provided key is not an Ed25519 private key.")
+                raise ValueError("WebSocket API requires an Ed25519 private key")
+                
+            self.private_key = loaded_key
+            self.logger.info("Ed25519 private key loaded successfully")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to load Ed25519 private key: {e}")
+            raise
     
     def connect(self) -> bool:
         """
@@ -118,42 +129,39 @@ class BinanceWebSocketAPIClient:
         Returns:
             bool: True if connection was successful, False otherwise
         """
-        if self.ws_connected:
-            return True
-        
-        # Reset state
-        self.is_closed_by_user = False
-        self.session_authenticated = False
+        with self.state_lock:
+            if self.ws_connected:
+                return True
+            
+            # Reset state
+            self.is_closed_by_user = False
+            self.session_authenticated = False
         
         try:
             self.logger.info(f"Connecting to {self.ws_base_url}...")
             
-            # Enable trace for debugging if needed
-            # websocket.enableTrace(True)
-            
             # Create WebSocket connection with proper settings
-            self.ws = websocket.create_connection(
+            ws = websocket.create_connection(
                 self.ws_base_url,
-                timeout=30,  # Increased timeout for initial connection
-                sslopt={"cert_reqs": ssl.CERT_REQUIRED},  # Enable certificate verification
+                timeout=30,
+                sslopt={"cert_reqs": ssl.CERT_REQUIRED},
                 enable_multithread=True,
-                skip_utf8_validation=True  # For performance
+                skip_utf8_validation=True
             )
             
-            self.ws_connected = True
-            self.last_received_time = time.time()
-            self.last_ping_time = time.time()
-            
-            self._running = True
+            with self.state_lock:
+                self.ws = ws
+                self.ws_connected = True
+                self.last_received_time = time.time()
+                self.last_ping_time = time.time()
+                self._running = True
             
             # Start listener thread
-            self.listen_thread = threading.Thread(target=self._listen_forever)
-            self.listen_thread.daemon = True
+            self.listen_thread = threading.Thread(target=self._listen_forever, daemon=True)
             self.listen_thread.start()
             
             # Start ping thread
-            self.ping_thread = threading.Thread(target=self._ping_forever)
-            self.ping_thread.daemon = True
+            self.ping_thread = threading.Thread(target=self._ping_forever, daemon=True)
             self.ping_thread.start()
             
             # Test connection with ping (with retry)
@@ -168,19 +176,19 @@ class BinanceWebSocketAPIClient:
                         break
                     else:
                         self.logger.warning(f"Ping response not successful: {ping_response}")
-                        time.sleep(1)  # Short delay between attempts
+                        time.sleep(1)
                 except Exception as e:
                     self.logger.warning(f"Ping server attempt {attempt} failed: {e}")
                     if attempt < self.max_request_attempts:
-                        time.sleep(2)  # Longer delay before retry
+                        time.sleep(2)
             
             if not ping_success:
                 self.logger.error("All ping attempts failed")
                 self.close()
                 return False
             
-            # Authenticate session if we have an Ed25519 key
-            if self.private_key and self.api_key and isinstance(self.private_key, ed25519.Ed25519PrivateKey):
+            # Authenticate session if we have an API key and Ed25519 key
+            if self.api_key and self.private_key:
                 if not self.authenticate_session():
                     self.logger.warning("Session authentication failed, will sign each request individually")
                 
@@ -189,19 +197,19 @@ class BinanceWebSocketAPIClient:
             
         except Exception as e:
             self.logger.error(f"Failed to connect to WebSocket API: {e}")
-            self.ws_connected = False
+            with self.state_lock:
+                self.ws_connected = False
             return False
     
     def authenticate_session(self) -> bool:
         """
         Authenticate the WebSocket session using Ed25519 key
-        This is more efficient than signing each request individually
         
         Returns:
             bool: True if authentication was successful, False otherwise
         """
-        if not self.api_key or not self.private_key or not isinstance(self.private_key, ed25519.Ed25519PrivateKey):
-            self.logger.warning("Cannot authenticate session: API key or valid Ed25519 private key is missing")
+        if not self.api_key or not self.private_key:
+            self.logger.warning("Cannot authenticate session: API key or Ed25519 private key is missing")
             return False
         
         timestamp = int(time.time() * 1000)
@@ -215,42 +223,55 @@ class BinanceWebSocketAPIClient:
         sorted_params = sorted(params.items())
         query_string = '&'.join([f"{k}={v}" for k, v in sorted_params])
         
-        # Ed25519 signature
         try:
             signature = self.private_key.sign(query_string.encode('utf-8'))
             params["signature"] = base64.b64encode(signature).decode('utf-8')
             
-            # 使用正确的方法名: session.logon 而不是 session.login
             self.logger.debug(f"Auth query string: {query_string}")
             self.logger.debug(f"Auth signature: {params['signature'][:10]}...{params['signature'][-10:]}")
             
             request_id = self._send_request("session.logon", params)
-            response = self._wait_for_response(request_id, timeout=20)  # Increased timeout
+            response = self._wait_for_response(request_id, timeout=20)
             
-            if response and response.get("status") == 200:
-                self.session_authenticated = True
-                self.logger.info("Successfully authenticated WebSocket API session")
-                return True
-            else:
-                error_code = response.get('error', {}).get('code') if response else "No error code"
-                error_msg = response.get('error', {}).get('msg', 'Unknown error') if response else "No response"
-                self.logger.error(f"Error {error_code}: {error_msg}")
-                self.logger.error(f"Failed to authenticate session: {error_msg}")
-                return False
+            with self.state_lock:
+                if response and response.get("status") == 200:
+                    self.session_authenticated = True
+                    self.logger.info("Successfully authenticated WebSocket API session")
+                    return True
+                else:
+                    error_code = response.get('error', {}).get('code') if response else "No error code"
+                    error_msg = response.get('error', {}).get('msg', 'Unknown error') if response else "No response"
+                    self.logger.error(f"Error {error_code}: {error_msg}")
+                    self.logger.error(f"Failed to authenticate session: {error_msg}")
+                    return False
         except Exception as e:
             self.logger.error(f"Error authenticating session: {e}")
             return False
     
     def _listen_forever(self):
         """Background thread that listens for incoming messages"""
-        while self._running and self.ws_connected:
+        while True:
+            with self.state_lock:
+                if not self._running or not self.ws_connected:
+                    break
+            
             try:
                 # Set a specific receive timeout to prevent blocking indefinitely
-                self.ws.settimeout(5.0)
+                with self.state_lock:
+                    if self.ws:
+                        self.ws.settimeout(5.0)
                 
-                # Use recv_data_frame instead of recv to properly handle all frame types
-                op_code, frame = self.ws.recv_data_frame(True)
-                self.last_received_time = time.time()
+                # Use recv_data_frame to properly handle all frame types
+                op_code, frame = None, None
+                with self.state_lock:
+                    if self.ws and self.ws_connected:
+                        op_code, frame = self.ws.recv_data_frame(True)
+                
+                if not frame:
+                    continue
+                
+                with self.state_lock:
+                    self.last_received_time = time.time()
                 
                 # Handle different frame types
                 if op_code == ABNF.OPCODE_TEXT:
@@ -261,54 +282,69 @@ class BinanceWebSocketAPIClient:
                 elif op_code == ABNF.OPCODE_PING:
                     self.logger.debug("Received ping frame, sending pong")
                     try:
-                        self.ws.pong(frame.data)
+                        with self.state_lock:
+                            if self.ws and self.ws_connected:
+                                self.ws.pong(frame.data)
                     except Exception as e:
                         self.logger.error(f"Failed to send pong: {e}")
                 elif op_code == ABNF.OPCODE_PONG:
                     self.logger.debug("Received pong frame")
                 elif op_code == ABNF.OPCODE_CLOSE:
                     self.logger.info("Received close frame")
-                    if not self.is_closed_by_user:
-                        self._handle_disconnect()
+                    with self.state_lock:
+                        if not self.is_closed_by_user:
+                            self._handle_disconnect()
                     break
                 
             except websocket.WebSocketTimeoutException:
                 # This is normal - just a timeout on receive, continue
                 continue
             except WebSocketConnectionClosedException:
-                if not self.is_closed_by_user:
-                    self.logger.error("WebSocket connection closed unexpectedly")
-                    self._handle_disconnect()
+                with self.state_lock:
+                    if not self.is_closed_by_user:
+                        self.logger.error("WebSocket connection closed unexpectedly")
+                        self._handle_disconnect()
                 break
             except Exception as e:
                 self.logger.error(f"Error while listening for messages: {e}")
-                if not self.is_closed_by_user:
-                    self._handle_disconnect()
+                with self.state_lock:
+                    if not self.is_closed_by_user:
+                        self._handle_disconnect()
                 break
     
     def _ping_forever(self):
         """Background thread that sends ping frames"""
-        while self._running and self.ws_connected:
+        while True:
             try:
+                with self.state_lock:
+                    if not self._running or not self.ws_connected:
+                        break
+                    
                 # Wait for ping interval
                 time.sleep(1)
                 
                 # Check if it's time to send a ping
                 current_time = time.time()
-                if current_time - self.last_ping_time >= self.ping_interval:
-                    if self.ws_connected:
-                        try:
-                            # Send a websocket ping frame
-                            self.ws.ping()
-                            self.last_ping_time = current_time
-                            self.logger.debug("Sent ping frame")
-                        except Exception as e:
-                            self.logger.error(f"Error sending ping frame: {e}")
-                            
+                with self.state_lock:
+                    should_ping = (current_time - self.last_ping_time >= self.ping_interval)
+                    connection_timeout = (current_time - self.last_received_time > 60)
+                
+                # Send ping if needed
+                if should_ping:
+                    try:
+                        with self.state_lock:
+                            if self.ws and self.ws_connected:
+                                self.ws.ping()
+                                self.last_ping_time = current_time
+                                self.logger.debug("Sent ping frame")
+                    except Exception as e:
+                        self.logger.error(f"Error sending ping frame: {e}")
+                        
                 # Check for connection timeout
-                if current_time - self.last_received_time > 60:  # 60 seconds without any response
+                if connection_timeout:
                     self.logger.warning("No messages received for 60 seconds, reconnecting...")
-                    self._handle_disconnect()
+                    with self.state_lock:
+                        self._handle_disconnect()
                     break
                     
             except Exception as e:
@@ -317,55 +353,64 @@ class BinanceWebSocketAPIClient:
     def _handle_disconnect(self):
         """Handle unexpected disconnections"""
         self.logger.warning("Connection lost, cleaning up...")
-        self.ws_connected = False
-        self.session_authenticated = False
         
-        if self.ws:
-            try:
-                self.ws.close()
-            except:
-                pass
-            self.ws = None
+        with self.state_lock:
+            self.ws_connected = False
+            self.session_authenticated = False
+            
+            if self.ws:
+                try:
+                    self.ws.close()
+                except:
+                    pass
+                self.ws = None
         
         # Auto-reconnect if enabled
-        if self.auto_reconnect and not self.is_closed_by_user:
+        should_reconnect = False
+        with self.state_lock:
+            should_reconnect = self.auto_reconnect and not self.is_closed_by_user and self._running
+            
+        if should_reconnect:
             self.logger.info("Attempting to reconnect...")
             
             # Exponential backoff for reconnection attempts
             attempts = 0
-            max_attempts = 5
-            while attempts < max_attempts and not self.ws_connected and self._running:
-                wait_time = min(60, (2 ** attempts))
-                self.logger.info(f"Reconnecting in {wait_time} seconds (attempt {attempts+1}/{max_attempts})...")
+            while attempts < self.max_reconnect_attempts:
+                wait_time = min(60, (self.exponential_backoff_base ** attempts))
+                self.logger.info(f"Reconnecting in {wait_time} seconds (attempt {attempts+1}/{self.max_reconnect_attempts})...")
                 time.sleep(wait_time)
                 
                 if self.connect():
                     self.logger.info("Reconnected successfully")
-                    break
+                    return
                 
                 attempts += 1
                 
-            if not self.ws_connected:
-                self.logger.error(f"Failed to reconnect after {max_attempts} attempts")
+            self.logger.error(f"Failed to reconnect after {self.max_reconnect_attempts} attempts")
     
     def close(self):
         """Close the WebSocket connection gracefully"""
         self.logger.info("Closing WebSocket connection...")
-        self.is_closed_by_user = True
-        self._running = False
+        
+        with self.state_lock:
+            self.is_closed_by_user = True
+            self._running = False
         
         # Clear all pending requests
         with self.lock:
             self.request_callbacks = {}
         
-        if self.ws:
-            try:
-                self.ws.close()
-            except:
-                pass
-        
-        self.ws_connected = False
-        self.session_authenticated = False
+        with self.state_lock:
+            if self.ws:
+                try:
+                    self.ws.close()
+                except:
+                    pass
+                self.ws = None
+            
+            self.ws_connected = False
+            self.session_authenticated = False
+            
         self.logger.info("WebSocket connection closed")
     
     def _generate_request_id(self) -> str:
@@ -411,15 +456,18 @@ class BinanceWebSocketAPIClient:
             
             # Handle responses to requests with thread safety
             if request_id:
+                callback = None
                 with self.lock:
                     if request_id in self.request_callbacks:
                         callback = self.request_callbacks.pop(request_id)
-                        if callback:
-                            callback(data)
+                        
+                if callback:
+                    callback(data)
+                    
                 self.response_queue.put(data)
-            # Handle event notifications (e.g. account updates)
+                
+            # Handle event notifications
             elif 'event' in data:
-                # Process event data
                 self.logger.debug(f"Received event: {data['event']}")
             else:
                 self.logger.debug(f"Unhandled message: {message[:200]}...")
@@ -449,7 +497,11 @@ class BinanceWebSocketAPIClient:
         Raises:
             ConnectionError: If not connected to WebSocket API
         """
-        if not self.ws_connected:
+        is_connected = False
+        with self.state_lock:
+            is_connected = self.ws_connected
+            
+        if not is_connected:
             if not self.connect():
                 raise ConnectionError("Failed to connect to WebSocket API")
         
@@ -470,10 +522,13 @@ class BinanceWebSocketAPIClient:
         # Send request
         request_json = json.dumps(request)
         self.logger.debug(f"Sending request: {request_json[:200]}...")
+        
+        send_success = False
         try:
-            with self.lock:
+            with self.state_lock:
                 if self.ws and self.ws_connected:
                     self.ws.send(request_json)
+                    send_success = True
                 else:
                     raise ConnectionError("WebSocket is not connected")
         except Exception as e:
@@ -483,6 +538,12 @@ class BinanceWebSocketAPIClient:
                     self.request_callbacks.pop(request_id)
             raise
         
+        if not send_success:
+            with self.lock:
+                if request_id in self.request_callbacks:
+                    self.request_callbacks.pop(request_id)
+            raise ConnectionError("Failed to send message")
+            
         return request_id
     
     def _send_signed_request(
@@ -492,7 +553,7 @@ class BinanceWebSocketAPIClient:
         callback: Optional[Callable] = None
     ) -> str:
         """
-        Send a signed request to the WebSocket API
+        Send a signed request to the WebSocket API using Ed25519
         
         If the session is authenticated, only send timestamp
         Otherwise, send full apiKey and signature
@@ -511,24 +572,24 @@ class BinanceWebSocketAPIClient:
         # Add timestamp for signature
         params['timestamp'] = int(time.time() * 1000)
         
+        # Check if session is authenticated
+        session_auth = False
+        with self.state_lock:
+            session_auth = self.session_authenticated
+            
         # If session is authenticated, we don't need to send apiKey and signature
-        if self.session_authenticated:
+        if session_auth:
             return self._send_request(method, params, callback)
         
         # Otherwise, sign the request
+        if not self.api_key or not self.private_key:
+            raise ValueError("API key and Ed25519 private key are required for signed requests")
+            
         params['apiKey'] = self.api_key
         
         try:
-            # Import needed for signature generation - import here to avoid circular imports
-            try:
-                from binance.lib.utils import websocket_api_signature
-                
-                # Use the official Binance signature method if available
-                params = websocket_api_signature(self.api_key, self.api_secret, params)
-            except ImportError:
-                # Fallback to our custom signature method
-                params['signature'] = self._generate_signature(params)
-            
+            # Sign the request
+            params['signature'] = self._generate_signature(params)
             return self._send_request(method, params, callback)
         except Exception as e:
             self.logger.error(f"Error signing request: {e}")
@@ -536,48 +597,33 @@ class BinanceWebSocketAPIClient:
     
     def _generate_signature(self, params: Dict) -> str:
         """
-        Generate signature for API request
+        Generate Ed25519 signature for API request
         
         Args:
             params: Request parameters
             
         Returns:
-            str: Signature for the request
+            str: Base64 encoded Ed25519 signature
             
         Raises:
-            ValueError: If no authentication method is available
+            ValueError: If Ed25519 private key is not available
         """
+        if not self.private_key:
+            raise ValueError("Ed25519 private key is required for signing")
+            
         # Sort parameters by key name
         sorted_params = sorted(params.items())
         
         # Convert to query string format
         query_string = '&'.join([f"{k}={v}" for k, v in sorted_params if k != 'signature'])
         
-        # Sign with Ed25519 key (recommended for WebSocket API)
-        if self.private_key and isinstance(self.private_key, ed25519.Ed25519PrivateKey):
-            try:
-                signature = self.private_key.sign(query_string.encode('utf-8'))
-                return base64.b64encode(signature).decode('utf-8')
-            except Exception as e:
-                self.logger.error(f"Ed25519 signature failed: {e}")
-                # Try HMAC fallback if API secret is available
-                if self.api_secret:
-                    self.logger.info("Falling back to HMAC authentication")
-                else:
-                    raise
-        
-        # HMAC signature - less preferred for WebSocket API
-        if self.api_secret:
-            import hmac
-            from hashlib import sha256
-            signature = hmac.new(
-                self.api_secret.encode('utf-8'),
-                query_string.encode('utf-8'),
-                sha256
-            ).hexdigest()
-            return signature
-        
-        raise ValueError("No authentication method available")
+        # Sign with Ed25519 key
+        try:
+            signature = self.private_key.sign(query_string.encode('utf-8'))
+            return base64.b64encode(signature).decode('utf-8')
+        except Exception as e:
+            self.logger.error(f"Ed25519 signature failed: {e}")
+            raise
     
     def _wait_for_response(self, request_id: str, timeout: int = None) -> Dict:
         """
@@ -631,7 +677,11 @@ class BinanceWebSocketAPIClient:
             # Re-queue any responses we set aside
             for r in responses_to_requeue:
                 self.response_queue.put(r)
-            raise
+            
+            if isinstance(e, TimeoutError):
+                raise
+            else:
+                raise RuntimeError(f"Error waiting for response: {e}")
     
     # ===== Basic API Methods =====
     
@@ -715,7 +765,6 @@ class BinanceWebSocketAPIClient:
         request_id = self._send_request("userDataStream.stop", params)
         return self._wait_for_response(request_id)
 
-    # Helper method to verify private key
     def verify_private_key(self):
         """
         Verify that the loaded private key is valid and of the correct type
@@ -757,15 +806,14 @@ class BinanceWSClient:
     but uses WebSocket API under the hood.
     """
     
-    def __init__(self, api_key=None, api_secret=None, private_key_path=None, 
+    def __init__(self, api_key=None, private_key_path=None, 
                  private_key_pass=None, use_testnet=False):
         self.client = BinanceWebSocketAPIClient(
             api_key=api_key,
-            api_secret=api_secret,
             private_key_path=private_key_path,
             private_key_pass=private_key_pass,
             use_testnet=use_testnet,
-            timeout=30  # Increased timeout
+            timeout=30
         )
         self.logger = logging.getLogger(__name__)
     
