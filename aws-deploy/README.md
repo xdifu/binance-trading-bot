@@ -1,135 +1,132 @@
-# ACTUSDT 网格交易系统 AWS 部署文档
+# grid-service
 
-本文档提供在 AWS Ubuntu Server 上部署和维护 ACTUSDT 网格交易系统的必要步骤。
+> Deployment and service management tools for ACTUSDT grid trading bot on AWS servers
 
-## 1. 文件概述
+This folder contains the minimal set of scripts and configuration files needed to deploy and maintain the grid trading bot as a resilient service on low-resource AWS instances like t4g.nano, t4g.micro or t2.micro.
 
-这个部署框架包含5个关键文件:
+## Contents
 
-- **grid_bot.service**: systemd服务配置，确保交易机器人开机自启动和崩溃后自动重启
-- **watchdog.sh**: 进程监控脚本，检查机器人是否正常运行
-- **network_monitor.sh**: 网络连接监控脚本，检测与Binance API的连接状态
-- **cleanup.sh**: 系统资源管理脚本，防止日志过大占满磁盘
-- **setup.sh**: 一键式部署脚本，自动配置整个环境
+- `grid_bot.service` - Systemd service configuration with resource limits
+- `watchdog.sh` - Process monitoring and automatic recovery script
+- `network_monitor.sh` - Network connectivity monitoring for Binance API
+- `cleanup.sh` - Log rotation and disk space management
+- `setup.sh` - One-click deployment script
 
-## 2. 部署步骤
+## Installation
 
-### 2.1 在AWS上创建实例
+1. Copy this folder to your AWS instance:
 
-1. 登录AWS控制台，启动EC2实例
-   - 推荐配置: t4g.micro (2GB RAM, ARM架构)或t2.micro
-   - 操作系统: Ubuntu Server 22.04 LTS
-   - 存储: 8GB SSD
-   - 安全组设置: 仅开放SSH端口(22)
+```bash
+# From your local machine
+scp -r -i your-key.pem grid-service ubuntu@your-aws-ip:~/
+```
 
-2. 连接到实例
-   ```bash
-   ssh -i your-key.pem ubuntu@your-instance-ip
-   ```
+2. SSH into your AWS instance:
 
-### 2.2 设置交易机器人
+```bash
+ssh -i your-key.pem ubuntu@your-aws-ip
+```
 
-1. 安装Git和克隆代码库
-   ```bash
-   sudo apt update
-   sudo apt install -y git
-   git clone https://your-repository-url.git ~/Binance
-   ```
+3. Run the setup script:
 
-2. 准备部署脚本
-   ```bash
-   mkdir -p ~/grid-service
-   cp ~/Binance/grid_bot.service ~/grid-service/
-   cp ~/Binance/watchdog.sh ~/grid-service/
-   cp ~/Binance/network_monitor.sh ~/grid-service/
-   cp ~/Binance/cleanup.sh ~/grid-service/
-   cp ~/Binance/setup.sh ~/grid-service/
-   
-   chmod +x ~/grid-service/*.sh
-   ```
+```bash
+cd ~/grid-service
+chmod +x *.sh
+./setup.sh
+```
 
-3. 运行安装脚本
-   ```bash
-   cd ~/grid-service
-   ./setup.sh
-   ```
+The setup script will:
+- Install required dependencies
+- Configure the systemd service
+- Set up cron jobs for monitoring
+- Start the trading bot service
 
-## 3. 监控与维护
+## Monitoring & Maintenance
 
-### 3.1 检查服务状态
+### Check Service Status
+
 ```bash
 sudo systemctl status grid_bot.service
 ```
 
-### 3.2 查看日志
+### View Live Logs
+
 ```bash
-# 查看服务日志
+# Service logs
 sudo journalctl -u grid_bot.service -f
 
-# 查看机器人应用日志
+# Application logs
 tail -f ~/Binance/grid_trading_bot/grid_bot.log
 
-# 查看监控脚本日志
+# Monitoring logs
 tail -f ~/Binance/watchdog.log
 tail -f ~/Binance/network.log
 ```
 
-### 3.3 手动重启服务
+### Restart Service
+
 ```bash
 sudo systemctl restart grid_bot.service
 ```
 
-## 4. 常见问题解决
+### Update Configuration
 
-### 4.1 服务无法启动
-检查配置文件和API密钥是否正确:
+After changing trading parameters in config.py:
+
+```bash
+sudo systemctl restart grid_bot.service
+```
+
+## System Requirements
+
+- **OS**: Ubuntu Server 22.04 LTS or newer
+- **CPU**: ARM64 (t4g series) or x86 (t2/t3 series)
+- **RAM**: Minimum 512MB, recommended 1GB
+- **Disk**: 8GB minimum (mostly for OS)
+- **Network**: Stable internet connection
+
+## Troubleshooting
+
+### Bot Not Starting
+
+Check logs for errors:
+```bash
+sudo journalctl -u grid_bot.service -n 100
+```
+
+Verify API keys:
 ```bash
 grep -r "API_KEY" ~/Binance/grid_trading_bot/.env
 ls -la ~/Binance/grid_trading_bot/key/
 ```
 
-### 4.2 内存使用过高
-调整grid_bot.service中的内存限制:
+### Out of Memory Issues
+
+Adjust memory limits in the service file:
 ```bash
 sudo nano /etc/systemd/system/grid_bot.service
-# 修改 MemoryMax=900M 为更低的值，如 MemoryMax=700M
+# Modify MemoryHigh and MemoryMax values
 sudo systemctl daemon-reload
 sudo systemctl restart grid_bot.service
 ```
 
-### 4.3 更新机器人配置
-如果需要更新交易参数:
-```bash
-# 编辑配置文件
-nano ~/Binance/grid_trading_bot/config.py
+### Network Connectivity Problems
 
-# 重启服务
-sudo systemctl restart grid_bot.service
-```
-
-### 4.4 失去网络连接后恢复
-系统已配置自动恢复，但如需手动操作:
+Force a network connectivity check:
 ```bash
-# 运行网络监控脚本
 ~/grid-service/network_monitor.sh
-
-# 重启网络服务
-sudo systemctl restart systemd-networkd
 ```
-
-## 5. 安全提示
-
-- 定期更新系统: `sudo apt update && sudo apt upgrade -y`
-- 监控SSH登录尝试: `sudo lastb`
-- 保持API密钥安全: 确保密钥文件权限设置正确 `chmod 600 ~/Binance/grid_trading_bot/key/*`
-
-## 6. 系统资源要求
-
-- **CPU**: 低负载，t4g.nano/micro足够应对
-- **内存**: 至少512MB，推荐1GB以上
-- **磁盘**: 至少8GB，主要用于系统和日志
-- **网络**: 稳定连接，带宽要求低
 
 ---
 
-最后更新日期: 2025-03-23
+## Performance Notes
+
+- The monitoring scripts are designed to be extremely lightweight
+- Resource usage is carefully limited to ensure stability on nano/micro instances
+- Log rotation prevents disk space issues during long-term operation
+
+## Security
+
+- Private keys are protected with proper file permissions
+- The service runs under a non-root user
+- Only essential ports are used (no incoming connections required)
