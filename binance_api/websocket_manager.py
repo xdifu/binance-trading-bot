@@ -76,6 +76,11 @@ class CombinedStreamMessage(Struct):
     stream: str     # Stream name
     data: object    # Data payload
 
+class UserDataMessage(Struct):
+    e: str          # Event type (outboundAccountPosition, executionReport, etc.)
+    E: int          # Event time
+    # All other fields are dynamic and will be passed through
+
 class MarketDataWebsocketManager:
     """
     WebSocket manager for Binance market data streams
@@ -104,6 +109,19 @@ class MarketDataWebsocketManager:
         self.listen_key = None
         self.max_reconnect_attempts = 10
         self.current_reconnect_attempt = 0
+        
+        # Initialize message handlers mapping
+        self.message_handlers = {
+            'kline': self._handle_kline_message,
+            'trade': self._handle_trade_message,
+            'aggTrade': self._handle_aggtrade_message,
+            'depthUpdate': self._handle_depth_message,
+            'outboundAccountPosition': self._handle_account_update,
+            'executionReport': self._handle_order_update,
+            'listStatus': self._handle_oco_update,
+            'outboundAccountInfo': self._handle_account_update,
+            'balanceUpdate': self._handle_balance_update
+        }
     
     def _message_handler(self, _, message):
         """
@@ -113,85 +131,179 @@ class MarketDataWebsocketManager:
             _: WebSocket client instance (unused)
             message: The received message
         """
-        try:
-            # Process message based on format and type
-            if isinstance(message, str):
-                # First try generic parsing to determine message type
-                try:
-                    generic_msg = msgspec_json.decode(message)
-                    
-                    # Handle combined stream format
-                    if 'stream' in generic_msg and 'data' in generic_msg:
-                        # Process the combined stream format
-                        combined_msg = CombinedStreamMessage(
-                            stream=generic_msg['stream'], 
-                            data=generic_msg['data']
-                        )
-                        self.on_message_callback(combined_msg)
-                        
-                        # Also process the inner data with proper schema
-                        inner_data = generic_msg['data']
-                        self._process_market_data_message(inner_data)
-                        return
-                    
-                    # Try to determine message type from structure
-                    self._process_market_data_message(generic_msg)
-                    
-                except Exception as decode_error:
-                    self.logger.debug(f"Schema parsing failed: {decode_error}, using generic parsing")
-                    # Fallback to completely generic parsing
-                    parsed = msgspec_json.decode(message)
-                    self.on_message_callback(parsed)
-            else:
-                # Already parsed message or non-string input
-                self.on_message_callback(message)
-                
-        except Exception as e:
-            self.logger.error(f"Error handling message: {e}")
-            if isinstance(message, str) and len(message) < 1000:  # Only log if message is reasonably sized
-                self.logger.debug(f"Raw message that caused error: {message}")
+        if not message:
+            return
+            
+        parsed_message = self._parse_message_safely(message)
+        if parsed_message:
+            self._route_message_to_handler(parsed_message)
     
-    def _process_market_data_message(self, msg_data):
+    def _parse_message_safely(self, message):
         """
-        Process market data messages using appropriate schema
+        Safely parse a message from the WebSocket
         
         Args:
-            msg_data: The message data to process
+            message: Raw message to parse
+            
+        Returns:
+            Parsed message object or None if parsing failed
         """
         try:
-            # If it's an event type message
-            if isinstance(msg_data, dict) and 'e' in msg_data:
-                event_type = msg_data['e']
+            # Handle string messages
+            if isinstance(message, str):
+                # Parse as generic JSON first
+                generic_msg = msgspec_json.decode(message)
                 
-                # Use specific schema based on event type
-                if event_type == 'kline':
-                    parsed = KlineMessage(**msg_data)
-                elif event_type == 'trade':
-                    parsed = TradeMessage(**msg_data)
-                elif event_type == 'aggTrade':
-                    parsed = AggTradeMessage(**msg_data)
-                elif event_type == 'depthUpdate':
-                    parsed = DepthUpdateMessage(**msg_data)
+                # Handle combined stream format
+                if isinstance(generic_msg, dict) and 'stream' in generic_msg and 'data' in generic_msg:
+                    # Process the combined stream format
+                    combined_msg = CombinedStreamMessage(
+                        stream=generic_msg['stream'], 
+                        data=generic_msg['data']
+                    )
+                    # Return a tuple indicating this is a combined message
+                    return ('combined', combined_msg)
+                    
+                return generic_msg
+            else:
+                # Already parsed message or non-string input
+                return message
+                
+        except Exception as e:
+            self.logger.debug(f"Message parsing failed: {e}")
+            if isinstance(message, str) and len(message) < 1000:
+                self.logger.debug(f"Raw message: {message}")
+            return None
+    
+    def _route_message_to_handler(self, parsed_message):
+        """
+        Route parsed message to appropriate handler based on message type
+        
+        Args:
+            parsed_message: Parsed message object
+        """
+        try:
+            # Handle combined stream messages
+            if isinstance(parsed_message, tuple) and parsed_message[0] == 'combined':
+                combined_msg = parsed_message[1]
+                # Pass the combined message to callback
+                self.on_message_callback(combined_msg)
+                
+                # Also process the inner data
+                inner_data = combined_msg.data
+                self._route_message_to_handler(inner_data)
+                return
+                
+            # Handle regular messages with event types
+            if isinstance(parsed_message, dict) and 'e' in parsed_message:
+                event_type = parsed_message['e']
+                
+                # Use mapped handler for the event type
+                handler = self.message_handlers.get(event_type)
+                if handler:
+                    handler(parsed_message)
                 else:
-                    # Unknown event type, use as is
-                    parsed = msg_data
+                    # Unknown event type, standardize and pass through
+                    self.on_message_callback(self._standardize_message(parsed_message))
+                return
                 
-                self.on_message_callback(parsed)
-                return
-            
             # Handle bookTicker format which doesn't have 'e' field
-            if isinstance(msg_data, dict) and all(key in msg_data for key in ['s', 'b', 'B', 'a', 'A']):
-                parsed = BookTickerMessage(**msg_data)
-                self.on_message_callback(parsed)
+            if isinstance(parsed_message, dict) and all(key in parsed_message for key in ['s', 'b', 'B', 'a', 'A']):
+                self._handle_bookticker_message(parsed_message)
                 return
-            
-            # Default: pass through the message as is
-            self.on_message_callback(msg_data)
+                
+            # Default: pass the message as is
+            self.on_message_callback(parsed_message)
             
         except Exception as e:
-            self.logger.error(f"Error processing market data message: {e}")
-            # Pass the original message to ensure callback receives something
-            self.on_message_callback(msg_data)
+            self.logger.error(f"Error routing message: {e}")
+            # Still try to deliver the message to make sure client receives something
+            try:
+                self.on_message_callback(parsed_message)
+            except:
+                pass
+    
+    def _standardize_message(self, message_dict):
+        """
+        Standardize message format for consistent handling at higher levels
+        
+        Args:
+            message_dict: Raw dictionary message
+            
+        Returns:
+            Standardized message object with consistent attribute access
+        """
+        # Convert all dictionary keys to attributes for consistent access
+        # This helps main.py to use consistent dot notation regardless of message source
+        class StandardizedMessage:
+            def __init__(self, data):
+                for key, value in data.items():
+                    # Handle nested dictionaries by recursively standardizing
+                    if isinstance(value, dict):
+                        value = StandardizedMessage(value)
+                    setattr(self, key, value)
+        
+        return StandardizedMessage(message_dict)
+    
+    # Individual message type handlers
+    
+    def _handle_kline_message(self, message):
+        """Handle kline/candlestick messages"""
+        try:
+            # Parse with schema for validation and standardization
+            parsed = KlineMessage(**message)
+            self.on_message_callback(parsed)
+        except Exception:
+            # Fallback to standardized message
+            self.on_message_callback(self._standardize_message(message))
+    
+    def _handle_trade_message(self, message):
+        """Handle trade messages"""
+        try:
+            parsed = TradeMessage(**message)
+            self.on_message_callback(parsed)
+        except Exception:
+            self.on_message_callback(self._standardize_message(message))
+    
+    def _handle_aggtrade_message(self, message):
+        """Handle aggregate trade messages"""
+        try:
+            parsed = AggTradeMessage(**message)
+            self.on_message_callback(parsed)
+        except Exception:
+            self.on_message_callback(self._standardize_message(message))
+    
+    def _handle_depth_message(self, message):
+        """Handle order book depth update messages"""
+        try:
+            parsed = DepthUpdateMessage(**message)
+            self.on_message_callback(parsed)
+        except Exception:
+            self.on_message_callback(self._standardize_message(message))
+    
+    def _handle_bookticker_message(self, message):
+        """Handle book ticker messages"""
+        try:
+            parsed = BookTickerMessage(**message)
+            self.on_message_callback(parsed)
+        except Exception:
+            self.on_message_callback(self._standardize_message(message))
+    
+    def _handle_account_update(self, message):
+        """Handle account update messages"""
+        self.on_message_callback(self._standardize_message(message))
+    
+    def _handle_order_update(self, message):
+        """Handle order update messages"""
+        self.on_message_callback(self._standardize_message(message))
+    
+    def _handle_oco_update(self, message):
+        """Handle OCO order update messages"""
+        self.on_message_callback(self._standardize_message(message))
+    
+    def _handle_balance_update(self, message):
+        """Handle balance update messages"""
+        self.on_message_callback(self._standardize_message(message))
     
     def _error_handler(self, _, error):
         """
