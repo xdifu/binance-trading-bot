@@ -38,7 +38,8 @@ class GridTradingBot:
         self.is_running = False
         self.listen_key = None
         self.keep_alive_thread = None
-        
+        self.logger = logging.getLogger(__name__)
+
         # Initialize submodules
         self._init_modules()
     
@@ -77,45 +78,53 @@ class GridTradingBot:
     def _handle_websocket_message(self, message):
         """Process WebSocket messages"""
         try:
-            # Handle different types of messages with msgspec structured objects
-            
-            # Handle kline events
-            if hasattr(message, 'e') and message.e == 'kline':
-                symbol = message.s
-                # Access close price through the kline data structure
-                price = float(message.k.c)
-                
-                if symbol == config.SYMBOL:
-                    # Check risk management, only update trailing logic
-                    if self.risk_manager and self.risk_manager.is_active:
-                        self.risk_manager.check_price(price)
-            
-            # Handle dict messages (fallback for compatibility)
-            elif isinstance(message, dict):
-                # First check for book ticker format which has different structure
-                if 's' in message and 'b' in message and 'a' in message:
-                    # Process book ticker data if needed
-                    pass
-                elif 'e' in message:
-                    if message['e'] == 'kline' and 'k' in message and 'c' in message.get('k', {}):
-                        symbol = message['s']
-                        price = float(message['k']['c'])
-                        
-                        if symbol == config.SYMBOL:
-                            if self.risk_manager and self.risk_manager.is_active:
-                                self.risk_manager.check_price(price)
+            # First, check if it's a dictionary - handle structured data
+            if isinstance(message, dict):
+                # Handle kline events specifically
+                if 'e' in message and message['e'] == 'kline' and 'k' in message and 'c' in message.get('k', {}):
+                    symbol = message['s']
+                    price = float(message['k']['c'])
                     
-                    elif message['e'] == 'executionReport':
-                        self.grid_trader.handle_order_update(message)
-                        
-                    elif message['e'] == 'listStatus':
-                        self._handle_oco_update(message)
-        
+                    if symbol == config.SYMBOL:
+                        if self.risk_manager and self.risk_manager.is_active:
+                            self.risk_manager.check_price(price)
+                
+                # Handle book ticker events
+                elif 's' in message and 'b' in message and 'a' in message:
+                    # Book ticker update format (has symbol 's', best bid 'b' and best ask 'a')
+                    symbol = message['s']
+                    if symbol == config.SYMBOL:
+                        # Process book ticker data if needed
+                        pass
+                
+                # Handle execution reports for order updates
+                elif 'e' in message and message['e'] == 'executionReport':
+                    self.grid_trader.handle_order_update(message)
+                    
+                # Handle order list status updates (OCO orders)
+                elif 'e' in message and message['e'] == 'listStatus':
+                    self._handle_oco_update(message)
+                    
+                # Debug otherwise unhandled message types
+                else:
+                    # For troubleshooting, log message type indicators
+                    event_type = message.get('e', 'unknown')
+                    if 'e' in message:
+                        self.logger.debug(f"Received message with event type: {event_type}")
+                    else:
+                        # Only show a subset of the message to avoid log spam
+                        keys = list(message.keys())[:5]
+                        self.logger.debug(f"Received unhandled message with keys: {keys}...")
+            
+            # Handle non-dictionary messages if any
+            elif isinstance(message, str):
+                self.logger.debug(f"Received string message: {message[:100]}...")
+            
         except Exception as e:
-            logger.error(f"Failed to process WebSocket message: {e}")
+            self.logger.error(f"Failed to process WebSocket message: {e}")
             # Log more details about the message structure for debugging
             if isinstance(message, dict):
-                logger.debug(f"Message keys: {list(message.keys())}")
+                self.logger.debug(f"Message keys: {list(message.keys())}")
         
     def _handle_oco_update(self, message):
         """Handle OCO order updates"""
