@@ -22,8 +22,8 @@ RECALCULATION_PERIOD = 7  # 重新计算网格的周期（天）
 ATR_PERIOD = 14  # ATR计算周期
 
 # 风险管理设置
-TRAILING_STOP_LOSS_PERCENT = 5  # 追踪止损百分比
-TRAILING_TAKE_PROFIT_PERCENT = 2  # 追踪止盈百分比
+TRAILING_STOP_LOSS_PERCENT = 4.5  # 追踪止损百分比
+TRAILING_TAKE_PROFIT_PERCENT = 1.5  # 追踪止盈百分比
 
 # Telegram设置
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
