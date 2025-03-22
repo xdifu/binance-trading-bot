@@ -19,6 +19,9 @@ class GridTrader:
         self.recalculation_period = config.RECALCULATION_PERIOD
         self.atr_period = config.ATR_PERIOD
         
+        # New: Store previous ATR value for volatility change detection
+        self.last_atr_value = None
+        
         # Initialize logger (moved to top)
         self.logger = logging.getLogger(__name__)
         
@@ -122,6 +125,9 @@ class GridTrader:
         """Set up grid"""
         # Calculate grid levels
         self.grid = self._calculate_grid_levels()
+        
+        # New: Store current ATR value for future volatility comparison
+        self.last_atr_value = self._get_current_atr()
         
         # Place grid orders
         for level in self.grid:
@@ -315,10 +321,35 @@ class GridTrader:
         if not self.is_running or not self.last_recalculation:
             return
         
-        days_since_last = (datetime.now() - self.last_recalculation).days
+        recalculate = False
+        recalculation_reason = ""
         
+        # New: Check for significant volatility changes
+        current_atr = self._get_current_atr()
+        
+        # Check if we have valid ATR values and enough time has passed for cooldown
+        if self.last_atr_value and current_atr:
+            # Ensure at least 24 hour cooldown period to avoid frequent recalculations
+            hours_since_last = (datetime.now() - self.last_recalculation).total_seconds() / 3600
+            if hours_since_last >= 24:
+                # Calculate ATR change ratio
+                atr_change_ratio = abs(current_atr - self.last_atr_value) / self.last_atr_value
+                
+                # If volatility changed by more than 30%, trigger recalculation
+                if atr_change_ratio > 0.3:  # 30% threshold
+                    recalculate = True
+                    recalculation_reason = f"Significant volatility change detected: {atr_change_ratio:.2%}"
+                    self.logger.info(f"Significant volatility change detected: {atr_change_ratio:.2%}, triggering grid recalculation")
+        
+        # Original logic: Check time interval
+        days_since_last = (datetime.now() - self.last_recalculation).days
         if days_since_last >= self.recalculation_period:
-            self.logger.info("Starting grid recalculation...")
+            recalculate = True
+            recalculation_reason = f"Regular recalculation period reached ({self.recalculation_period} days)"
+            
+        # If either condition is met, recalculate grid
+        if recalculate:
+            self.logger.info(f"Starting grid recalculation. Reason: {recalculation_reason}")
             
             # Update current market price
             self.current_market_price = self.binance_client.get_symbol_price(self.symbol)
@@ -329,9 +360,10 @@ class GridTrader:
             # Recalculate and set grid
             self._setup_grid()
             
+            # Reset recalculation timestamp
             self.last_recalculation = datetime.now()
             
-            message = f"Grid recalculated!\nCurrent price: {self.current_market_price}\nGrid range: {len(self.grid)} levels"
+            message = f"Grid recalculated! Reason: {recalculation_reason}\nCurrent price: {self.current_market_price}\nGrid range: {len(self.grid)} levels"
             self.logger.info(message)
             if self.telegram_bot:
                 self.telegram_bot.send_message(message)
