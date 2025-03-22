@@ -14,10 +14,10 @@ USE_TESTNET = os.getenv("USE_TESTNET", "false").lower() == "true"
 
 # 交易设置
 SYMBOL = "BTCUSDT"
-GRID_LEVELS = 4  # 网格数量
+GRID_LEVELS = 8  # 网格数量
 GRID_SPACING = 0.5  # 网格间距（百分比）
-CAPITAL_PER_LEVEL = 10  # 每个网格的资金（USDT）
-GRID_RANGE_PERCENT = 3  # 网格范围（百分比）
+CAPITAL_PER_LEVEL = 5  # 每个网格的资金（USDT）
+GRID_RANGE_PERCENT = 4  # 网格范围（百分比）
 RECALCULATION_PERIOD = 7  # 重新计算网格的周期（天）
 ATR_PERIOD = 14  # ATR计算周期
 
