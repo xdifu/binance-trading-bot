@@ -8,9 +8,15 @@ API_KEY = os.getenv("API_KEY", "")
 PRIVATE_KEY = os.getenv("PRIVATE_KEY", "")
 PRIVATE_KEY_PASS = os.getenv("PRIVATE_KEY_PASS")
 
-# 其他配置
+# API配置
 BASE_URL = "https://api1.binance.com"
 USE_TESTNET = os.getenv("USE_TESTNET", "false").lower() == "true"
+
+# WebSocket API配置
+WS_PING_INTERVAL = int(os.getenv("WS_PING_INTERVAL", "20"))  # WebSocket ping间隔（秒）
+WS_TIMEOUT = int(os.getenv("WS_TIMEOUT", "10"))  # WebSocket请求超时（秒）
+WS_AUTO_RECONNECT = os.getenv("WS_AUTO_RECONNECT", "true").lower() == "true"  # 自动重连
+PREFER_WEBSOCKET = os.getenv("PREFER_WEBSOCKET", "true").lower() == "true"  # 优先使用WebSocket API
 
 # 交易设置
 SYMBOL = "ACTUSDT"
