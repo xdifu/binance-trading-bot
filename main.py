@@ -10,7 +10,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import custom modules
 from binance_api.client import BinanceClient
-from binance_api.websocket_manager import WebsocketManager
+from binance_api.websocket_manager import MarketDataWebsocketManager  # Updated import
 from core.grid_trader import GridTrader
 from core.risk_manager import RiskManager
 from tg_bot.bot import TelegramBot
@@ -36,6 +36,8 @@ class GridTradingBot:
         self.risk_manager = None
         self.ws_manager = None
         self.is_running = False
+        self.listen_key = None
+        self.keep_alive_thread = None
         
         # Initialize submodules
         self._init_modules()
@@ -75,53 +77,58 @@ class GridTradingBot:
     def _handle_websocket_message(self, message):
         """Process WebSocket messages"""
         try:
-            # Handle different types of messages
-            event_type = getattr(message, 'e', None)
+            # Handle different types of messages with msgspec structured objects
             
-            if event_type:
-                if event_type == 'kline':
-                    # Kline update
-                    symbol = message.s
-                    # Access close price through the kline data structure
-                    price = float(message.k.c)
-                    
-                    if symbol == config.SYMBOL:
-                        # Check risk management, only update trailing logic
-                        if self.risk_manager and self.risk_manager.is_active:
-                            self.risk_manager.check_price(price)
+            # Handle kline events
+            if hasattr(message, 'e') and message.e == 'kline':
+                symbol = message.s
+                # Access close price through the kline data structure
+                price = float(message.k.c)
                 
-                elif event_type == 'executionReport':
-                    # Order execution report
-                    # Convert schema object to dict for compatibility
-                    order_data = {
-                        'X': message.X,  # Order status
-                        'i': message.i,  # Order ID
-                        's': message.s,  # Symbol
-                        'S': message.S,  # Side
-                        'p': message.p,  # Price
-                        'q': message.q,  # Quantity
-                    }
-                    self.grid_trader.handle_order_update(order_data)
-                    
-                elif event_type == 'listStatus':
-                    # OCO order status update
-                    list_data = {
-                        'L': message.L,  # List order status
-                        's': message.s,  # Symbol
-                        'i': message.g,  # Order list ID
-                        'l': message.l,  # List status type
-                    }
-                    self._handle_oco_update(list_data)
+                if symbol == config.SYMBOL:
+                    # Check risk management, only update trailing logic
+                    if self.risk_manager and self.risk_manager.is_active:
+                        self.risk_manager.check_price(price)
+            
+            # Handle user data events
+            elif hasattr(message, 'e') and message.e == 'executionReport':
+                # Convert structured object to dict for compatibility with grid_trader
+                order_data = {
+                    'X': message.X,  # Order status
+                    'i': message.i,  # Order ID
+                    's': message.s,  # Symbol
+                    'S': message.S,  # Side
+                    'p': message.p,  # Price
+                    'q': message.q,  # Quantity
+                }
+                self.grid_trader.handle_order_update(order_data)
+                
+            elif hasattr(message, 'e') and message.e == 'listStatus':
+                # OCO order status update
+                list_data = {
+                    'L': message.L,  # List order status
+                    's': message.s,  # Symbol
+                    'i': message.g,  # Order list ID
+                    'l': message.l,  # List status type
+                }
+                self._handle_oco_update(list_data)
             
             # Handle combined stream messages
             elif hasattr(message, 'stream') and hasattr(message, 'data'):
                 # Process the data payload from combined stream
                 nested_data = message.data
                 self._handle_websocket_message(nested_data)
+            
+            # Handle book ticker messages (which don't have event type field)
+            elif hasattr(message, 's') and hasattr(message, 'b') and hasattr(message, 'a'):
+                # This is a book ticker message
+                symbol = message.s
+                if symbol == config.SYMBOL:
+                    # Could process best bid/ask data here if needed
+                    pass
                 
-            # Handle raw dict messages (fallback)
+            # Handle dict messages (fallback for compatibility)
             elif isinstance(message, dict):
-                # Handle the original dict format for backward compatibility
                 if 'e' in message:
                     if message['e'] == 'kline':
                         symbol = message['s']
@@ -136,33 +143,45 @@ class GridTradingBot:
                         
                     elif message['e'] == 'listStatus':
                         self._handle_oco_update(message)
-                        
+                
         except Exception as e:
             logger.error(f"Failed to process WebSocket message: {e}")
-            logger.debug(f"Message: {message}")
+            if hasattr(message, '__dict__'):
+                logger.debug(f"Message attributes: {message.__dict__}")
+            else:
+                logger.debug(f"Message type: {type(message)}")
         
     def _handle_oco_update(self, message):
         """Handle OCO order updates"""
         try:
-            if message['L'] == 'EXECUTING' or message['L'] == 'ALL_DONE':
-                symbol = message['s']
-                order_list_id = message['i']
+            # Check if using dict or object access
+            if isinstance(message, dict):
+                status = message.get('L')
+                symbol = message.get('s')
+                order_list_id = message.get('i')
+                list_type = message.get('l')
+            else:
+                status = message.L
+                symbol = message.s
+                order_list_id = message.i
+                list_type = message.l
                 
+            if status == 'EXECUTING' or status == 'ALL_DONE':
                 # Check if this is our risk management OCO order
                 if (self.risk_manager and self.risk_manager.is_active and 
                     self.risk_manager.oco_order_id == order_list_id):
                     
-                    if message['L'] == 'ALL_DONE':
+                    if status == 'ALL_DONE':
                         logger.info(f"Risk management OCO order executed: {order_list_id}")
                         
                         # Check which side was executed
-                        if message['l'] == 'STOP_LOSS_LIMIT':
+                        if list_type == 'STOP_LOSS_LIMIT':
                             logger.info("Stop loss order executed")
                             if self.telegram_bot:
                                 self.telegram_bot.send_message("Stop loss order executed, grid trading stopped")
                             # Stop grid trading
                             self.grid_trader.stop()
-                        elif message['l'] == 'LIMIT_MAKER':
+                        elif list_type == 'LIMIT_MAKER':
                             logger.info("Take profit order executed")
                             if self.telegram_bot:
                                 self.telegram_bot.send_message("Take profit order executed, grid trading stopped")
@@ -178,11 +197,9 @@ class GridTradingBot:
         """WebSocket error handler"""
         logger.error(f"WebSocket error: {error}")
         
-        # Try to reconnect
-        if self.is_running:
-            logger.info("Attempting to reconnect WebSocket...")
-            time.sleep(5)
-            self._setup_websocket()
+        # The MarketDataWebsocketManager now handles reconnection logic internally,
+        # so we don't need to handle it here.
+        pass
     
     def _setup_websocket(self):
         """Set up WebSocket connection"""
@@ -191,44 +208,100 @@ class GridTradingBot:
             if self.ws_manager:
                 self.ws_manager.stop()
             
-            # Create new connection
-            self.ws_manager = WebsocketManager(
+            # Create new MarketDataWebsocketManager
+            self.ws_manager = MarketDataWebsocketManager(
                 on_message_callback=self._handle_websocket_message,
                 on_error_callback=self._websocket_error_handler
             )
             
-            # Start market data stream
-            self.ws_manager.start_market_stream(config.SYMBOL)
+            # Start kline stream for real-time price updates
+            self.ws_manager.start_kline_stream(symbol=config.SYMBOL, interval='1m')
+            
+            # Optional: Start additional streams as needed
+            self.ws_manager.start_bookticker_stream(symbol=config.SYMBOL)
             
             # Start user data stream
-            try:
-                # Create listenKey
-                response = self.binance_client.client.new_listen_key()
-                listen_key = response['listenKey']
-                
-                # Start user data stream
-                self.ws_manager.start_user_stream(listen_key)
-                
-                # Periodically extend listenKey validity
-                def keep_alive_listen_key():
-                    while self.is_running:
-                        try:
-                            self.binance_client.client.renew_listen_key(listen_key)
-                            logger.debug(f"Extended listenKey validity: {listen_key}")
-                        except Exception as e:
-                            logger.error(f"Failed to extend listenKey: {e}")
-                        
-                        # Update every 30 minutes
-                        time.sleep(30 * 60)
-                
-                # Start keep-alive thread
-                Thread(target=keep_alive_listen_key, daemon=True).start()
-                
-            except Exception as e:
-                logger.error(f"Failed to start user data stream: {e}")
+            self._setup_user_data_stream()
             
         except Exception as e:
             logger.error(f"Failed to set up WebSocket: {e}")
+    
+    def _setup_user_data_stream(self):
+        """Set up user data stream for order updates"""
+        try:
+            # Only proceed if we have a WebSocket manager
+            if not self.ws_manager:
+                logger.error("Cannot set up user data stream: WebSocket manager not initialized")
+                return
+                
+            # Get a listen key using the WebSocket API client if available, otherwise use REST
+            client_status = self.binance_client.get_client_status()
+            
+            if client_status["websocket_available"]:
+                # WebSocket API is available
+                listen_key_response = self.binance_client.ws_client.client.start_user_data_stream()
+                if listen_key_response and listen_key_response.get('status') == 200:
+                    self.listen_key = listen_key_response['result']['listenKey']
+                else:
+                    logger.error("Failed to get listen key from WebSocket API")
+                    return
+            else:
+                # Fallback to REST API
+                listen_key_response = self.binance_client.rest_client.new_listen_key()
+                if listen_key_response and 'listenKey' in listen_key_response:
+                    self.listen_key = listen_key_response['listenKey']
+                else:
+                    logger.error("Failed to get listen key from REST API")
+                    return
+            
+            # Start user data stream with the listen key
+            self.ws_manager.start_user_data_stream(self.listen_key)
+            logger.info("User data stream started successfully")
+            
+            # Start keep-alive thread
+            self._start_listen_key_keep_alive()
+            
+        except Exception as e:
+            logger.error(f"Failed to set up user data stream: {e}")
+    
+    def _start_listen_key_keep_alive(self):
+        """Start a thread to keep the listen key alive"""
+        if self.keep_alive_thread and self.keep_alive_thread.is_alive():
+            return  # Thread already running
+            
+        def keep_alive_listen_key():
+            """Thread function to extend listen key validity periodically"""
+            while self.is_running and self.listen_key:
+                try:
+                    time.sleep(30 * 60)  # Wait 30 minutes
+                    
+                    if not self.is_running or not self.listen_key:
+                        break
+                        
+                    # Extend listen key validity
+                    client_status = self.binance_client.get_client_status()
+                    
+                    if client_status["websocket_available"]:
+                        # Use WebSocket API
+                        self.binance_client.ws_client.client.ping_user_data_stream(self.listen_key)
+                    else:
+                        # Fallback to REST API
+                        self.binance_client.rest_client.renew_listen_key(self.listen_key)
+                        
+                    logger.debug(f"Extended listenKey validity: {self.listen_key[:5]}...")
+                    
+                except Exception as e:
+                    logger.error(f"Failed to extend listenKey: {e}")
+                    # Try to get a new listen key if the current one is invalid
+                    try:
+                        self._setup_user_data_stream()
+                        break  # Exit this thread as a new one will be started
+                    except:
+                        pass
+        
+        # Start keep-alive thread
+        self.keep_alive_thread = Thread(target=keep_alive_listen_key, daemon=True)
+        self.keep_alive_thread.start()
     
     def _grid_maintenance_thread(self):
         """Grid maintenance thread"""
@@ -296,6 +369,17 @@ class GridTradingBot:
         # Stop WebSocket connection
         if self.ws_manager:
             self.ws_manager.stop()
+        
+        # Stop user data stream if needed
+        if self.listen_key:
+            try:
+                client_status = self.binance_client.get_client_status()
+                if client_status["websocket_available"]:
+                    self.binance_client.ws_client.client.stop_user_data_stream(self.listen_key)
+                else:
+                    self.binance_client.rest_client.close_listen_key(self.listen_key)
+            except Exception as e:
+                logger.error(f"Failed to close listen key: {e}")
         
         # Stop Telegram bot
         if self.telegram_bot:
