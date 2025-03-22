@@ -26,17 +26,43 @@ class GridTrader:
         self.logger = logging.getLogger(__name__)
         
         # Get symbol information and set precision
-        self.symbol_info = self.binance_client.get_symbol_info(self.symbol)
+        self.symbol_info = self._get_symbol_info()
         self.price_precision = self._get_price_precision()
         self.quantity_precision = self._get_quantity_precision()
         
         self.logger.info(f"Trading pair {self.symbol} price precision: {self.price_precision}, quantity precision: {self.quantity_precision}")
+        
+        # Track connection type for logging
+        self.using_websocket = self.binance_client.get_client_status()["websocket_available"]
+        self.logger.info(f"Using WebSocket API: {self.using_websocket}")
         
         self.grid = []  # [{'price': float, 'order_id': int, 'side': str}]
         self.last_recalculation = None
         self.current_market_price = 0
         self.is_running = False
         self.simulation_mode = False  # Add simulation mode flag
+        
+        # Track pending operations for better error handling
+        self.pending_orders = {}  # Track orders waiting for WebSocket confirmation
+    
+    def _get_symbol_info(self):
+        """Get symbol information with connection status tracking"""
+        try:
+            # Check which client is being used
+            client_status = self.binance_client.get_client_status()
+            self.using_websocket = client_status["websocket_available"]
+            
+            # Get symbol info using the appropriate client
+            symbol_info = self.binance_client.get_symbol_info(self.symbol)
+            
+            # Log which API was used
+            api_type = "WebSocket API" if self.using_websocket else "REST API"
+            self.logger.debug(f"Retrieved symbol info via {api_type}")
+            
+            return symbol_info
+        except Exception as e:
+            self.logger.error(f"Failed to get symbol info: {e}")
+            return None
     
     def start(self, simulation=False):
         """Start grid trading system"""
@@ -45,6 +71,14 @@ class GridTrader:
         
         self.is_running = True
         self.simulation_mode = simulation
+        
+        # Update client status before starting
+        client_status = self.binance_client.get_client_status()
+        self.using_websocket = client_status["websocket_available"]
+        api_type = "WebSocket API" if self.using_websocket else "REST API"
+        self.logger.info(f"Starting grid trading using {api_type}")
+        
+        # Get current market price
         self.current_market_price = self.binance_client.get_symbol_price(self.symbol)
         self.last_recalculation = datetime.now()
         
@@ -69,7 +103,7 @@ class GridTrader:
         # Calculate and set grid
         self._setup_grid()
         
-        message = f"Grid trading system started!\nCurrent price: {self.current_market_price}\nGrid range: {len(self.grid)} levels"
+        message = f"Grid trading system started!\nCurrent price: {self.current_market_price}\nGrid range: {len(self.grid)} levels\nUsing {api_type}"
         self.logger.info(message)
         if self.telegram_bot:
             self.telegram_bot.send_message(message)
@@ -83,6 +117,7 @@ class GridTrader:
         
         self._cancel_all_open_orders()
         self.grid = []
+        self.pending_orders = {}
         self.is_running = False
         
         message = "Grid trading system stopped"
@@ -129,16 +164,107 @@ class GridTrader:
         # New: Store current ATR value for future volatility comparison
         self.last_atr_value = self._get_current_atr()
         
-        # Place grid orders
+        # Check if WebSocket API is available for potential batch operations
+        client_status = self.binance_client.get_client_status()
+        self.using_websocket = client_status["websocket_available"]
+        
+        if self.using_websocket and not self.simulation_mode:
+            # WebSocket is available - could potentially use batch operations
+            # But currently the WebSocket API client doesn't support batch order placement
+            # So we place orders individually but optimize error handling for WebSocket
+            self.logger.info("Using WebSocket API for grid setup")
+            self._place_grid_orders_with_websocket()
+        else:
+            # Use individual order placement
+            self._place_grid_orders_individually()
+    
+    def _place_grid_orders_with_websocket(self):
+        """Place grid orders optimized for WebSocket API"""
         for level in self.grid:
             price = level['price']
             side = level['side']
             
             # Calculate order quantity
-            if side == 'BUY':
-                quantity = self.capital_per_level / price
-            else:  # SELL
-                quantity = self.capital_per_level / price
+            quantity = self.capital_per_level / price
+            
+            # Adjust quantity and price precision
+            formatted_quantity = self._adjust_quantity_precision(quantity)
+            formatted_price = self._adjust_price_precision(price)
+            
+            try:
+                if self.simulation_mode:
+                    # In simulation mode, just log the order without placing it
+                    level['order_id'] = f"sim_{int(time.time())}_{side}_{formatted_price}"
+                    self.logger.info(f"Simulation - Would place order: {side} {formatted_quantity} @ {formatted_price}")
+                    continue
+                
+                # Check if we have enough balance for this order
+                if side == 'BUY':
+                    asset = 'USDT'
+                    required = float(formatted_quantity) * float(formatted_price)
+                else:  # SELL
+                    asset = self.symbol.replace('USDT', '')
+                    required = float(formatted_quantity)
+                
+                balance = self.binance_client.check_balance(asset)
+                if balance < required:
+                    self.logger.warning(f"Insufficient {asset} balance for {side} order. Required: {required}, Available: {balance}")
+                    continue
+                
+                # Generate a client order ID for tracking
+                client_order_id = f"grid_{int(time.time())}_{side}_{formatted_price}"
+                
+                # Place order with client order ID for tracking WebSocket updates
+                order = self.binance_client.place_limit_order(
+                    self.symbol, 
+                    side, 
+                    formatted_quantity, 
+                    formatted_price
+                )
+                
+                level['order_id'] = order['orderId']
+                
+                # Add to pending orders for WebSocket response tracking
+                self.pending_orders[str(order['orderId'])] = {
+                    'grid_index': self.grid.index(level),
+                    'side': side,
+                    'price': float(formatted_price),
+                    'quantity': float(formatted_quantity),
+                    'timestamp': int(time.time())
+                }
+                
+                self.logger.info(f"Order placed via {'WebSocket' if self.using_websocket else 'REST'}: {side} {formatted_quantity} @ {formatted_price}, ID: {order['orderId']}")
+            except Exception as e:
+                self.logger.error(f"Failed to place order: {side} {formatted_quantity} @ {formatted_price}, Error: {e}")
+                
+                # Check if connection was lost
+                if "connection" in str(e).lower() and self.using_websocket:
+                    self.logger.warning("WebSocket connection issue detected, retrying with fallback...")
+                    # Update status and retry placement
+                    client_status = self.binance_client.get_client_status()
+                    self.using_websocket = client_status["websocket_available"]
+                    
+                    # Try again - will use REST if WebSocket is now unavailable
+                    try:
+                        order = self.binance_client.place_limit_order(
+                            self.symbol, 
+                            side, 
+                            formatted_quantity, 
+                            formatted_price
+                        )
+                        level['order_id'] = order['orderId']
+                        self.logger.info(f"Order placed via fallback: {side} {formatted_quantity} @ {formatted_price}, ID: {order['orderId']}")
+                    except Exception as retry_error:
+                        self.logger.error(f"Fallback order placement also failed: {retry_error}")
+    
+    def _place_grid_orders_individually(self):
+        """Place grid orders individually (traditional method)"""
+        for level in self.grid:
+            price = level['price']
+            side = level['side']
+            
+            # Calculate order quantity
+            quantity = self.capital_per_level / price
             
             # Adjust quantity and price precision
             formatted_quantity = self._adjust_quantity_precision(quantity)
@@ -214,6 +340,10 @@ class GridTrader:
     def _get_current_atr(self):
         """Get current ATR value"""
         try:
+            # Update connection status before making API calls
+            client_status = self.binance_client.get_client_status()
+            self.using_websocket = client_status["websocket_available"]
+            
             # Get historical klines data
             klines = self.binance_client.get_historical_klines(
                 self.symbol, 
@@ -226,6 +356,13 @@ class GridTrader:
             return atr
         except Exception as e:
             self.logger.error(f"Failed to get ATR: {e}")
+            
+            # If this was a WebSocket error, force client to update connection status
+            if "connection" in str(e).lower() and self.using_websocket:
+                self.logger.warning("Connection issue detected while getting ATR, checking client status...")
+                client_status = self.binance_client.get_client_status()
+                self.using_websocket = client_status["websocket_available"]
+            
             return None
     
     def _cancel_all_open_orders(self):
@@ -235,68 +372,173 @@ class GridTrader:
                 self.logger.info("Simulation mode - Would cancel all open orders")
                 return
                 
+            # Update connection status before making API calls
+            client_status = self.binance_client.get_client_status()
+            self.using_websocket = client_status["websocket_available"]
+            api_type = "WebSocket API" if self.using_websocket else "REST API"
+            
+            self.logger.info(f"Cancelling all open orders via {api_type}")
+            
             open_orders = self.binance_client.get_open_orders(self.symbol)
             for order in open_orders:
                 self.binance_client.cancel_order(self.symbol, order['orderId'])
                 self.logger.info(f"Order cancelled: {order['orderId']}")
+            
+            # Clear pending orders tracking
+            self.pending_orders = {}
+            
         except Exception as e:
             self.logger.error(f"Failed to cancel orders: {e}")
+            
+            # If this was a WebSocket error, try once more with REST
+            if "connection" in str(e).lower() and self.using_websocket:
+                self.logger.warning("Connection issue detected while cancelling orders, trying REST API...")
+                
+                try:
+                    # Force client to update connection status
+                    client_status = self.binance_client.get_client_status()
+                    self.using_websocket = client_status["websocket_available"]
+                    
+                    # Try again - should use REST if WebSocket is now unavailable
+                    open_orders = self.binance_client.get_open_orders(self.symbol)
+                    for order in open_orders:
+                        self.binance_client.cancel_order(self.symbol, order['orderId'])
+                        self.logger.info(f"Order cancelled via fallback: {order['orderId']}")
+                except Exception as retry_error:
+                    self.logger.error(f"Fallback order cancellation also failed: {retry_error}")
     
     def handle_order_update(self, order_data):
         """Handle order update"""
         if not self.is_running:
             return
         
-        # Handle order filled event
-        if order_data['X'] == 'FILLED':
-            order_id = order_data['i']
-            symbol = order_data['s']
-            side = order_data['S']
-            price = float(order_data['p'])
-            quantity = float(order_data['q'])
-            
-            if symbol != self.symbol:
+        # Get essential order information, handling both structured and dict formats
+        if isinstance(order_data, dict):
+            order_status = order_data.get('X')
+            order_id = order_data.get('i')
+            symbol = order_data.get('s')
+            side = order_data.get('S')
+            price = float(order_data.get('p', 0))
+            quantity = float(order_data.get('q', 0))
+        else:
+            # Assume it's a structured object
+            try:
+                order_status = order_data.X
+                order_id = order_data.i
+                symbol = order_data.s
+                side = order_data.S
+                price = float(order_data.p)
+                quantity = float(order_data.q)
+            except AttributeError as e:
+                self.logger.error(f"Failed to parse order update: {e}, data: {order_data}")
                 return
+        
+        # Skip if not our symbol
+        if symbol != self.symbol:
+            return
+            
+        # Handle order filled event
+        if order_status == 'FILLED':
+            self.logger.info(f"Order filled: {side} {quantity} @ {price} (ID: {order_id})")
+            
+            # Check if this is a pending order we're tracking
+            str_order_id = str(order_id)
+            if str_order_id in self.pending_orders:
+                # Remove from pending orders
+                pending_info = self.pending_orders.pop(str_order_id)
+                self.logger.debug(f"Pending order {str_order_id} fulfilled from tracking")
             
             # Find matching grid level
+            matching_level = None
             for i, level in enumerate(self.grid):
-                if level['order_id'] == order_id:
-                    self.logger.info(f"Order filled: {side} {quantity} @ {price}")
-                    
-                    # Create opposite order
-                    new_side = "SELL" if side == "BUY" else "BUY"
-                    
-                    # Adjust quantity and price precision
-                    formatted_quantity = self._adjust_quantity_precision(quantity)
-                    formatted_price = self._adjust_price_precision(price)
-                    
+                if level['order_id'] == order_id or str(level['order_id']) == str_order_id:
+                    matching_level = level
+                    level_index = i
+                    break
+            
+            if not matching_level:
+                self.logger.warning(f"Received fill for order {order_id} but couldn't find in grid")
+                # Try to reconcile grid with open orders - this is a recovery mechanism
+                self._reconcile_grid_with_open_orders()
+                return
+            
+            # Create opposite order
+            new_side = "SELL" if side == "BUY" else "BUY"
+            
+            # Adjust quantity and price precision
+            formatted_quantity = self._adjust_quantity_precision(quantity)
+            formatted_price = self._adjust_price_precision(price)
+            
+            try:
+                if self.simulation_mode:
+                    self.logger.info(f"Simulation - Would place opposite order: {new_side} {formatted_quantity} @ {formatted_price}")
+                    matching_level['side'] = new_side
+                    matching_level['order_id'] = f"sim_{int(time.time())}_{new_side}_{formatted_price}"
+                    message = f"Grid trade executed (simulation): {side} {formatted_quantity} @ {formatted_price}\nOpposite order would be: {new_side} {formatted_quantity} @ {formatted_price}"
+                    if self.telegram_bot:
+                        self.telegram_bot.send_message(message)
+                    return
+                
+                # Check if we have enough balance for this order
+                if new_side == 'BUY':
+                    asset = 'USDT'
+                    required = float(formatted_quantity) * float(formatted_price)
+                else:  # SELL
+                    asset = self.symbol.replace('USDT', '')
+                    required = float(formatted_quantity)
+                
+                balance = self.binance_client.check_balance(asset)
+                if balance < required:
+                    message = f"⚠️ Cannot place opposite order: Insufficient {asset} balance. Required: {required}, Available: {balance}"
+                    self.logger.warning(message)
+                    if self.telegram_bot:
+                        self.telegram_bot.send_message(message)
+                    return
+                
+                # Update connection status before placing order
+                client_status = self.binance_client.get_client_status()
+                self.using_websocket = client_status["websocket_available"]
+                api_type = "WebSocket API" if self.using_websocket else "REST API"
+                
+                # Place opposite order
+                new_order = self.binance_client.place_limit_order(
+                    self.symbol, 
+                    new_side, 
+                    formatted_quantity, 
+                    formatted_price
+                )
+                
+                # Update grid
+                matching_level['side'] = new_side
+                matching_level['order_id'] = new_order['orderId']
+                
+                # Add to pending orders tracking if using WebSocket
+                if self.using_websocket:
+                    self.pending_orders[str(new_order['orderId'])] = {
+                        'grid_index': level_index,
+                        'side': new_side,
+                        'price': float(formatted_price),
+                        'quantity': float(formatted_quantity),
+                        'timestamp': int(time.time())
+                    }
+                
+                message = f"Grid trade executed: {side} {formatted_quantity} @ {formatted_price}\nOpposite order placed via {api_type}: {new_side} {formatted_quantity} @ {formatted_price}"
+                self.logger.info(message)
+                if self.telegram_bot:
+                    self.telegram_bot.send_message(message)
+            except Exception as e:
+                self.logger.error(f"Failed to place opposite order: {e}")
+                
+                # If WebSocket connection error, try with REST API
+                if "connection" in str(e).lower() and self.using_websocket:
                     try:
-                        if self.simulation_mode:
-                            self.logger.info(f"Simulation - Would place opposite order: {new_side} {formatted_quantity} @ {formatted_price}")
-                            level['side'] = new_side
-                            level['order_id'] = f"sim_{int(time.time())}_{new_side}_{formatted_price}"
-                            message = f"Grid trade executed (simulation): {side} {formatted_quantity} @ {formatted_price}\nOpposite order would be: {new_side} {formatted_quantity} @ {formatted_price}"
-                            if self.telegram_bot:
-                                self.telegram_bot.send_message(message)
-                            return
+                        self.logger.warning("Connection error - falling back to REST API for opposite order")
                         
-                        # Check if we have enough balance for this order
-                        if new_side == 'BUY':
-                            asset = 'USDT'
-                            required = float(formatted_quantity) * float(formatted_price)
-                        else:  # SELL
-                            asset = self.symbol.replace('USDT', '')
-                            required = float(formatted_quantity)
+                        # Force update of client status
+                        client_status = self.binance_client.get_client_status()
+                        self.using_websocket = client_status["websocket_available"]
                         
-                        balance = self.binance_client.check_balance(asset)
-                        if balance < required:
-                            message = f"⚠️ Cannot place opposite order: Insufficient {asset} balance. Required: {required}, Available: {balance}"
-                            self.logger.warning(message)
-                            if self.telegram_bot:
-                                self.telegram_bot.send_message(message)
-                            return
-                        
-                        # Place opposite order
+                        # Try again - will use REST if WebSocket is now unavailable
                         new_order = self.binance_client.place_limit_order(
                             self.symbol, 
                             new_side, 
@@ -305,16 +547,45 @@ class GridTrader:
                         )
                         
                         # Update grid
-                        self.grid[i]['side'] = new_side
-                        self.grid[i]['order_id'] = new_order['orderId']
+                        matching_level['side'] = new_side
+                        matching_level['order_id'] = new_order['orderId']
                         
-                        message = f"Grid trade executed: {side} {formatted_quantity} @ {formatted_price}\nOpposite order placed: {new_side} {formatted_quantity} @ {formatted_price}"
+                        message = f"Grid trade executed: {side} {formatted_quantity} @ {formatted_price}\nOpposite order placed via fallback: {new_side} {formatted_quantity} @ {formatted_price}"
                         self.logger.info(message)
                         if self.telegram_bot:
                             self.telegram_bot.send_message(message)
-                    except Exception as e:
-                        self.logger.error(f"Failed to place opposite order: {e}")
-                    break
+                    except Exception as retry_error:
+                        self.logger.error(f"Fallback order placement also failed: {retry_error}")
+    
+    def _reconcile_grid_with_open_orders(self):
+        """Reconcile grid with actual open orders (recovery mechanism)"""
+        if self.simulation_mode:
+            return
+            
+        try:
+            self.logger.info("Reconciling grid with actual open orders...")
+            
+            # Get current open orders
+            open_orders = self.binance_client.get_open_orders(self.symbol)
+            
+            # Create a map of order IDs to easily check
+            open_order_ids = {str(order['orderId']): order for order in open_orders}
+            
+            # Check each grid level
+            for i, level in enumerate(self.grid):
+                if level['order_id']:
+                    str_order_id = str(level['order_id'])
+                    
+                    # Check if this order is still open
+                    if str_order_id not in open_order_ids:
+                        self.logger.warning(f"Grid level {i} order {str_order_id} is not in open orders, may need to be replaced")
+                        
+                        # Mark as needing replacement (could implement auto-replacement here)
+                        level['needs_replacement'] = True
+            
+            self.logger.info("Grid reconciliation complete")
+        except Exception as e:
+            self.logger.error(f"Failed to reconcile grid: {e}")
     
     def check_grid_recalculation(self):
         """Check if grid recalculation is needed"""
@@ -373,8 +644,13 @@ class GridTrader:
         if not self.is_running:
             return "System not running"
         
-        # Get current price
+        # Get current price and update connection status
         try:
+            # Check which API we're currently using
+            client_status = self.binance_client.get_client_status()
+            self.using_websocket = client_status["websocket_available"]
+            api_type = "WebSocket API" if self.using_websocket else "REST API"
+            
             current_price = self.binance_client.get_symbol_price(self.symbol)
             
             # Build status message
@@ -387,6 +663,7 @@ class GridTrader:
                     f"Current price: {current_price}\n" \
                     f"Grid levels: {len(self.grid)}\n" \
                     f"Last adjusted: {self.last_recalculation}\n" \
+                    f"API in use: {api_type}\n" \
                     f"Grid details:\n" + "\n".join(grid_info)
             
             return status

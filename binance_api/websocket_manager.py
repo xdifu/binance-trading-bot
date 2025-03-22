@@ -55,7 +55,7 @@ class AggTradeMessage(Struct):
     m: bool         # Is buyer market maker
     M: bool         # Ignore
 
-class BookTickerMessage(Struct):
+class BookTickerMessage(Struct, kw_only=True):
     u: int | None = None  # Update ID, optional with default None
     s: str                # Symbol
     b: str                # Best bid price

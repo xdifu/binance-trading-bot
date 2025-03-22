@@ -90,47 +90,14 @@ class GridTradingBot:
                     if self.risk_manager and self.risk_manager.is_active:
                         self.risk_manager.check_price(price)
             
-            # Handle user data events
-            elif hasattr(message, 'e') and message.e == 'executionReport':
-                # Convert structured object to dict for compatibility with grid_trader
-                order_data = {
-                    'X': message.X,  # Order status
-                    'i': message.i,  # Order ID
-                    's': message.s,  # Symbol
-                    'S': message.S,  # Side
-                    'p': message.p,  # Price
-                    'q': message.q,  # Quantity
-                }
-                self.grid_trader.handle_order_update(order_data)
-                
-            elif hasattr(message, 'e') and message.e == 'listStatus':
-                # OCO order status update
-                list_data = {
-                    'L': message.L,  # List order status
-                    's': message.s,  # Symbol
-                    'i': message.g,  # Order list ID
-                    'l': message.l,  # List status type
-                }
-                self._handle_oco_update(list_data)
-            
-            # Handle combined stream messages
-            elif hasattr(message, 'stream') and hasattr(message, 'data'):
-                # Process the data payload from combined stream
-                nested_data = message.data
-                self._handle_websocket_message(nested_data)
-            
-            # Handle book ticker messages (which don't have event type field)
-            elif hasattr(message, 's') and hasattr(message, 'b') and hasattr(message, 'a'):
-                # This is a book ticker message
-                symbol = message.s
-                if symbol == config.SYMBOL:
-                    # Could process best bid/ask data here if needed
-                    pass
-                
             # Handle dict messages (fallback for compatibility)
             elif isinstance(message, dict):
-                if 'e' in message:
-                    if message['e'] == 'kline':
+                # First check for book ticker format which has different structure
+                if 's' in message and 'b' in message and 'a' in message:
+                    # Process book ticker data if needed
+                    pass
+                elif 'e' in message:
+                    if message['e'] == 'kline' and 'k' in message and 'c' in message.get('k', {}):
                         symbol = message['s']
                         price = float(message['k']['c'])
                         
@@ -143,13 +110,12 @@ class GridTradingBot:
                         
                     elif message['e'] == 'listStatus':
                         self._handle_oco_update(message)
-                
+        
         except Exception as e:
             logger.error(f"Failed to process WebSocket message: {e}")
-            if hasattr(message, '__dict__'):
-                logger.debug(f"Message attributes: {message.__dict__}")
-            else:
-                logger.debug(f"Message type: {type(message)}")
+            # Log more details about the message structure for debugging
+            if isinstance(message, dict):
+                logger.debug(f"Message keys: {list(message.keys())}")
         
     def _handle_oco_update(self, message):
         """Handle OCO order updates"""
