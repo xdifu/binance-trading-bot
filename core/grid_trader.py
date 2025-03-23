@@ -149,7 +149,18 @@ class GridTrader:
         return precision
     
     def _adjust_price_precision(self, price):
-        """Adjust price precision"""
+        """Adjust price precision with validation"""
+        if price <= 0:
+            self.logger.warning(f"Attempted to format invalid price: {price}, using minimum price")
+            # Use minimum price from symbol info or a safe default
+            min_price = 0.00000001  # Safe default
+            if self.symbol_info and 'filters' in self.symbol_info:
+                for f in self.symbol_info['filters']:
+                    if f['filterType'] == 'PRICE_FILTER' and 'minPrice' in f:
+                        min_price = float(f['minPrice'])
+                        break
+            return format_price(min_price, self.price_precision)
+        
         return format_price(price, self.price_precision)
     
     def _adjust_quantity_precision(self, quantity):
@@ -183,6 +194,11 @@ class GridTrader:
         for level in self.grid:
             price = level['price']
             side = level['side']
+            
+            # Validate price before proceeding
+            if price <= 0:
+                self.logger.error(f"Invalid price value: {price} for {side} order, skipping")
+                continue
             
             # Calculate order quantity
             quantity = self.capital_per_level / price

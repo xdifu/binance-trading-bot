@@ -368,11 +368,18 @@ class BinanceClient:
                 'quantity': str(quantity),
                 'price': str(price),
                 'stopPrice': str(stopPrice),
-                'stopLimitTimeInForce': stopLimitTimeInForce
+                'stopLimitTimeInForce': stopLimitTimeInForce,
+                # Add the missing required parameters
+                'aboveType': 'LIMIT',  # Order type for price above trigger price
+                'belowType': 'STOP_LOSS_LIMIT'  # Order type for price below trigger price
             }
             
             if stopLimitPrice:
                 params['stopLimitPrice'] = str(stopLimitPrice)
+            else:
+                # If stopLimitPrice isn't provided, use a default (slightly below stopPrice)
+                stop_limit_price = float(stopPrice) * 0.99  # 1% below stop price
+                params['stopLimitPrice'] = str(self._adjust_price_precision(stop_limit_price))
                 
             # Add other optional parameters
             params.update(kwargs)
