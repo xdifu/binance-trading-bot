@@ -106,16 +106,44 @@ class GridTrader:
         base_asset = self.symbol.replace('USDT', '')
         quote_asset = 'USDT'
         
+        # Calculate temporary grid to estimate resource requirements
+        temp_grid = self._calculate_grid_levels()
+        
+        # Calculate actual needed resources
+        usdt_needed = 0
+        base_needed = 0
+        
+        for level in temp_grid:
+            price = level['price']
+            quantity = self.capital_per_level / price
+            
+            if level['side'] == 'BUY':
+                # Buy orders need USDT
+                usdt_needed += self.capital_per_level
+            else:
+                # Sell orders need base asset
+                base_needed += quantity
+        
+        # Check balances
         base_balance = self.binance_client.check_balance(base_asset)
         quote_balance = self.binance_client.check_balance(quote_asset)
         
-        total_needed = self.capital_per_level * self.grid_levels
+        insufficient_funds = False
+        warnings = []
         
-        if quote_balance < total_needed and not simulation:
-            self.logger.warning(f"Insufficient {quote_asset} balance. Required: {total_needed}, Available: {quote_balance}")
-            # Add warning in telegram message
+        if quote_balance < usdt_needed and not simulation:
+            warnings.append(f"Insufficient {quote_asset} balance. Required: {usdt_needed:.2f}, Available: {quote_balance:.2f}")
+            insufficient_funds = True
+            
+        if base_balance < base_needed and not simulation:
+            warnings.append(f"Insufficient {base_asset} balance. Required: {base_needed:.2f}, Available: {base_balance:.2f}")
+            insufficient_funds = True
+        
+        if insufficient_funds and not simulation:
+            warning_message = "⚠️ Warning: " + " ".join(warnings) + "\nStarting in limited mode."
+            self.logger.warning(warning_message)
             if self.telegram_bot:
-                self.telegram_bot.send_message(f"⚠️ Warning: Insufficient {quote_asset} balance. Required: {total_needed}, Available: {quote_balance}\nStarting in limited mode.")
+                self.telegram_bot.send_message(warning_message)
         
         # Cancel all previous open orders
         self._cancel_all_open_orders()
