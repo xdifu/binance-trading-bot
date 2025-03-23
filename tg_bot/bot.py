@@ -43,8 +43,19 @@ class TelegramBot:
         self.logger.info("Starting Telegram bot")
         self.is_running = True
         
-        # 添加这行调试日志
-        self.logger.info(f"Registered command handlers: {[cmd for cmd in self.application.handlers[0]._handlers.keys()]}")
+        # 替换有问题的调试日志
+        try:
+            # 更安全的访问方式，不依赖内部结构
+            handlers_count = len(self.application.handlers)
+            registered_commands = []
+            for group in self.application.handlers:
+                if group:  # 检查是否为空
+                    for handler in group:
+                        if isinstance(handler, CommandHandler):
+                            registered_commands.extend(handler.commands)
+            self.logger.info(f"Bot registered commands: {', '.join(registered_commands)}")
+        except Exception as e:
+            self.logger.debug(f"Could not determine registered commands: {e}")
         
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
