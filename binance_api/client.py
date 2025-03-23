@@ -30,6 +30,11 @@ class BinanceClient:
         self.ws_client = None
         self.rest_client = None
         
+        # Add time offset variable for server time synchronization
+        self.time_offset = 0
+        self.last_time_sync = 0
+        self.time_sync_interval = 60 * 60  # Sync time every hour
+        
         # Initialize WebSocket API client first (if available)
         if WEBSOCKET_API_AVAILABLE:
             try:
@@ -73,6 +78,9 @@ class BinanceClient:
                 private_key_pass=self.private_key_pass
             )
             
+            # Synchronize time before making any API calls
+            self._sync_time()
+            
             # Verify connection is valid
             self.rest_client.account()
             self.logger.info("REST API client connected successfully (fallback ready)")
@@ -94,6 +102,45 @@ class BinanceClient:
                 self.logger.error("Both WebSocket API and REST API clients failed to initialize")
                 raise
     
+    def _sync_time(self):
+        """
+        Synchronize local time with Binance server time
+        This helps prevent 'Timestamp for this request was 1000ms ahead of the server's time' errors
+        """
+        try:
+            # Skip if we've synced recently
+            current_time = int(time.time())
+            if current_time - self.last_time_sync < self.time_sync_interval and self.last_time_sync > 0:
+                return True
+                
+            # Get server time
+            if self.rest_client:
+                server_time = self.rest_client.time()
+                if server_time and 'serverTime' in server_time:
+                    server_time_ms = server_time['serverTime']
+                    local_time_ms = int(time.time() * 1000)
+                    self.time_offset = server_time_ms - local_time_ms
+                    
+                    # Log the time difference
+                    time_diff_sec = abs(self.time_offset) / 1000
+                    if time_diff_sec > 1:
+                        self.logger.info(f"Local time is {'ahead of' if self.time_offset < 0 else 'behind'} server by {time_diff_sec:.2f} seconds. Offset applied: {self.time_offset}ms")
+                    
+                    self.last_time_sync = current_time
+                    return True
+            
+            return False
+        except Exception as e:
+            self.logger.error(f"Time synchronization failed: {e}")
+            return False
+    
+    def _get_timestamp(self):
+        """
+        Get timestamp adjusted for server time offset
+        Returns: int - Server-adjusted timestamp in milliseconds
+        """
+        return int(time.time() * 1000) + self.time_offset
+    
     def _execute_with_fallback(self, ws_method_name, rest_method_name, *args, **kwargs):
         """
         Execute a method with WebSocket API first, falling back to REST API if needed
@@ -106,6 +153,17 @@ class BinanceClient:
         Returns:
             Result from either WebSocket or REST API
         """
+        # Periodically re-sync time
+        current_time = int(time.time())
+        if current_time - self.last_time_sync > self.time_sync_interval:
+            self._sync_time()
+            
+        # For methods that require signed requests, add adjusted timestamp
+        if any(keyword in rest_method_name for keyword in ['account', 'order', 'oco', 'myTrades', 'openOrders']):
+            if 'timestamp' not in kwargs:
+                kwargs['timestamp'] = self._get_timestamp()
+                self.logger.debug(f"Added adjusted timestamp: {kwargs['timestamp']} to {rest_method_name}")
+                
         # Try WebSocket API first if available
         if self.websocket_available and self.ws_client:
             try:
@@ -125,9 +183,27 @@ class BinanceClient:
         # Fall back to REST API
         if self.rest_client:
             try:
-                rest_method = getattr(self.rest_client, rest_method_name)
-                self.logger.debug(f"Using REST API fallback for {rest_method_name}")
-                return rest_method(*args, **kwargs)
+                # For timestamp errors, try to re-sync and retry once
+                try:
+                    rest_method = getattr(self.rest_client, rest_method_name)
+                    self.logger.debug(f"Using REST API fallback for {rest_method_name}")
+                    return rest_method(*args, **kwargs)
+                except ClientError as e:
+                    # Check for timestamp error and retry once with fresh sync
+                    if hasattr(e, 'error_code') and e.error_code == -1021:
+                        self.logger.warning("Timestamp error detected, re-syncing time and retrying...")
+                        self._sync_time()
+                        
+                        # Update timestamp in kwargs if it was a signed request
+                        if 'timestamp' in kwargs:
+                            kwargs['timestamp'] = self._get_timestamp()
+                            
+                        # Retry with updated timestamp
+                        rest_method = getattr(self.rest_client, rest_method_name)
+                        return rest_method(*args, **kwargs)
+                    else:
+                        # If not a timestamp error, re-raise
+                        raise
             except Exception as e:
                 self.logger.error(f"REST API fallback call failed for {rest_method_name}: {e}")
                 raise
@@ -369,3 +445,10 @@ class BinanceClient:
         
         self.websocket_available = False
         return False
+        
+    def manual_time_sync(self):
+        """
+        Manually trigger time synchronization
+        Returns: bool - Whether the synchronization was successful
+        """
+        return self._sync_time()
