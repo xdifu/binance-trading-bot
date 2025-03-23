@@ -9,6 +9,13 @@ import config
 
 class GridTrader:
     def __init__(self, binance_client, telegram_bot=None):
+        """
+        Initialize grid trading strategy
+        
+        Args:
+            binance_client: BinanceClient instance for API operations
+            telegram_bot: Optional TelegramBot instance for notifications
+        """
         self.binance_client = binance_client
         self.telegram_bot = telegram_bot
         self.symbol = config.SYMBOL
@@ -19,10 +26,10 @@ class GridTrader:
         self.recalculation_period = config.RECALCULATION_PERIOD
         self.atr_period = config.ATR_PERIOD
         
-        # New: Store previous ATR value for volatility change detection
+        # Store previous ATR value for volatility change detection
         self.last_atr_value = None
         
-        # Initialize logger (moved to top)
+        # Initialize logger
         self.logger = logging.getLogger(__name__)
         
         # Get symbol information and set precision
@@ -46,7 +53,12 @@ class GridTrader:
         self.pending_orders = {}  # Track orders waiting for WebSocket confirmation
     
     def _get_symbol_info(self):
-        """Get symbol information with connection status tracking"""
+        """
+        Get symbol information with connection status tracking
+        
+        Returns:
+            dict: Symbol information or None if error
+        """
         try:
             # Check which client is being used
             client_status = self.binance_client.get_client_status()
@@ -65,7 +77,15 @@ class GridTrader:
             return None
     
     def start(self, simulation=False):
-        """Start grid trading system"""
+        """
+        Start grid trading system
+        
+        Args:
+            simulation: Whether to run in simulation mode (no real orders)
+            
+        Returns:
+            str: Status message
+        """
         if self.is_running:
             return "System already running"
         
@@ -111,7 +131,12 @@ class GridTrader:
         return message
     
     def stop(self):
-        """Stop grid trading system"""
+        """
+        Stop grid trading system
+        
+        Returns:
+            str: Status message
+        """
         if not self.is_running:
             return "System not running"
         
@@ -128,13 +153,33 @@ class GridTrader:
         return message
     
     def _get_price_precision(self):
-        """Get price precision"""
+        """
+        Get price precision from symbol info
+        
+        Returns:
+            int: Price precision value (default 8 if unavailable)
+        """
         if not self.symbol_info or 'filters' not in self.symbol_info:
-            return 2  # Default price precision
-        return get_precision_from_filters(self.symbol_info['filters'], 'PRICE_FILTER', 'tickSize')
+            self.logger.warning(f"Symbol info missing or incomplete for {self.symbol}, using default precision 8")
+            return 8  # Increased default from 2 to 8 for better small value handling
+        
+        precision = get_precision_from_filters(self.symbol_info['filters'], 'PRICE_FILTER', 'tickSize')
+        
+        # Ensure minimum precision for small-valued assets
+        if precision < 4 and self.symbol.startswith(('1000SATS', 'SHIB', 'DOGE')):
+            self.logger.warning(f"Symbol {self.symbol} detected as small-value asset but precision is only {precision}, forcing to minimum of 8")
+            return 8
+            
+        # Ensure minimum precision for all assets to avoid rounding to zero
+        return max(precision, 4)  # Minimum precision of 4 for all assets
     
     def _get_quantity_precision(self):
-        """Get quantity precision"""
+        """
+        Get quantity precision from symbol info
+        
+        Returns:
+            int: Quantity precision value (default 5 if unavailable)
+        """
         if not self.symbol_info or 'filters' not in self.symbol_info:
             return 5  # Default quantity precision
         
@@ -149,30 +194,47 @@ class GridTrader:
         return precision
     
     def _adjust_price_precision(self, price):
-        """正确格式化价格，确保精度正确"""
+        """
+        Format price with appropriate precision ensuring non-zero values
+        
+        Args:
+            price (float): Original price value
+            
+        Returns:
+            str: Formatted price string that is never "0"
+        """
         if price <= 0:
             self.logger.warning(f"Attempted to format invalid price: {price}, using minimum price")
-            price = 0.00000001  # 安全默认值
+            return "0.00000001"  # Minimum valid price for Binance
         
-        # 使用正确的格式化方法，确保不会返回"0"
-        formatted_price = "{:.8f}".format(price)  # 使用足够的精度
+        # For small prices or small-value assets (like 1000SATS), ensure enough decimal places
+        if price < 0.001 or self.symbol.startswith(('1000SATS', 'SHIB', 'DOGE')):
+            # Use utils.format_price with high precision 
+            return format_price(price, 8)  # Force 8 decimal places for very small values
         
-        # 移除尾随零，但确保有效价格
-        result = formatted_price.rstrip('0').rstrip('.')
-        if not result or result == "0":
-            return "0.00000001"  # 保证最小有效价格
-        return result
+        # For normal assets, use standard precision based on symbol info
+        # But ensure precision is at least 4 to avoid "0" for small values
+        actual_precision = max(self.price_precision, 4)
+        return format_price(price, actual_precision)
     
     def _adjust_quantity_precision(self, quantity):
-        """Adjust quantity precision"""
+        """
+        Format quantity with appropriate precision
+        
+        Args:
+            quantity (float): Original quantity value
+            
+        Returns:
+            str: Formatted quantity string
+        """
         return format_quantity(quantity, self.quantity_precision)
     
     def _setup_grid(self):
-        """Set up grid"""
+        """Set up grid levels and place initial orders"""
         # Calculate grid levels
         self.grid = self._calculate_grid_levels()
         
-        # New: Store current ATR value for future volatility comparison
+        # Store current ATR value for future volatility comparison
         self.last_atr_value = self._get_current_atr()
         
         # Check if WebSocket API is available for potential batch operations
@@ -180,9 +242,7 @@ class GridTrader:
         self.using_websocket = client_status["websocket_available"]
         
         if self.using_websocket and not self.simulation_mode:
-            # WebSocket is available - could potentially use batch operations
-            # But currently the WebSocket API client doesn't support batch order placement
-            # So we place orders individually but optimize error handling for WebSocket
+            # WebSocket is available - use optimized order placement
             self.logger.info("Using WebSocket API for grid setup")
             self._place_grid_orders_with_websocket()
         else:
@@ -207,6 +267,11 @@ class GridTrader:
             formatted_quantity = self._adjust_quantity_precision(quantity)
             formatted_price = self._adjust_price_precision(price)
             
+            # Additional validation to ensure price isn't zero or invalid
+            if formatted_price == "0" or float(formatted_price) <= 0:
+                self.logger.error(f"Price formatting returned invalid value: '{formatted_price}' for {price}, skipping order")
+                continue
+                
             try:
                 if self.simulation_mode:
                     # In simulation mode, just log the order without placing it
@@ -279,6 +344,11 @@ class GridTrader:
             price = level['price']
             side = level['side']
             
+            # Validate price before proceeding
+            if price <= 0:
+                self.logger.error(f"Invalid price value: {price} for {side} order, skipping")
+                continue
+                
             # Calculate order quantity
             quantity = self.capital_per_level / price
             
@@ -286,6 +356,11 @@ class GridTrader:
             formatted_quantity = self._adjust_quantity_precision(quantity)
             formatted_price = self._adjust_price_precision(price)
             
+            # Additional validation to ensure price isn't zero or invalid
+            if formatted_price == "0" or float(formatted_price) <= 0:
+                self.logger.error(f"Price formatting returned invalid value: '{formatted_price}' for {price}, skipping order")
+                continue
+                
             try:
                 if self.simulation_mode:
                     # In simulation mode, just log the order without placing it
@@ -320,7 +395,12 @@ class GridTrader:
                 self.logger.error(f"Failed to place order: {side} {formatted_quantity} @ {formatted_price}, Error: {e}")
     
     def _calculate_grid_levels(self):
-        """Calculate grid levels"""
+        """
+        Calculate grid levels based on current market price and config
+        
+        Returns:
+            list: Grid levels with price and side information
+        """
         grid_levels = []
         
         # Adjust grid range based on ATR
@@ -336,6 +416,9 @@ class GridTrader:
         lower_bound = self.current_market_price * (1 - adjusted_range)
         upper_bound = self.current_market_price * (1 + adjusted_range)
         
+        # Ensure lower bound is never zero or negative
+        lower_bound = max(lower_bound, 0.00000001)
+        
         # Calculate spacing
         price_range = upper_bound - lower_bound
         level_spacing = price_range / (self.grid_levels - 1) if self.grid_levels > 1 else price_range
@@ -343,6 +426,12 @@ class GridTrader:
         # Create grid
         for i in range(self.grid_levels):
             price = lower_bound + i * level_spacing
+            
+            # Ensure price is valid
+            if price <= 0:
+                self.logger.error(f"Invalid price calculated for grid level {i}: {price}")
+                price = 0.00000001 * (i + 1)  # Use a minimal valid price
+                
             # Buy orders below current price, sell orders above current price
             side = "BUY" if price < self.current_market_price else "SELL"
             grid_levels.append({
@@ -350,11 +439,20 @@ class GridTrader:
                 'side': side,
                 'order_id': None
             })
+            
+            # Log the level details including the formatted price
+            formatted_price = self._adjust_price_precision(price)
+            self.logger.debug(f"Grid level {i}: {side} @ {price} (formatted: {formatted_price})")
         
         return grid_levels
     
     def _get_current_atr(self):
-        """Get current ATR value"""
+        """
+        Get current ATR value for volatility measurement
+        
+        Returns:
+            float: ATR value or None if error
+        """
         try:
             # Update connection status before making API calls
             client_status = self.binance_client.get_client_status()
@@ -382,7 +480,7 @@ class GridTrader:
             return None
     
     def _cancel_all_open_orders(self):
-        """Cancel all open orders"""
+        """Cancel all open orders for the trading symbol"""
         try:
             if self.simulation_mode:
                 self.logger.info("Simulation mode - Would cancel all open orders")
@@ -424,7 +522,12 @@ class GridTrader:
                     self.logger.error(f"Fallback order cancellation also failed: {retry_error}")
     
     def handle_order_update(self, order_data):
-        """Handle order update"""
+        """
+        Handle order update from WebSocket
+        
+        Args:
+            order_data: Order update data from WebSocket
+        """
         if not self.is_running:
             return
         
@@ -466,6 +569,7 @@ class GridTrader:
             
             # Find matching grid level
             matching_level = None
+            level_index = -1
             for i, level in enumerate(self.grid):
                 if level['order_id'] == order_id or str(level['order_id']) == str_order_id:
                     matching_level = level
@@ -484,6 +588,11 @@ class GridTrader:
             # Adjust quantity and price precision
             formatted_quantity = self._adjust_quantity_precision(quantity)
             formatted_price = self._adjust_price_precision(price)
+            
+            # Double-check price formatting
+            if formatted_price == "0" or float(formatted_price) <= 0:
+                self.logger.error(f"Invalid formatted price: {formatted_price} for {price}, using minimum valid price")
+                formatted_price = "0.00000001"  # Use minimum valid price
             
             try:
                 if self.simulation_mode:
@@ -604,14 +713,14 @@ class GridTrader:
             self.logger.error(f"Failed to reconcile grid: {e}")
     
     def check_grid_recalculation(self):
-        """Check if grid recalculation is needed"""
+        """Check if grid recalculation is needed based on time or volatility changes"""
         if not self.is_running or not self.last_recalculation:
             return
         
         recalculate = False
         recalculation_reason = ""
         
-        # New: Check for significant volatility changes
+        # Check for significant volatility changes
         current_atr = self._get_current_atr()
         
         # Check if we have valid ATR values and enough time has passed for cooldown
@@ -656,7 +765,12 @@ class GridTrader:
                 self.telegram_bot.send_message(message)
     
     def get_status(self):
-        """Get current status"""
+        """
+        Get current grid trading status
+        
+        Returns:
+            str: Status message with details
+        """
         if not self.is_running:
             return "System not running"
         
@@ -672,7 +786,9 @@ class GridTrader:
             # Build status message
             grid_info = []
             for i, level in enumerate(self.grid):
-                grid_info.append(f"Grid {i+1}: {level['side']} @ {level['price']:.2f}")
+                # Format price for display using our safe formatter
+                formatted_price = self._adjust_price_precision(level['price'])
+                grid_info.append(f"Grid {i+1}: {level['side']} @ {formatted_price}")
             
             status = f"Grid Trading Status:\n" \
                     f"Trading pair: {self.symbol}\n" \
