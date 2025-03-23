@@ -252,12 +252,7 @@ class GridTrader:
         return message
     
     def stop(self):
-        """
-        Stop grid trading system
-        
-        Returns:
-            str: Status message
-        """
+        """Stop grid trading system"""
         if not self.is_running:
             return "System already stopped"
         
@@ -266,7 +261,12 @@ class GridTrader:
             if not self.simulation_mode:
                 self._cancel_all_open_orders()
             
+            # 完全重置内部状态
             self.is_running = False
+            self.grid = []  # 清空网格
+            self.pending_orders = {}  # 清空pending_orders追踪
+            self.last_recalculation = None
+            
             message = "Grid trading system stopped"
             self.logger.info(message)
             
