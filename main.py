@@ -257,7 +257,7 @@ class GridTradingBot:
             logger.error(f"Failed to set up user data stream: {e}")
     
     def _keep_alive_listen_key_thread(self):
-        """Thread function to keep the listen key alive with improved error handling"""
+        """Thread function to keep the listen key alive with improved thread safety"""
         while True:
             try:
                 # Check run state with thread safety
@@ -268,14 +268,11 @@ class GridTradingBot:
                 # Sleep first to avoid immediate ping after getting a new key
                 time.sleep(LISTEN_KEY_RENEWAL_INTERVAL)
                 
-                # Check again if we should continue
-                with self.state_lock:
-                    if not self.is_running or not self.listen_key:
-                        break
-                        
-                # Get current listen key with thread safety
+                # Get current listen key with thread safety and check state again
                 current_listen_key = None
                 with self.state_lock:
+                    if not self.is_running:
+                        break
                     current_listen_key = self.listen_key
                     
                 if not current_listen_key:
@@ -283,6 +280,11 @@ class GridTradingBot:
                         
                 # Extend listen key validity
                 client_status = self.binance_client.get_client_status()
+                
+                # Final check before network operation
+                with self.state_lock:
+                    if not self.is_running:
+                        break
                 
                 if client_status["websocket_available"]:
                     # Use WebSocket API
@@ -298,7 +300,14 @@ class GridTradingBot:
                 
                 # Try to get a new listen key if the current one is invalid
                 try:
+                    # Check if we should retry
+                    with self.state_lock:
+                        if not self.is_running:
+                            break
+                    
                     time.sleep(5)  # Brief delay before retry
+                    
+                    # Check again after delay
                     with self.state_lock:
                         if self.is_running:  # Only retry if still running
                             self._setup_user_data_stream()
