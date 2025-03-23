@@ -317,40 +317,19 @@ class GridTrader:
     
     def _adjust_price_precision(self, price):
         """
-        Format price to comply with exchange's PRICE_FILTER
-        - Must be tick_size multiples
-        - Rounds to nearest valid price point
+        Format price with appropriate precision
         
         Args:
             price (float): Original price value
             
         Returns:
-            str: Formatted price string compliant with exchange rules
+            str: Formatted price string
         """
         if price <= 0:
             self.logger.warning(f"Attempted to format invalid price: {price}, using minimum price")
             return format_price(self.tick_size, self.price_precision)  # Return minimum tick size
         
-        # Round to the nearest tick size - crucial fix for PRICE_FILTER
-        tick_size = self.tick_size
-        rounded_price = round(price / tick_size) * tick_size
-        
-        # Ensure the price is exactly divisible by tickSize (important for Binance)
-        # Use modulo operation to check and adjust if needed
-        mod_remainder = rounded_price % tick_size
-        if mod_remainder != 0:
-            # Adjust to nearest valid tick
-            rounded_price = rounded_price - mod_remainder
-            
-        # Format with proper precision for string representation
-        formatted_price = "{:.{}f}".format(rounded_price, self.price_precision)
-        
-        # Remove trailing zeros but never return "0"
-        result = formatted_price.rstrip('0').rstrip('.') if '.' in formatted_price else formatted_price
-        if result == "0":
-            return format_price(tick_size, self.price_precision)
-            
-        return result
+        return format_price(price, self.price_precision)
     
     def _adjust_quantity_precision(self, quantity):
         """
