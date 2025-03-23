@@ -19,11 +19,11 @@ WS_AUTO_RECONNECT = os.getenv("WS_AUTO_RECONNECT", "true").lower() == "true"  # 
 PREFER_WEBSOCKET = os.getenv("PREFER_WEBSOCKET", "true").lower() == "true"  # 优先使用WebSocket API
 
 # 交易设置
-SYMBOL = "ACTUSDT"
-GRID_LEVELS = 8  # 网格数量
-GRID_SPACING = 1.0  # 网格间距（百分比）
-CAPITAL_PER_LEVEL = 6  # 每个网格的资金（USDT）
-GRID_RANGE_PERCENT = 2.5  # 网格范围（百分比）
+SYMBOL = "1000SATSUSDT"
+GRID_LEVELS = 7  # 网格数量
+GRID_SPACING = 0.8  # 网格间距（百分比）
+CAPITAL_PER_LEVEL = 7  # 每个网格的资金（USDT）
+GRID_RANGE_PERCENT = 2.4  # 网格范围（百分比）
 RECALCULATION_PERIOD = 7  # 重新计算网格的周期（天）
 ATR_PERIOD = 14  # ATR计算周期
 
