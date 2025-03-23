@@ -87,8 +87,8 @@ class TelegramBot:
     
     def send_message(self, message, user_id=None):
         """Send a message to all allowed users or a specific user"""
-        if not self.is_running:
-            self.logger.warning("Cannot send message: Telegram bot not running")
+        if not self.is_running or self.loop is None:
+            self.logger.warning("Cannot send message: Telegram bot not running properly")
             return
             
         if user_id and user_id in self.allowed_users:
