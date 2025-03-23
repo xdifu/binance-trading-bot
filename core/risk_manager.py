@@ -210,10 +210,19 @@ class RiskManager:
         try:
             update_required = False
             
-            # Update historical high and low prices
+            # Track price history
             if current_price > self.highest_price:
                 self.highest_price = current_price
-                # Update trailing take profit price
+                
+                # Update trailing stop loss when price hits new high (FIXED - this was reversed)
+                new_stop_loss = current_price * (1 - self.trailing_stop_loss_percent)
+                # Only update if new stop loss is higher (proper trailing behavior)
+                if new_stop_loss > self.stop_loss_price:
+                    self.stop_loss_price = new_stop_loss
+                    update_required = True
+                    self.logger.info(f"Updated trailing stop loss price: {self.stop_loss_price}")
+                
+                # Update trailing take profit also when price hits new high
                 new_take_profit = current_price * (1 + self.trailing_take_profit_percent)
                 # Only update if new take profit is higher (trailing behavior)
                 if new_take_profit > self.take_profit_price:
@@ -221,15 +230,9 @@ class RiskManager:
                     update_required = True
                     self.logger.info(f"Updated trailing take profit price: {self.take_profit_price}")
             
+            # Track lowest price for analysis purposes only
             if current_price < self.lowest_price:
                 self.lowest_price = current_price
-                # Update trailing stop loss price
-                new_stop_loss = current_price * (1 - self.trailing_stop_loss_percent)
-                # Only update if new stop loss is lower than current one (trailing behavior)
-                if new_stop_loss < self.stop_loss_price:
-                    self.stop_loss_price = new_stop_loss
-                    update_required = True
-                    self.logger.info(f"Updated trailing stop loss price: {self.stop_loss_price}")
             
             # Update orders if needed
             if update_required and self.oco_order_id:
