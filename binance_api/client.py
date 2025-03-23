@@ -128,16 +128,14 @@ class BinanceClient:
             return False
     
     def _get_timestamp(self):
-        """
-        Get timestamp adjusted for server time offset
-        Returns: int - Server-adjusted timestamp in milliseconds
-        """
-        # Force time sync if it hasn't been done in a while
+        """Get timestamp adjusted for server time offset"""
         current_time = int(time.time())
         if current_time - self.last_time_sync > self.time_sync_interval:
             self._sync_time()
         
-        return int(time.time() * 1000) + self.time_offset
+        adjusted_time = int(time.time() * 1000) + self.time_offset
+        self.logger.debug(f"Using adjusted timestamp: {adjusted_time} (offset: {self.time_offset}ms)")
+        return adjusted_time
     
     def _execute_with_fallback(self, ws_method_name, rest_method_name, *args, **kwargs):
         """
