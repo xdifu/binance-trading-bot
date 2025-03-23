@@ -780,7 +780,16 @@ class GridTrader:
             
             # Adjust quantity and price precision
             formatted_quantity = self._adjust_quantity_precision(quantity)
-            formatted_price = self._adjust_price_precision(price)
+            
+            # 修改建议 - 为反向订单添加价差
+            if new_side == "SELL":
+                # 买入成交后，卖单提价
+                new_price = price * 1.01  # 提高1%
+                formatted_price = self._adjust_price_precision(new_price)
+            else:
+                # 卖出成交后，买单降价
+                new_price = price * 0.99  # 降低1%
+                formatted_price = self._adjust_price_precision(new_price)
             
             # Double-check price formatting
             if formatted_price == "0" or float(formatted_price) <= 0:
