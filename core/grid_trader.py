@@ -800,6 +800,28 @@ class GridTrader:
                 new_price = price * 0.99  # 降低1%
                 formatted_price = self._adjust_price_precision(new_price)
             
+            # Calculate potential profit and fees
+            if new_side == "SELL":
+                # After BUY order filled, create higher SELL order
+                new_price = price * 1.01  # 1% higher
+                formatted_price = self._adjust_price_precision(new_price)
+            else:
+                # After SELL order filled, create lower BUY order
+                new_price = price * 0.99  # 1% lower
+                formatted_price = self._adjust_price_precision(new_price)
+
+            # Calculate expected profit and trading fees
+            expected_profit = abs(float(new_price) - float(price)) / float(price) * 100  # Profit in percentage
+            trading_fee = 0.075 * 2  # 0.075% per trade, x2 for round-trip (BNB payment rate)
+
+            # Only create reverse order if profit exceeds fees by a safe margin
+            if expected_profit <= trading_fee * 1.5:  # Profit should be at least 1.5x the fees
+                self.logger.info(f"Skipping reverse order - insufficient profit margin: {expected_profit:.4f}% vs fees: {trading_fee:.4f}%")
+                # Release locked funds if we're not placing an order
+                if not self.simulation_mode and 'asset' in locals() and 'required' in locals():
+                    self._release_funds(asset, required)
+                return
+            
             # Double-check price formatting
             if formatted_price == "0" or float(formatted_price) <= 0:
                 self.logger.error(f"Invalid formatted price: {formatted_price} for {price}, using minimum valid price")
