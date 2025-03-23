@@ -393,6 +393,15 @@ class GridTrader:
         # Calculate grid spacing (price difference between adjacent levels)
         grid_step = grid_range / (self.grid_levels - 1) if self.grid_levels > 1 else 0
         
+        # 基于ATR调整网格间距
+        atr = self._get_current_atr()
+        if (atr):
+            # 使用ATR值动态调整网格间距
+            # ATR值越高，间距越大
+            volatility_factor = min(max(atr / current_price * 10, 0.8), 1.5)
+            grid_step = grid_step * volatility_factor
+            self.logger.info(f"Adjusted grid step based on volatility: {grid_step:.4f}")
+        
         # Build the grid levels
         grid = []
         
