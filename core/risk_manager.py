@@ -1,11 +1,18 @@
 import logging
 import time
+import config
 from datetime import datetime
 from utils.format_utils import format_price, format_quantity, get_precision_from_filters
-import config
 
 class RiskManager:
     def __init__(self, binance_client, telegram_bot=None):
+        """
+        Initialize risk management system
+        
+        Args:
+            binance_client: BinanceClient instance for API operations
+            telegram_bot: Optional TelegramBot instance for notifications
+        """
         self.binance_client = binance_client
         self.telegram_bot = telegram_bot
         self.symbol = config.SYMBOL
@@ -43,7 +50,12 @@ class RiskManager:
         self.pending_oco_orders = {}
 
     def _get_symbol_info(self):
-        """Get symbol information with connection status tracking"""
+        """
+        Get symbol information with connection status tracking
+        
+        Returns:
+            dict: Symbol information or None if error
+        """
         try:
             # Check which client is being used
             client_status = self.binance_client.get_client_status()
@@ -62,27 +74,59 @@ class RiskManager:
             return None
 
     def _get_price_precision(self):
-        """Get price precision"""
+        """
+        Get price precision from symbol info
+        
+        Returns:
+            int: Price precision value
+        """
         if not self.symbol_info or 'filters' not in self.symbol_info:
             return 2  # Default price precision
         return get_precision_from_filters(self.symbol_info['filters'], 'PRICE_FILTER', 'tickSize')
     
     def _get_quantity_precision(self):
-        """Get quantity precision"""
+        """
+        Get quantity precision from symbol info
+        
+        Returns:
+            int: Quantity precision value
+        """
         if not self.symbol_info or 'filters' not in self.symbol_info:
             return 5  # Default quantity precision
         return get_precision_from_filters(self.symbol_info['filters'], 'LOT_SIZE', 'stepSize')
         
     def _adjust_price_precision(self, price):
-        """Adjust price precision"""
+        """
+        Format price with appropriate precision
+        
+        Args:
+            price (float): Original price value
+            
+        Returns:
+            str: Formatted price string
+        """
         return format_price(price, self.price_precision)
     
     def _adjust_quantity_precision(self, quantity):
-        """Adjust quantity precision"""
+        """
+        Format quantity with appropriate precision
+        
+        Args:
+            quantity (float): Original quantity value
+            
+        Returns:
+            str: Formatted quantity string
+        """
         return format_quantity(quantity, self.quantity_precision)
         
     def activate(self, grid_lowest, grid_highest):
-        """Activate risk management"""
+        """
+        Activate risk management system
+        
+        Args:
+            grid_lowest (float): Lowest grid price
+            grid_highest (float): Highest grid price
+        """
         try:
             # Check WebSocket availability before proceeding
             client_status = self.binance_client.get_client_status()
@@ -135,7 +179,13 @@ class RiskManager:
                     self.logger.error(f"Fallback activation also failed: {retry_error}")
     
     def _retry_activate(self, grid_lowest, grid_highest):
-        """Retry activation with updated client status"""
+        """
+        Retry activation with updated client status
+        
+        Args:
+            grid_lowest (float): Lowest grid price
+            grid_highest (float): Highest grid price
+        """
         # Get current price
         current_price = self.binance_client.get_symbol_price(self.symbol)
         
@@ -165,7 +215,7 @@ class RiskManager:
         self._place_oco_orders()
     
     def deactivate(self):
-        """Deactivate risk management"""
+        """Deactivate risk management system"""
         if not self.is_active:
             return
         
@@ -217,7 +267,15 @@ class RiskManager:
                     self.logger.error(f"Fallback deactivation also failed: {retry_error}")
 
     def check_price(self, current_price):
-        """Check if price requires updating trailing stop loss or take profit"""
+        """
+        Check if price requires updating trailing stop loss or take profit
+        
+        Args:
+            current_price (float): Current market price
+            
+        Returns:
+            None
+        """
         if not self.is_active:
             return None
         
@@ -338,7 +396,7 @@ class RiskManager:
             
             self.logger.info(f"Placing OCO order via {api_type}: Stop: {stop_price}, Limit: {limit_price}, Qty: {quantity}")
             
-            # Place OCO order
+            # Place OCO order with required aboveType and belowType parameters
             response = self.binance_client.new_oco_order(
                 symbol=self.symbol,
                 side="SELL",  # Sell assets
@@ -346,7 +404,9 @@ class RiskManager:
                 price=limit_price,  # Take profit price
                 stopPrice=stop_price,  # Stop loss trigger price
                 stopLimitPrice=stop_limit_price,  # Stop limit price
-                stopLimitTimeInForce="GTC"  # Good Till Cancel
+                stopLimitTimeInForce="GTC",  # Good Till Cancel
+                aboveType="LIMIT_MAKER",  # Above price order type (Take profit)
+                belowType="STOP_LOSS_LIMIT"  # Below price order type (Stop loss)
             )
             
             # Handle different response formats from WebSocket vs REST
@@ -428,7 +488,7 @@ class RiskManager:
         
         self.logger.info(f"Placing OCO order via REST fallback: Stop: {stop_price}, Limit: {limit_price}, Qty: {quantity}")
         
-        # Place OCO order
+        # Place OCO order with required aboveType and belowType parameters
         response = self.binance_client.new_oco_order(
             symbol=self.symbol,
             side="SELL",
@@ -436,7 +496,9 @@ class RiskManager:
             price=limit_price,
             stopPrice=stop_price,
             stopLimitPrice=stop_limit_price,
-            stopLimitTimeInForce="GTC"
+            stopLimitTimeInForce="GTC",
+            aboveType="LIMIT_MAKER",  # Above price order type (Take profit)
+            belowType="STOP_LOSS_LIMIT"  # Below price order type (Stop loss)
         )
         
         # Handle response
@@ -523,8 +585,8 @@ class RiskManager:
                         self.pending_oco_orders = {}
                     except Exception as retry_error:
                         if "not found" in str(retry_error).lower() or "unknown" in str(retry_error).lower():
-                            self.logger.warning(f"OCO order {self.oco_order_id} not found, likely already executed or cancelled")
-                            self.oco_order_id = None
+                            self.logger.warning(f"OCO order {self.oco_order_id} not found during fallback attempt")
+                            self.oco_order_id = None 
                             self.pending_oco_orders = {}
                         else:
                             self.logger.error(f"Fallback OCO order cancellation also failed: {retry_error}")
@@ -724,7 +786,12 @@ class RiskManager:
                 self.telegram_bot.send_message(message)
                 
     def get_status(self):
-        """Get current risk management status"""
+        """
+        Get current risk management status
+        
+        Returns:
+            str: Status message with details
+        """
         if not self.is_active:
             return "Risk management is inactive"
             
@@ -748,7 +815,16 @@ class RiskManager:
         return status_text
 
     def update_thresholds(self, price_threshold=None, time_interval=None):
-        """Update the thresholds used for OCO order updates"""
+        """
+        Update the thresholds used for OCO order updates
+        
+        Args:
+            price_threshold (float): New price threshold as percentage (0.01 = 1%)
+            time_interval (int): New time interval in minutes
+            
+        Returns:
+            str: Status message with new threshold values
+        """
         if price_threshold is not None:
             self.min_update_threshold_percent = max(0.001, min(0.1, price_threshold))
             
