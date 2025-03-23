@@ -801,16 +801,16 @@ class GridTrader:
                 formatted_price = self._adjust_price_precision(new_price)
             
             # Calculate expected profit and trading fees
-            expected_profit = abs(float(new_price) - float(price)) / float(price) * 100  # Profit in percentage
+            expected_profit = abs(float(new_price) - float(price)) / float(price) * 100
             trading_fee = 0.075 * 2  # 0.075% per trade, x2 for round-trip (BNB payment rate)
             
-            # Only create reverse order if profit exceeds fees by a safe margin (increased to 2x)
+            # Only create reverse order if profit exceeds fees by a safe margin
             if expected_profit <= trading_fee * 2:  # Profit should be at least 2x the fees
                 self.logger.info(f"Skipping reverse order - insufficient profit margin: {expected_profit:.4f}% vs fees: {trading_fee:.4f}%")
                 return
             
-            # Add minimum order value check
-            min_order_value = 10  # Minimum 10 USDT order value
+            # Use config value for minimum order check instead of hardcoded value
+            min_order_value = config.CAPITAL_PER_LEVEL  # Use grid capital setting as minimum order threshold
             order_value = float(formatted_quantity) * float(formatted_price)
             if order_value < min_order_value:
                 self.logger.info(f"Skipping small order - value too low: {order_value:.2f} USDT < {min_order_value} USDT")
