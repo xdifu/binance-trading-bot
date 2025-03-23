@@ -396,7 +396,7 @@ class RiskManager:
             
             self.logger.info(f"Placing OCO order via {api_type}: Stop: {stop_price}, Limit: {limit_price}, Qty: {quantity}")
             
-            # Place OCO order with required aboveType and belowType parameters
+            # Place OCO order with standard parameters (removed aboveType and belowType)
             response = self.binance_client.new_oco_order(
                 symbol=self.symbol,
                 side="SELL",  # Sell assets
@@ -404,9 +404,7 @@ class RiskManager:
                 price=limit_price,  # Take profit price
                 stopPrice=stop_price,  # Stop loss trigger price
                 stopLimitPrice=stop_limit_price,  # Stop limit price
-                stopLimitTimeInForce="GTC",  # Good Till Cancel
-                aboveType="LIMIT_MAKER",  # Above price order type (Take profit)
-                belowType="STOP_LOSS_LIMIT"  # Below price order type (Stop loss)
+                stopLimitTimeInForce="GTC"  # Good Till Cancel
             )
             
             # Handle different response formats from WebSocket vs REST
@@ -488,7 +486,7 @@ class RiskManager:
         
         self.logger.info(f"Placing OCO order via REST fallback: Stop: {stop_price}, Limit: {limit_price}, Qty: {quantity}")
         
-        # Place OCO order with required aboveType and belowType parameters
+        # Place OCO order with standard parameters (removed aboveType and belowType)
         response = self.binance_client.new_oco_order(
             symbol=self.symbol,
             side="SELL",
@@ -496,9 +494,7 @@ class RiskManager:
             price=limit_price,
             stopPrice=stop_price,
             stopLimitPrice=stop_limit_price,
-            stopLimitTimeInForce="GTC",
-            aboveType="LIMIT_MAKER",  # Above price order type (Take profit)
-            belowType="STOP_LOSS_LIMIT"  # Below price order type (Stop loss)
+            stopLimitTimeInForce="GTC"
         )
         
         # Handle response
