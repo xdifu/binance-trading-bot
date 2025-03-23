@@ -108,8 +108,19 @@ class BinanceWebSocketAPIClient:
         # Session status
         self.session_authenticated = False
         
-        # Connect to WebSocket
+        # Time synchronization variables
+        self.time_offset = 0  # Time difference between local and server time in ms
+        self.last_sync_time = 0  # Last time we synchronized with server time
+        self.sync_interval = 60 * 60  # Re-sync time every hour (seconds)
+        self.sync_retry_count = 0
+        self.sync_max_retries = 5
+        self.time_sync_lock = threading.Lock()
+        
+        # Connect to WebSocket and synchronize time
         self.connect()
+        
+        # Initial time synchronization
+        self.sync_server_time()
     
     def connect(self) -> bool:
         """
@@ -179,6 +190,9 @@ class BinanceWebSocketAPIClient:
                 self.close()
                 return False
             
+            # Synchronize time with server before authentication
+            self.sync_server_time()
+            
             # Authenticate session if we have an Ed25519 key
             if self.private_key and self.api_key and isinstance(self.private_key, ed25519.Ed25519PrivateKey):
                 if not self.authenticate_session():
@@ -192,6 +206,85 @@ class BinanceWebSocketAPIClient:
             self.ws_connected = False
             return False
     
+    def sync_server_time(self) -> bool:
+        """
+        Synchronize local time with Binance server time
+        
+        Returns:
+            bool: True if synchronization was successful, False otherwise
+        """
+        with self.time_sync_lock:
+            try:
+                # Get server time
+                time_response = self._send_request_raw("time")
+                response = self._wait_for_response(time_response)
+                
+                if response and response.get("status") == 200 and 'result' in response:
+                    # Calculate offset (server_time - local_time)
+                    server_time = response['result']['serverTime']
+                    local_time = int(time.time() * 1000)
+                    
+                    # Calculate the time offset in milliseconds
+                    new_offset = server_time - local_time
+                    
+                    # Update the time offset
+                    self.time_offset = new_offset
+                    self.last_sync_time = time.time()
+                    
+                    # Log time sync results
+                    if abs(new_offset) > 1000:
+                        # If offset is > 1 second, log as warning
+                        self.logger.warning(f"Local time is {'ahead of' if new_offset < 0 else 'behind'} server by "
+                                           f"{abs(new_offset)/1000:.2f} seconds. Offset applied: {new_offset}ms")
+                    else:
+                        # Normal offset within threshold
+                        self.logger.debug(f"Time synchronized with server. Offset: {new_offset}ms")
+                    
+                    # Reset retry count on successful sync
+                    self.sync_retry_count = 0
+                    return True
+                else:
+                    self.logger.error(f"Failed to get server time: {response}")
+                    return False
+            except Exception as e:
+                self.logger.error(f"Error synchronizing time: {e}")
+                
+                # Increment retry count
+                self.sync_retry_count += 1
+                
+                # If we've reached max retries, stop retrying
+                if self.sync_retry_count > self.sync_max_retries:
+                    self.logger.error(f"Failed to sync time after {self.sync_retry_count} attempts, giving up")
+                    return False
+                    
+                # Try again after a delay (exponential backoff)
+                retry_delay = min(30, 2 ** self.sync_retry_count)
+                self.logger.warning(f"Retrying time sync in {retry_delay} seconds...")
+                time.sleep(retry_delay)
+                
+                # Recursive retry
+                return self.sync_server_time()
+    
+    def get_adjusted_timestamp(self) -> int:
+        """
+        Get current timestamp adjusted with server time offset
+        
+        Returns:
+            int: Current timestamp in milliseconds, adjusted to match server time
+        """
+        # Check if we need to re-sync time
+        current_time = time.time()
+        if current_time - self.last_sync_time > self.sync_interval:
+            # Time for periodic re-sync
+            try:
+                # Don't block - start a background thread to sync time
+                threading.Thread(target=self.sync_server_time, daemon=True).start()
+            except Exception as e:
+                self.logger.error(f"Failed to start time sync thread: {e}")
+        
+        # Return current timestamp adjusted with the offset
+        return int(time.time() * 1000) + self.time_offset
+    
     def authenticate_session(self) -> bool:
         """
         Authenticate the WebSocket session using Ed25519 key
@@ -204,7 +297,8 @@ class BinanceWebSocketAPIClient:
             self.logger.warning("Cannot authenticate session: API key or valid Ed25519 private key is missing")
             return False
         
-        timestamp = int(time.time() * 1000)
+        # Use adjusted timestamp
+        timestamp = self.get_adjusted_timestamp()
         
         params = {
             "apiKey": self.api_key,
@@ -220,7 +314,7 @@ class BinanceWebSocketAPIClient:
             signature = self.private_key.sign(query_string.encode('utf-8'))
             params["signature"] = base64.b64encode(signature).decode('utf-8')
             
-            # 使用正确的方法名: session.logon 而不是 session.login
+            # Use the correct method name: session.logon
             self.logger.debug(f"Auth query string: {query_string}")
             self.logger.debug(f"Auth signature: {params['signature'][:10]}...{params['signature'][-10:]}")
             
@@ -406,6 +500,11 @@ class BinanceWebSocketAPIClient:
                     # IP ban
                     ban_until = data['error'].get('data', {}).get('banUntil', '')
                     self.logger.error(f"IP banned until {ban_until}")
+                elif error_code == -1021:
+                    # Timestamp out of sync with server
+                    self.logger.warning("Timestamp error detected, re-syncing time with server...")
+                    # Force time resync immediately
+                    self.sync_server_time()
                 else:
                     self.logger.error(f"Error {error_code}: {error_msg}")
             
@@ -428,6 +527,47 @@ class BinanceWebSocketAPIClient:
             self.logger.error(f"Failed to parse message as JSON: {message[:200]}...")
         except Exception as e:
             self.logger.error(f"Error handling message: {e}, message: {message[:200]}...")
+    
+    def _send_request_raw(self, method: str, params: Optional[Dict] = None) -> str:
+        """
+        Send a request to the WebSocket API without automatic time adjustment
+        Used internally for time synchronization to avoid circular dependencies
+        
+        Args:
+            method: API method name
+            params: Request parameters
+            
+        Returns:
+            str: Request ID
+        """
+        if not self.ws_connected:
+            if not self.connect():
+                raise ConnectionError("Failed to connect to WebSocket API")
+        
+        request_id = self._generate_request_id()
+        request = {
+            "id": request_id,
+            "method": method
+        }
+        
+        if params:
+            request["params"] = params
+        
+        # Send request
+        request_json = json.dumps(request)
+        self.logger.debug(f"Sending raw request: {request_json[:200]}...")
+        
+        try:
+            with self.lock:
+                if self.ws and self.ws_connected:
+                    self.ws.send(request_json)
+                else:
+                    raise ConnectionError("WebSocket is not connected")
+        except Exception as e:
+            self.logger.error(f"Error sending raw request: {e}")
+            raise
+        
+        return request_id
     
     def _send_request(
         self, 
@@ -508,8 +648,8 @@ class BinanceWebSocketAPIClient:
         if not params:
             params = {}
         
-        # Add timestamp for signature
-        params['timestamp'] = int(time.time() * 1000)
+        # Add timestamp for signature with server time adjustment
+        params['timestamp'] = self.get_adjusted_timestamp()
         
         # If session is authenticated, we don't need to send apiKey and signature
         if self.session_authenticated:
@@ -608,6 +748,12 @@ class BinanceWebSocketAPIClient:
                         # Re-queue any responses we set aside
                         for r in responses_to_requeue:
                             self.response_queue.put(r)
+                        
+                        # Check for timestamp error and auto-resync
+                        if 'error' in response and response['error'].get('code') == -1021:
+                            self.logger.warning("Timestamp error in response, re-syncing time...")
+                            self.sync_server_time()
+                            
                         return response
                     else:
                         # Save this response to put back later
@@ -653,7 +799,23 @@ class BinanceWebSocketAPIClient:
             Dict: Server response with time
         """
         request_id = self._send_request("time")
-        return self._wait_for_response(request_id)
+        response = self._wait_for_response(request_id)
+        
+        # Auto-update time offset when we get server time
+        if response and response.get("status") == 200 and 'result' in response:
+            server_time = response['result']['serverTime']
+            local_time = int(time.time() * 1000)
+            new_offset = server_time - local_time
+            
+            # Update offset with thread safety
+            with self.time_sync_lock:
+                self.time_offset = new_offset
+                self.last_sync_time = time.time()
+                
+                if abs(new_offset) > 1000:
+                    self.logger.info(f"Time offset updated: {new_offset}ms")
+        
+        return response
     
     # ===== Account Methods =====
     
@@ -772,6 +934,10 @@ class BinanceWSClient:
     def check_connectivity(self, timeout=20):
         """Test WebSocket API connectivity"""
         try:
+            # Also ensure time is synchronized
+            self.client.sync_server_time()
+            
+            # Test general connectivity
             response = self.client.ping_server()
             return response and response.get("status") == 200
         except Exception as e:
