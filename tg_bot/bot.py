@@ -43,6 +43,9 @@ class TelegramBot:
         self.logger.info("Starting Telegram bot")
         self.is_running = True
         
+        # 添加这行调试日志
+        self.logger.info(f"Registered command handlers: {[cmd for cmd in self.application.handlers[0]._handlers.keys()]}")
+        
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
         
