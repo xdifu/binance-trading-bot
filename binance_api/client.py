@@ -33,7 +33,7 @@ class BinanceClient:
         # Add time offset variable for server time synchronization
         self.time_offset = 0
         self.last_time_sync = 0
-        self.time_sync_interval = 60 * 60  # Sync time every hour
+        self.time_sync_interval = 60 * 10  # Sync time every 10 minutes (increased frequency)
         
         # Initialize WebSocket API client first (if available)
         if WEBSOCKET_API_AVAILABLE:
@@ -108,7 +108,7 @@ class BinanceClient:
         This helps prevent 'Timestamp for this request was 1000ms ahead of the server's time' errors
         """
         try:
-            # Skip if we've synced recently
+            # Skip if we've synced recently (unless forced)
             current_time = int(time.time())
             if current_time - self.last_time_sync < self.time_sync_interval and self.last_time_sync > 0:
                 return True
@@ -139,6 +139,11 @@ class BinanceClient:
         Get timestamp adjusted for server time offset
         Returns: int - Server-adjusted timestamp in milliseconds
         """
+        # Force time sync if it hasn't been done in a while
+        current_time = int(time.time())
+        if current_time - self.last_time_sync > self.time_sync_interval:
+            self._sync_time()
+        
         return int(time.time() * 1000) + self.time_offset
     
     def _execute_with_fallback(self, ws_method_name, rest_method_name, *args, **kwargs):
@@ -378,6 +383,23 @@ class BinanceClient:
         except Exception as e:
             self.logger.error(f"Failed to get klines data: {e}")
             raise
+    
+    # Add get_klines as alias for get_historical_klines for compatibility
+    def get_klines(self, symbol, interval, start_str=None, limit=500):
+        """
+        Alias for get_historical_klines for compatibility with grid_trader
+        
+        Args:
+            symbol: Trading pair symbol
+            interval: Kline interval (e.g. 1h, 4h, 1d)
+            start_str: Optional start time in milliseconds
+            limit: Number of klines to return
+            
+        Returns:
+            list: List of klines data
+        """
+        self.logger.debug("Using get_klines alias for get_historical_klines")
+        return self.get_historical_klines(symbol, interval, start_str, limit)
 
     def place_stop_loss_order(self, symbol, quantity, stop_price):
         """Place stop loss order"""
@@ -437,8 +459,29 @@ class BinanceClient:
             self.logger.error(f"Failed to place take profit order: {e}")
             raise
 
-    def new_oco_order(self, symbol, side, quantity, price, stopPrice, stopLimitPrice=None, stopLimitTimeInForce="GTC", **kwargs):
-        """Create OCO (One-Cancels-the-Other) order"""
+    def new_oco_order(self, symbol, side, quantity, price, stopPrice, stopLimitPrice=None, 
+                     stopLimitTimeInForce="GTC", aboveType=None, belowType=None, **kwargs):
+        """
+        Create OCO (One-Cancels-the-Other) order
+        
+        Note: aboveType and belowType parameters are included for backwards compatibility
+        but are no longer required by Binance API
+        
+        Args:
+            symbol: Trading pair symbol
+            side: Order side (BUY/SELL)
+            quantity: Order quantity
+            price: Limit order price
+            stopPrice: Stop price
+            stopLimitPrice: Stop limit price (optional)
+            stopLimitTimeInForce: Time in force for stop limit order (default: GTC)
+            aboveType: Legacy parameter (not used in current API)
+            belowType: Legacy parameter (not used in current API)
+            **kwargs: Additional parameters to pass to the API
+            
+        Returns:
+            dict: Order response
+        """
         try:
             # Validate and format all prices
             try:
