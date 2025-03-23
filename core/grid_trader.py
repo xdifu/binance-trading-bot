@@ -393,11 +393,11 @@ class GridTrader:
         # Calculate grid spacing (price difference between adjacent levels)
         grid_step = grid_range / (self.grid_levels - 1) if self.grid_levels > 1 else 0
         
-        # 基于ATR调整网格间距
+        # Use ATR to dynamically adjust grid spacing
         atr = self._get_current_atr()
         if (atr):
-            # 使用ATR值动态调整网格间距
-            # ATR值越高，间距越大
+            # ATR volatility factor adjustment
+            # Higher volatility = wider spacing
             volatility_factor = min(max(atr / current_price * 10, 0.8), 1.5)
             grid_step = grid_step * volatility_factor
             self.logger.info(f"Adjusted grid step based on volatility: {grid_step:.4f}")
@@ -787,39 +787,33 @@ class GridTrader:
             # Create opposite order
             new_side = "SELL" if side == "BUY" else "BUY"
             
-            # Adjust quantity and price precision
+            # Adjust quantity precision
             formatted_quantity = self._adjust_quantity_precision(quantity)
             
-            # 修改建议 - 为反向订单添加价差
+            # Set price with increased spread for new order (1.5% instead of 1%)
             if new_side == "SELL":
-                # 买入成交后，卖单提价
-                new_price = price * 1.01  # 提高1%
+                # For SELL orders after BUY executed, set higher price (+1.5%)
+                new_price = price * 1.015  # Increased from 1.01 to 1.015
                 formatted_price = self._adjust_price_precision(new_price)
             else:
-                # 卖出成交后，买单降价
-                new_price = price * 0.99  # 降低1%
+                # For BUY orders after SELL executed, set lower price (-1.5%)
+                new_price = price * 0.985  # Increased from 0.99 to 0.985
                 formatted_price = self._adjust_price_precision(new_price)
             
-            # Calculate potential profit and fees
-            if new_side == "SELL":
-                # After BUY order filled, create higher SELL order
-                new_price = price * 1.01  # 1% higher
-                formatted_price = self._adjust_price_precision(new_price)
-            else:
-                # After SELL order filled, create lower BUY order
-                new_price = price * 0.99  # 1% lower
-                formatted_price = self._adjust_price_precision(new_price)
-
             # Calculate expected profit and trading fees
             expected_profit = abs(float(new_price) - float(price)) / float(price) * 100  # Profit in percentage
             trading_fee = 0.075 * 2  # 0.075% per trade, x2 for round-trip (BNB payment rate)
-
-            # Only create reverse order if profit exceeds fees by a safe margin
-            if expected_profit <= trading_fee * 1.5:  # Profit should be at least 1.5x the fees
+            
+            # Only create reverse order if profit exceeds fees by a safe margin (increased to 2x)
+            if expected_profit <= trading_fee * 2:  # Profit should be at least 2x the fees
                 self.logger.info(f"Skipping reverse order - insufficient profit margin: {expected_profit:.4f}% vs fees: {trading_fee:.4f}%")
-                # Release locked funds if we're not placing an order
-                if not self.simulation_mode and 'asset' in locals() and 'required' in locals():
-                    self._release_funds(asset, required)
+                return
+            
+            # Add minimum order value check
+            min_order_value = 10  # Minimum 10 USDT order value
+            order_value = float(formatted_quantity) * float(formatted_price)
+            if order_value < min_order_value:
+                self.logger.info(f"Skipping small order - value too low: {order_value:.2f} USDT < {min_order_value} USDT")
                 return
             
             # Double-check price formatting
@@ -887,6 +881,8 @@ class GridTrader:
                 if self.telegram_bot:
                     self.telegram_bot.send_message(message)
             except Exception as e:
+                # Release locked funds if order placement fails
+                self._release_funds(asset, required)
                 self.logger.error(f"Failed to place opposite order: {e}")
                 
                 # If WebSocket connection error, try with REST API
@@ -915,6 +911,7 @@ class GridTrader:
                         if self.telegram_bot:
                             self.telegram_bot.send_message(message)
                     except Exception as retry_error:
+                        self._release_funds(asset, required)  # Make sure to release funds on retry failure
                         self.logger.error(f"Fallback order placement also failed: {retry_error}")
 
     def _lock_funds(self, asset, amount):
