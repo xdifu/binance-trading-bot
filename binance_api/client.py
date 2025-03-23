@@ -224,18 +224,40 @@ class BinanceClient:
         return False
 
     def _adjust_price_precision(self, price):
-        """正确格式化价格，确保精度正确"""
-        if price <= 0:
-            self.logger.warning(f"Attempted to format invalid price: {price}, using minimum price")
-            price = 0.00000001  # 安全默认值
+        """
+        Format price to appropriate precision and ensure it's never zero
         
-        # 使用正确的格式化方法，确保不会返回"0"
-        formatted_price = "{:.8f}".format(price)  # 使用足够的精度
+        Args:
+            price: Price value to format
+            
+        Returns:
+            str: Formatted price string that is never "0"
+        """
+        try:
+            # Handle non-numeric inputs
+            price_float = float(price)
+        except (ValueError, TypeError):
+            self.logger.warning(f"Invalid price value: {price}, using minimum price")
+            return "0.00000001"  # Minimum valid price
+            
+        # Validate price is positive
+        if price_float <= 0:
+            self.logger.warning(f"Non-positive price value: {price}, using minimum price")
+            return "0.00000001"  # Minimum valid price
         
-        # 移除尾随零，但确保有效价格
-        result = formatted_price.rstrip('0').rstrip('.')
+        # For very small prices, ensure enough decimal places
+        if price_float < 0.001:
+            # Use 8 decimal places for very small values
+            formatted_price = "{:.8f}".format(price_float)
+        else:
+            # General formatter - 8 decimal places as safe default
+            formatted_price = "{:.8f}".format(price_float)
+        
+        # Remove trailing zeros but ensure not returning "0"
+        result = formatted_price.rstrip('0').rstrip('.') if '.' in formatted_price else formatted_price
         if not result or result == "0":
-            return "0.00000001"  # 保证最小有效价格
+            return "0.00000001"  # Minimum valid price
+            
         return result
 
     def get_exchange_info(self, symbol=None):
@@ -283,11 +305,19 @@ class BinanceClient:
     def place_limit_order(self, symbol, side, quantity, price):
         """Place limit order"""
         try:
-            # Validate price before sending
-            if float(price) <= 0:
-                self.logger.error(f"Invalid price value: {price} for {side} order")
-                raise ValueError(f"Invalid price value: {price}")
+            # Validate and format price before sending
+            try:
+                price_float = float(price)
+                if price_float <= 0:
+                    self.logger.error(f"Invalid price value: {price} for {side} order")
+                    raise ValueError(f"Invalid price value: {price}")
+            except (ValueError, TypeError):
+                self.logger.error(f"Non-numeric price value: {price} for {side} order")
+                raise ValueError(f"Non-numeric price value: {price}")
                 
+            # Format price to ensure it's a valid value and proper string format
+            formatted_price = self._adjust_price_precision(price_float)
+            
             # Ensure using string formats
             params = {
                 'symbol': symbol,
@@ -295,8 +325,10 @@ class BinanceClient:
                 'type': 'LIMIT',
                 'timeInForce': 'GTC',
                 'quantity': str(quantity),
-                'price': str(price)
+                'price': formatted_price  # Use formatted price
             }
+            
+            self.logger.debug(f"Placing {side} limit order: {quantity} @ {formatted_price}")
             return self._execute_with_fallback("new_order", "new_order", **params)
         except Exception as e:
             self.logger.error(f"Failed to place limit order: {e}")
@@ -350,17 +382,25 @@ class BinanceClient:
     def place_stop_loss_order(self, symbol, quantity, stop_price):
         """Place stop loss order"""
         try:
-            # Validate price
-            if float(stop_price) <= 0:
-                self.logger.error(f"Invalid stop price: {stop_price}")
-                raise ValueError(f"Invalid stop price: {stop_price}")
+            # Validate and format price
+            try:
+                stop_price_float = float(stop_price)
+                if stop_price_float <= 0:
+                    self.logger.error(f"Invalid stop price: {stop_price}")
+                    raise ValueError(f"Invalid stop price: {stop_price}")
+            except (ValueError, TypeError):
+                self.logger.error(f"Non-numeric stop price: {stop_price}")
+                raise ValueError(f"Non-numeric stop price: {stop_price}")
+                
+            # Format stop price
+            formatted_stop_price = self._adjust_price_precision(stop_price_float)
                 
             params = {
                 'symbol': symbol,
                 'side': 'SELL',
                 'type': 'STOP_LOSS',
-                'quantity': quantity,
-                'stopPrice': stop_price,
+                'quantity': str(quantity),
+                'stopPrice': formatted_stop_price,
                 'timeInForce': 'GTC'
             }
             return self._execute_with_fallback("new_order", "new_order", **params)
@@ -371,17 +411,25 @@ class BinanceClient:
     def place_take_profit_order(self, symbol, quantity, stop_price):
         """Place take profit order"""
         try:
-            # Validate price
-            if float(stop_price) <= 0:
-                self.logger.error(f"Invalid stop price: {stop_price}")
-                raise ValueError(f"Invalid stop price: {stop_price}")
+            # Validate and format price
+            try:
+                stop_price_float = float(stop_price)
+                if stop_price_float <= 0:
+                    self.logger.error(f"Invalid stop price: {stop_price}")
+                    raise ValueError(f"Invalid stop price: {stop_price}")
+            except (ValueError, TypeError):
+                self.logger.error(f"Non-numeric stop price: {stop_price}")
+                raise ValueError(f"Non-numeric stop price: {stop_price}")
+                
+            # Format stop price
+            formatted_stop_price = self._adjust_price_precision(stop_price_float)
                 
             params = {
                 'symbol': symbol,
                 'side': 'SELL',
                 'type': 'TAKE_PROFIT',
-                'quantity': quantity,
-                'stopPrice': stop_price,
+                'quantity': str(quantity),
+                'stopPrice': formatted_stop_price,
                 'timeInForce': 'GTC'
             }
             return self._execute_with_fallback("new_order", "new_order", **params)
@@ -392,33 +440,48 @@ class BinanceClient:
     def new_oco_order(self, symbol, side, quantity, price, stopPrice, stopLimitPrice=None, stopLimitTimeInForce="GTC", **kwargs):
         """Create OCO (One-Cancels-the-Other) order"""
         try:
-            # Validate prices
-            if float(price) <= 0 or float(stopPrice) <= 0:
-                self.logger.error(f"Invalid prices for OCO order: price={price}, stopPrice={stopPrice}")
-                raise ValueError(f"Invalid prices for OCO order")
+            # Validate and format all prices
+            try:
+                price_float = float(price)
+                stop_price_float = float(stopPrice)
                 
-            # Build base parameters (removing the incorrect aboveType and belowType)
+                if price_float <= 0 or stop_price_float <= 0:
+                    self.logger.error(f"Invalid prices for OCO order: price={price}, stopPrice={stopPrice}")
+                    raise ValueError(f"Invalid prices for OCO order")
+            except (ValueError, TypeError):
+                self.logger.error(f"Non-numeric prices for OCO order: price={price}, stopPrice={stopPrice}")
+                raise ValueError(f"Non-numeric prices for OCO order")
+            
+            # Format all prices properly
+            formatted_price = self._adjust_price_precision(price_float)
+            formatted_stop_price = self._adjust_price_precision(stop_price_float)
+                
+            # Build base parameters
             params = {
                 'symbol': symbol,
                 'side': side,
                 'quantity': str(quantity),
-                'price': str(price),
-                'stopPrice': str(stopPrice),
+                'price': formatted_price,
+                'stopPrice': formatted_stop_price,
                 'stopLimitTimeInForce': stopLimitTimeInForce
             }
             
-            # Add stopLimitPrice if provided or calculate based on stopPrice
+            # Handle stopLimitPrice with validation
             if stopLimitPrice:
-                if float(stopLimitPrice) <= 0:
-                    self.logger.warning(f"Invalid stopLimitPrice: {stopLimitPrice}, calculating based on stopPrice")
-                    stop_limit_price = float(stopPrice) * 0.99  # 1% below stop price
-                    params['stopLimitPrice'] = self._adjust_price_precision(stop_limit_price)
-                else:
-                    params['stopLimitPrice'] = str(stopLimitPrice)
+                try:
+                    stop_limit_price_float = float(stopLimitPrice)
+                    if stop_limit_price_float <= 0:
+                        self.logger.warning(f"Invalid stopLimitPrice: {stopLimitPrice}, calculating based on stopPrice")
+                        stop_limit_price_float = stop_price_float * 0.99  # 1% below stop price
+                except (ValueError, TypeError):
+                    self.logger.warning(f"Non-numeric stopLimitPrice: {stopLimitPrice}, calculating based on stopPrice")
+                    stop_limit_price_float = stop_price_float * 0.99  # 1% below stop price
+                    
+                params['stopLimitPrice'] = self._adjust_price_precision(stop_limit_price_float)
             else:
                 # If not provided, use a default value slightly below stopPrice
-                stop_limit_price = float(stopPrice) * 0.99  # 1% below stop price
-                params['stopLimitPrice'] = self._adjust_price_precision(stop_limit_price)
+                stop_limit_price_float = stop_price_float * 0.99  # 1% below stop price
+                params['stopLimitPrice'] = self._adjust_price_precision(stop_limit_price_float)
                 
             # Add other optional parameters
             params.update(kwargs)
