@@ -616,8 +616,8 @@ class GridTrader:
             float: ATR value or None if calculation fails
         """
         try:
-            # Get klines for ATR calculation
-            klines = self.binance_client.get_klines(
+            # Get klines for ATR calculation using get_historical_klines instead of get_klines
+            klines = self.binance_client.get_historical_klines(
                 symbol=self.symbol,
                 interval="1h",  # Use 1h for stability
                 limit=self.atr_period + 10  # Add buffer
