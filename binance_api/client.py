@@ -103,32 +103,25 @@ class BinanceClient:
                 raise
     
     def _sync_time(self):
-        """
-        Synchronize local time with Binance server time
-        This helps prevent 'Timestamp for this request was 1000ms ahead of the server's time' errors
-        """
+        """Synchronize local time with Binance server time"""
         try:
-            # Skip if we've synced recently (unless forced)
-            current_time = int(time.time())
-            if current_time - self.last_time_sync < self.time_sync_interval and self.last_time_sync > 0:
-                return True
+            server_time = self.rest_client.time()
+            if server_time and 'serverTime' in server_time:
+                server_time_ms = server_time['serverTime']
+                local_time_ms = int(time.time() * 1000)
+                self.time_offset = server_time_ms - local_time_ms
                 
-            # Get server time
-            if self.rest_client:
-                server_time = self.rest_client.time()
-                if server_time and 'serverTime' in server_time:
-                    server_time_ms = server_time['serverTime']
-                    local_time_ms = int(time.time() * 1000)
-                    self.time_offset = server_time_ms - local_time_ms
-                    
-                    # Log the time difference
-                    time_diff_sec = abs(self.time_offset) / 1000
-                    if time_diff_sec > 1:
-                        self.logger.info(f"Local time is {'ahead of' if self.time_offset < 0 else 'behind'} server by {time_diff_sec:.2f} seconds. Offset applied: {self.time_offset}ms")
-                    
-                    self.last_time_sync = current_time
-                    return True
-            
+                # Log the time difference - too high = problem!
+                time_diff_sec = abs(self.time_offset) / 1000
+                self.logger.info(f"Time offset: {self.time_offset}ms ({time_diff_sec:.2f}s)")
+                
+                # Force system clock synchronization if possible
+                if time_diff_sec > 1 and os.geteuid() == 0:  # Only if running as root
+                    self.logger.info("Attempting to sync system clock with Binance server time")
+                    # Add system clock synchronization code here
+                
+                self.last_time_sync = int(time.time())
+                return True
             return False
         except Exception as e:
             self.logger.error(f"Time synchronization failed: {e}")
