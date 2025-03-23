@@ -121,6 +121,54 @@ class GridTrader:
         self.logger.warning(f"No LOT_SIZE filter found for {self.symbol}, using minimum step size 1.0")
         return 1.0  # Default if not found
     
+    def get_status(self):
+        """
+        Get current status of the grid trading system
+        
+        Returns:
+            str: Status message
+        """
+        if not self.is_running:
+            return "Grid trading system is not running"
+        
+        # Build status message with current market price
+        current_price = self.binance_client.get_symbol_price(self.symbol)
+        
+        # Count active buy and sell orders
+        buy_orders = 0
+        sell_orders = 0
+        for level in self.grid:
+            if level.get('order_id'):
+                if level['side'] == 'BUY':
+                    buy_orders += 1
+                elif level['side'] == 'SELL':
+                    sell_orders += 1
+        
+        # Calculate total orders
+        total_orders = buy_orders + sell_orders
+        
+        # Format grid range information
+        grid_info = ""
+        if self.grid and len(self.grid) > 0:
+            prices = [level['price'] for level in self.grid]
+            if prices:
+                lowest_price = min(prices)
+                highest_price = max(prices)
+                price_range_pct = ((highest_price - lowest_price) / lowest_price) * 100
+                grid_info = f"\nGrid price range: {lowest_price:.8f} - {highest_price:.8f} ({price_range_pct:.2f}%)"
+        
+        # Format the status message
+        status = (
+            f"Grid Trading Status: Active\n"
+            f"Symbol: {self.symbol}\n"
+            f"Current price: {current_price}\n"
+            f"Active orders: {total_orders} (Buy: {buy_orders}, Sell: {sell_orders})"
+            f"{grid_info}\n"
+            f"Using {'WebSocket' if self.using_websocket else 'REST'} API"
+        )
+        
+        return status
+    
     def start(self, simulation=False):
         """
         Start grid trading system
@@ -202,6 +250,31 @@ class GridTrader:
             self.telegram_bot.send_message(message)
         
         return message
+    
+    def stop(self):
+        """
+        Stop grid trading system
+        
+        Returns:
+            str: Status message
+        """
+        if not self.is_running:
+            return "System already stopped"
+        
+        try:
+            # Cancel all open orders
+            if not self.simulation_mode:
+                self._cancel_all_open_orders()
+            
+            self.is_running = False
+            message = "Grid trading system stopped"
+            self.logger.info(message)
+            
+            return message
+        except Exception as e:
+            error_message = f"Error stopping grid trading: {e}"
+            self.logger.error(error_message)
+            return error_message
     
     def _get_price_precision(self):
         """
@@ -311,6 +384,84 @@ class GridTrader:
         else:
             # Use individual order placement
             self._place_grid_orders_individually()
+    
+    def _calculate_grid_levels(self):
+        """
+        Calculate grid price levels based on current market price and configuration
+        
+        Returns:
+            list: List of grid levels with prices and sides
+        """
+        # Get current market price 
+        current_price = self.binance_client.get_symbol_price(self.symbol)
+        self.current_market_price = current_price
+        
+        # Calculate grid range based on current price and grid_range_percent
+        grid_range = current_price * self.grid_range_percent
+        
+        # Calculate upper and lower bounds
+        upper_bound = current_price + (grid_range / 2)
+        lower_bound = current_price - (grid_range / 2)
+        
+        # Calculate grid spacing (price difference between adjacent levels)
+        grid_step = grid_range / (self.grid_levels - 1) if self.grid_levels > 1 else 0
+        
+        # Build the grid levels
+        grid = []
+        
+        for i in range(self.grid_levels):
+            # Calculate price for this level
+            price = lower_bound + (i * grid_step)
+            
+            # Determine side (BUY below current price, SELL above)
+            side = "BUY" if price < current_price else "SELL"
+            
+            # Handle exact matches with current price - make it a BUY
+            if abs(price - current_price) < 0.0000001:
+                side = "BUY"
+            
+            # Add to grid
+            grid.append({
+                "price": price,
+                "side": side, 
+                "order_id": None
+            })
+        
+        return grid
+    
+    def _cancel_all_open_orders(self):
+        """
+        Cancel all open orders for the trading pair
+        
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            # Use WebSocket if available, otherwise REST
+            client_status = self.binance_client.get_client_status()
+            self.using_websocket = client_status["websocket_available"]
+            
+            # Log which API is being used
+            self.logger.info(f"Cancelling all open orders via {'WebSocket' if self.using_websocket else 'REST'} API")
+            
+            # Get all open orders
+            open_orders = self.binance_client.get_open_orders(self.symbol)
+            
+            for order in open_orders:
+                if self.simulation_mode:
+                    self.logger.info(f"Simulation - Would cancel order {order['orderId']}")
+                    continue
+                    
+                result = self.binance_client.cancel_order(
+                    symbol=self.symbol,
+                    order_id=order['orderId']
+                )
+                self.logger.info(f"Order cancelled: {order['orderId']}")
+            
+            return True
+        except Exception as e:
+            self.logger.error(f"Error cancelling orders: {e}")
+            return False
     
     def _place_grid_orders_with_websocket(self):
         """Place grid orders optimized for WebSocket API"""
@@ -457,8 +608,108 @@ class GridTrader:
             except Exception as e:
                 self.logger.error(f"Failed to place order: {side} {formatted_quantity} @ {formatted_price}, Error: {e}")
     
-    # ... 其他方法保持不变 ...
-
+    def _get_current_atr(self):
+        """
+        Calculate current ATR for volatility assessment
+        
+        Returns:
+            float: ATR value or None if calculation fails
+        """
+        try:
+            # Get klines for ATR calculation
+            klines = self.binance_client.get_klines(
+                symbol=self.symbol,
+                interval="1h",  # Use 1h for stability
+                limit=self.atr_period + 10  # Add buffer
+            )
+            
+            # Calculate ATR
+            atr = calculate_atr(klines, period=self.atr_period)
+            return atr
+        except Exception as e:
+            self.logger.error(f"Error calculating ATR: {e}")
+            return None
+    
+    def check_grid_recalculation(self):
+        """
+        Check if grid needs recalculation based on time or volatility change
+        
+        Returns:
+            bool: True if grid was recalculated, False otherwise
+        """
+        # Skip if not running
+        if not self.is_running:
+            return False
+            
+        now = datetime.now()
+        
+        # Check if recalculation period has passed
+        time_based_recalc = False
+        if self.last_recalculation:
+            days_passed = (now - self.last_recalculation).days
+            if days_passed >= self.recalculation_period:
+                self.logger.info(f"Time-based grid recalculation triggered: {days_passed} days since last recalculation")
+                time_based_recalc = True
+        
+        # Check for volatility-based recalculation
+        volatility_based_recalc = False
+        current_atr = self._get_current_atr()
+        
+        if current_atr and self.last_atr_value:
+            atr_change = abs(current_atr - self.last_atr_value) / self.last_atr_value
+            if atr_change > 0.2:  # 20% change in volatility
+                self.logger.info(f"Volatility-based grid recalculation triggered: ATR changed by {atr_change*100:.2f}%")
+                volatility_based_recalc = True
+        
+        # If either condition is met, recalculate grid
+        if time_based_recalc or volatility_based_recalc:
+            try:
+                # Cancel all orders
+                self._cancel_all_open_orders()
+                
+                # Recalculate grid
+                self._setup_grid()
+                
+                # Update last recalculation timestamp
+                self.last_recalculation = now
+                
+                message = "Grid trading levels recalculated due to "
+                message += "scheduled recalculation" if time_based_recalc else "volatility change"
+                
+                self.logger.info(message)
+                if self.telegram_bot:
+                    self.telegram_bot.send_message(message)
+                
+                return True
+            except Exception as e:
+                self.logger.error(f"Failed to recalculate grid: {e}")
+        
+        return False
+    
+    def _reconcile_grid_with_open_orders(self):
+        """
+        Reconcile grid with current open orders to handle potential discrepancies
+        """
+        if self.simulation_mode:
+            return
+            
+        try:
+            open_orders = self.binance_client.get_open_orders(self.symbol)
+            open_order_ids = set(str(order['orderId']) for order in open_orders)
+            
+            # Update grid with current open orders
+            for level in self.grid:
+                if level.get('order_id'):
+                    order_id = str(level['order_id'])
+                    # If order is in our grid but not actually open, mark it
+                    if order_id not in open_order_ids:
+                        self.logger.warning(f"Order {order_id} is in grid but not found in open orders")
+                        level['order_id'] = None
+                        
+            self.logger.info("Grid reconciled with open orders")
+        except Exception as e:
+            self.logger.error(f"Error reconciling grid: {e}")
+    
     def handle_order_update(self, order_data):
         """
         Handle order update from WebSocket
