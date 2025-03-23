@@ -90,7 +90,10 @@ class GridTradingBot:
         """Process WebSocket messages with focus on business logic only"""
         try:
             # Handle kline events for price updates
-            if hasattr(message, 'e') and message.e == 'kline' and hasattr(message, 'k') and hasattr(message.k, 'c'):
+            if (hasattr(message, 'e') and message.e == 'kline' and 
+                hasattr(message, 'k') and hasattr(message.k, 'c') and 
+                hasattr(message, 's')):  # Added check for 's' attribute
+                
                 symbol = message.s
                 price = float(message.k.c)
                 
@@ -110,7 +113,10 @@ class GridTradingBot:
         except AttributeError:
             # Handle dict-format messages as fallback
             if isinstance(message, dict):
-                if 'e' in message and message['e'] == 'kline' and 'k' in message and 'c' in message.get('k', {}):
+                if ('e' in message and message['e'] == 'kline' and 
+                    'k' in message and 'c' in message.get('k', {}) and
+                    's' in message):  # Added check for 's' key
+                    
                     symbol = message['s']
                     price = float(message['k']['c'])
                     
