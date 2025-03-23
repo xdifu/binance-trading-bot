@@ -1,6 +1,7 @@
 import logging
 import math
 import time
+import threading
 from datetime import datetime, timedelta
 from binance_api.client import BinanceClient
 from utils.indicators import calculate_atr
@@ -56,6 +57,10 @@ class GridTrader:
         
         # Track pending operations for better error handling
         self.pending_orders = {}  # Track orders waiting for WebSocket confirmation
+        
+        # Add resource locking mechanism to prevent race conditions
+        self.locked_balances = {}  # Tracks locked balances by asset
+        self.balance_lock = threading.RLock()  # Thread-safe lock for balance operations
     
     def _get_symbol_info(self):
         """
@@ -261,10 +266,13 @@ class GridTrader:
             if not self.simulation_mode:
                 self._cancel_all_open_orders()
             
-            # 完全重置内部状态
+            # Reset all fund locks
+            self._reset_locks()
+            
+            # Reset internal state
             self.is_running = False
-            self.grid = []  # 清空网格
-            self.pending_orders = {}  # 清空pending_orders追踪
+            self.grid = []  # Clear grid
+            self.pending_orders = {}  # Clear pending_orders tracking
             self.last_recalculation = None
             
             message = "Grid trading system stopped"
@@ -464,7 +472,7 @@ class GridTrader:
             return False
     
     def _place_grid_orders_with_websocket(self):
-        """Place grid orders optimized for WebSocket API"""
+        """Place grid orders optimized for WebSocket API with fund locking"""
         for level in self.grid:
             price = level['price']
             side = level['side']
@@ -493,7 +501,7 @@ class GridTrader:
                     self.logger.info(f"Simulation - Would place order: {side} {formatted_quantity} @ {formatted_price}")
                     continue
                 
-                # Check if we have enough balance for this order
+                # Check and lock funds - prevents race conditions
                 if side == 'BUY':
                     asset = 'USDT'
                     required = float(formatted_quantity) * float(formatted_price)
@@ -501,59 +509,68 @@ class GridTrader:
                     asset = self.symbol.replace('USDT', '')
                     required = float(formatted_quantity)
                 
-                balance = self.binance_client.check_balance(asset)
-                if balance < required:
-                    self.logger.warning(f"Insufficient {asset} balance for {side} order. Required: {required}, Available: {balance}")
+                # Try to lock the funds - this is atomic with the balance check
+                if not self._lock_funds(asset, required):
+                    self.logger.warning(f"Could not lock funds for {side} order. Required: {required} {asset}")
                     continue
                 
-                # Generate a client order ID for tracking
-                client_order_id = f"grid_{int(time.time())}_{side}_{formatted_price}"
-                
-                # Place order with client order ID for tracking WebSocket updates
-                order = self.binance_client.place_limit_order(
-                    self.symbol, 
-                    side, 
-                    formatted_quantity, 
-                    formatted_price
-                )
-                
-                level['order_id'] = order['orderId']
-                
-                # Add to pending orders for WebSocket response tracking
-                self.pending_orders[str(order['orderId'])] = {
-                    'grid_index': self.grid.index(level),
-                    'side': side,
-                    'price': float(formatted_price),
-                    'quantity': float(formatted_quantity),
-                    'timestamp': int(time.time())
-                }
-                
-                self.logger.info(f"Order placed via {'WebSocket' if self.using_websocket else 'REST'}: {side} {formatted_quantity} @ {formatted_price}, ID: {order['orderId']}")
-            except Exception as e:
-                self.logger.error(f"Failed to place order: {side} {formatted_quantity} @ {formatted_price}, Error: {e}")
-                
-                # Check if connection was lost
-                if "connection" in str(e).lower() and self.using_websocket:
-                    self.logger.warning("WebSocket connection issue detected, retrying with fallback...")
-                    # Update status and retry placement
-                    client_status = self.binance_client.get_client_status()
-                    self.using_websocket = client_status["websocket_available"]
+                try:
+                    # Generate a client order ID for tracking
+                    client_order_id = f"grid_{int(time.time())}_{side}_{formatted_price}"
                     
-                    # Try again - will use REST if WebSocket is now unavailable
-                    try:
-                        order = self.binance_client.place_limit_order(
-                            self.symbol, 
-                            side, 
-                            formatted_quantity, 
-                            formatted_price
-                        )
-                        level['order_id'] = order['orderId']
-                        self.logger.info(f"Order placed via fallback: {side} {formatted_quantity} @ {formatted_price}, ID: {order['orderId']}")
-                    except Exception as retry_error:
-                        self.logger.error(f"Fallback order placement also failed: {retry_error}")
-    
+                    # Place order with client order ID for tracking WebSocket updates
+                    order = self.binance_client.place_limit_order(
+                        self.symbol, 
+                        side, 
+                        formatted_quantity, 
+                        formatted_price
+                    )
+                    
+                    level['order_id'] = order['orderId']
+                    
+                    # Add to pending orders for WebSocket response tracking
+                    self.pending_orders[str(order['orderId'])] = {
+                        'grid_index': self.grid.index(level),
+                        'side': side,
+                        'price': float(formatted_price),
+                        'quantity': float(formatted_quantity),
+                        'timestamp': int(time.time()),
+                        'asset': asset,
+                        'required': required
+                    }
+                    
+                    self.logger.info(f"Order placed via {'WebSocket' if self.using_websocket else 'REST'}: {side} {formatted_quantity} @ {formatted_price}, ID: {order['orderId']}")
+                except Exception as e:
+                    # Release the funds if order placement fails
+                    self._release_funds(asset, required)
+                    self.logger.error(f"Failed to place order: {side} {formatted_quantity} @ {formatted_price}, Error: {e}")
+                    
+                    # Check if connection was lost
+                    if "connection" in str(e).lower() and self.using_websocket:
+                        self.logger.warning("WebSocket connection issue detected, retrying with fallback...")
+                        # Update status and retry placement
+                        client_status = self.binance_client.get_client_status()
+                        self.using_websocket = client_status["websocket_available"]
+                        
+                        # Try again - will use REST if WebSocket is now unavailable
+                        try:
+                            order = self.binance_client.place_limit_order(
+                                self.symbol, 
+                                side, 
+                                formatted_quantity, 
+                                formatted_price
+                            )
+                            level['order_id'] = order['orderId']
+                            self.logger.info(f"Order placed via fallback: {side} {formatted_quantity} @ {formatted_price}, ID: {order['orderId']}")
+                        except Exception as retry_error:
+                            # Still failed, make sure we release the funds
+                            self._release_funds(asset, required)
+                            self.logger.error(f"Fallback order placement also failed: {retry_error}")
+            except Exception as e:
+                self.logger.error(f"Error in order preparation: {e}")
+
     def _place_grid_orders_individually(self):
-        """Place grid orders individually (traditional method)"""
+        """Place grid orders individually (traditional method) with fund locking"""
         for level in self.grid:
             price = level['price']
             side = level['side']
@@ -582,7 +599,7 @@ class GridTrader:
                     self.logger.info(f"Simulation - Would place order: {side} {formatted_quantity} @ {formatted_price}")
                     continue
                 
-                # Check if we have enough balance for this order
+                # Check and lock funds - prevents race conditions
                 if side == 'BUY':
                     asset = 'USDT'
                     required = float(formatted_quantity) * float(formatted_price)
@@ -590,23 +607,28 @@ class GridTrader:
                     asset = self.symbol.replace('USDT', '')
                     required = float(formatted_quantity)
                 
-                balance = self.binance_client.check_balance(asset)
-                if balance < required:
-                    self.logger.warning(f"Insufficient {asset} balance for {side} order. Required: {required}, Available: {balance}")
+                # Try to lock the funds - this is atomic with the balance check
+                if not self._lock_funds(asset, required):
+                    self.logger.warning(f"Could not lock funds for {side} order. Required: {required} {asset}")
                     continue
                 
-                # Place order
-                order = self.binance_client.place_limit_order(
-                    self.symbol, 
-                    side, 
-                    formatted_quantity, 
-                    formatted_price
-                )
-                
-                level['order_id'] = order['orderId']
-                self.logger.info(f"Order placed successfully: {side} {formatted_quantity} @ {formatted_price}, ID: {order['orderId']}")
+                try:
+                    # Place order
+                    order = self.binance_client.place_limit_order(
+                        self.symbol, 
+                        side, 
+                        formatted_quantity, 
+                        formatted_price
+                    )
+                    
+                    level['order_id'] = order['orderId']
+                    self.logger.info(f"Order placed successfully: {side} {formatted_quantity} @ {formatted_price}, ID: {order['orderId']}")
+                except Exception as e:
+                    # Release the funds if order placement fails
+                    self._release_funds(asset, required)
+                    self.logger.error(f"Failed to place order: {side} {formatted_quantity} @ {formatted_price}, Error: {e}")
             except Exception as e:
-                self.logger.error(f"Failed to place order: {side} {formatted_quantity} @ {formatted_price}, Error: {e}")
+                self.logger.error(f"Error in order preparation: {e}")
     
     def _get_current_atr(self):
         """
@@ -755,6 +777,9 @@ class GridTrader:
                 # Remove from pending orders
                 pending_info = self.pending_orders.pop(str_order_id)
                 self.logger.debug(f"Pending order {str_order_id} fulfilled from tracking")
+                
+                # Release locked funds for the fulfilled order
+                self._release_funds(pending_info['asset'], pending_info['required'])
             
             # Find matching grid level
             matching_level = None
@@ -793,7 +818,7 @@ class GridTrader:
                         self.telegram_bot.send_message(message)
                     return
                 
-                # Check if we have enough balance for this order
+                # Check and lock funds - prevents race conditions
                 if new_side == 'BUY':
                     asset = 'USDT'
                     required = float(formatted_quantity) * float(formatted_price)
@@ -801,9 +826,9 @@ class GridTrader:
                     asset = self.symbol.replace('USDT', '')
                     required = float(formatted_quantity)
                 
-                balance = self.binance_client.check_balance(asset)
-                if balance < required:
-                    message = f"⚠️ Cannot place opposite order: Insufficient {asset} balance. Required: {required}, Available: {balance}"
+                # Try to lock the funds - this is atomic with the balance check
+                if not self._lock_funds(asset, required):
+                    message = f"⚠️ Cannot place opposite order: Insufficient {asset} balance. Required: {required}, Available: {self.binance_client.check_balance(asset) - self.locked_balances.get(asset, 0)}"
                     self.logger.warning(message)
                     if self.telegram_bot:
                         self.telegram_bot.send_message(message)
@@ -833,7 +858,9 @@ class GridTrader:
                         'side': new_side,
                         'price': float(formatted_price),
                         'quantity': float(formatted_quantity),
-                        'timestamp': int(time.time())
+                        'timestamp': int(time.time()),
+                        'asset': asset,
+                        'required': required
                     }
                 
                 message = f"Grid trade executed: {side} {formatted_quantity} @ {formatted_price}\nOpposite order placed via {api_type}: {new_side} {formatted_quantity} @ {formatted_price}"
@@ -870,3 +897,69 @@ class GridTrader:
                             self.telegram_bot.send_message(message)
                     except Exception as retry_error:
                         self.logger.error(f"Fallback order placement also failed: {retry_error}")
+
+    def _lock_funds(self, asset, amount):
+        """
+        Lock funds for a particular asset to prevent race conditions
+        
+        Args:
+            asset: Asset symbol (e.g., 'BTC', 'USDT')
+            amount: Amount to lock
+            
+        Returns:
+            bool: True if funds were successfully locked, False otherwise
+        """
+        with self.balance_lock:
+            # Get current balance
+            current_balance = self.binance_client.check_balance(asset)
+            
+            # Get current locked amount (default 0)
+            current_locked = self.locked_balances.get(asset, 0)
+            
+            # Calculate available balance
+            available = current_balance - current_locked
+            
+            # Check if we have enough available balance
+            if available < amount:
+                self.logger.warning(
+                    f"Insufficient {asset} balance for locking: "
+                    f"Required: {amount}, Available: {available} "
+                    f"(Total: {current_balance}, Already locked: {current_locked})"
+                )
+                return False
+            
+            # Lock the funds
+            self.locked_balances[asset] = current_locked + amount
+            self.logger.debug(
+                f"Locked {amount} {asset}, total locked now: {self.locked_balances[asset]}, "
+                f"remaining available: {current_balance - self.locked_balances[asset]}"
+            )
+            return True
+    
+    def _release_funds(self, asset, amount):
+        """
+        Release previously locked funds
+        
+        Args:
+            asset: Asset symbol (e.g., 'BTC', 'USDT')
+            amount: Amount to release
+            
+        Returns:
+            None
+        """
+        with self.balance_lock:
+            current_locked = self.locked_balances.get(asset, 0)
+            
+            # Ensure we don't release more than locked
+            release_amount = min(current_locked, amount)
+            
+            if release_amount > 0:
+                self.locked_balances[asset] = current_locked - release_amount
+                self.logger.debug(f"Released {release_amount} {asset}, remaining locked: {self.locked_balances[asset]}")
+    
+    def _reset_locks(self):
+        """Reset all fund locks when stopping grid or recalculating"""
+        with self.balance_lock:
+            previous_locks = self.locked_balances.copy()
+            self.locked_balances = {}
+            self.logger.info(f"Reset all fund locks. Previous locks: {previous_locks}")
