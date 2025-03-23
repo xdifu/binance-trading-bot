@@ -24,13 +24,20 @@ class RiskManager:
         self.price_precision = self._get_price_precision()
         self.quantity_precision = self._get_quantity_precision()
         
+        # Price tracking variables
         self.stop_loss_price = None
         self.highest_price = None
         self.lowest_price = None
         self.take_profit_price = None
         self.oco_order_id = None
-        
         self.is_active = False
+        
+        # Update thresholds to reduce API calls - configurable if needed
+        self.min_update_threshold_percent = 0.01  # 1% minimum price movement
+        self.min_update_interval_seconds = 600    # 10 minutes minimum between updates
+        
+        # Track last update time
+        self.last_update_time = 0
         
         # Track pending operations for better error handling
         self.pending_oco_orders = {}
@@ -93,6 +100,9 @@ class RiskManager:
             self.highest_price = current_price
             self.lowest_price = current_price
             
+            # Initialize last update time
+            self.last_update_time = time.time()
+            
             message = (f"Risk Management Activated via {api_type}\n"
                        f"Current price: {current_price}\n"
                        f"Stop loss price: {self.stop_loss_price}\n"
@@ -137,6 +147,9 @@ class RiskManager:
         self.highest_price = current_price
         self.lowest_price = current_price
         
+        # Initialize last update time
+        self.last_update_time = time.time()
+        
         message = (f"Risk Management Activated via REST fallback\n"
                    f"Current price: {current_price}\n"
                    f"Stop loss price: {self.stop_loss_price}\n"
@@ -167,6 +180,7 @@ class RiskManager:
             self.lowest_price = None
             self.oco_order_id = None
             self.pending_oco_orders = {}
+            self.last_update_time = 0
             
             message = "Risk Management Deactivated"
             self.logger.info(message)
@@ -209,32 +223,65 @@ class RiskManager:
         
         try:
             update_required = False
+            update_reason = ""
             
-            # Track price history
+            # Always track price history (lightweight operation)
             if current_price > self.highest_price:
+                old_highest = self.highest_price
                 self.highest_price = current_price
                 
-                # Update trailing stop loss when price hits new high (FIXED - this was reversed)
+                # Calculate potential new stop loss and take profit prices
                 new_stop_loss = current_price * (1 - self.trailing_stop_loss_percent)
-                # Only update if new stop loss is higher (proper trailing behavior)
-                if new_stop_loss > self.stop_loss_price:
-                    self.stop_loss_price = new_stop_loss
-                    update_required = True
-                    self.logger.info(f"Updated trailing stop loss price: {self.stop_loss_price}")
-                
-                # Update trailing take profit also when price hits new high
                 new_take_profit = current_price * (1 + self.trailing_take_profit_percent)
-                # Only update if new take profit is higher (trailing behavior)
-                if new_take_profit > self.take_profit_price:
-                    self.take_profit_price = new_take_profit
-                    update_required = True
-                    self.logger.info(f"Updated trailing take profit price: {self.take_profit_price}")
+                
+                # Check if price change is significant enough (threshold-based)
+                stop_loss_percent_change = (new_stop_loss - self.stop_loss_price) / self.stop_loss_price
+                take_profit_percent_change = (new_take_profit - self.take_profit_price) / self.take_profit_price
+                
+                # Only update if price change exceeds threshold AND enough time has passed
+                current_time = time.time()
+                time_since_update = current_time - self.last_update_time
+                
+                if (stop_loss_percent_change > self.min_update_threshold_percent or 
+                    take_profit_percent_change > self.min_update_threshold_percent):
+                    # Price threshold condition met
+                    
+                    if time_since_update >= self.min_update_interval_seconds:
+                        # Update stop loss if new value is higher (proper trailing behavior)
+                        if new_stop_loss > self.stop_loss_price:
+                            self.stop_loss_price = new_stop_loss
+                            update_required = True
+                            update_reason += "Stop loss increased significantly. "
+                        
+                        # Update take profit if new value is higher (trailing behavior)
+                        if new_take_profit > self.take_profit_price:
+                            self.take_profit_price = new_take_profit
+                            update_required = True
+                            update_reason += "Take profit increased significantly."
+                        
+                        if update_required:
+                            self.last_update_time = current_time
+                            
+                            # Log the significant price change with details
+                            price_change_percent = (current_price - old_highest) / old_highest * 100
+                            self.logger.info(
+                                f"Significant price movement: {price_change_percent:.2f}%. "
+                                f"New high: {current_price}, Previous: {old_highest}. "
+                                f"Updating OCO orders: {update_reason}"
+                            )
+                    else:
+                        # Log that we detected a significant change but cooling period is active
+                        self.logger.debug(
+                            f"Price change detected but cooling period active. "
+                            f"Time since last update: {time_since_update:.1f}s, "
+                            f"Required: {self.min_update_interval_seconds}s"
+                        )
             
-            # Track lowest price for analysis purposes only
+            # Always track lowest price for analysis
             if current_price < self.lowest_price:
                 self.lowest_price = current_price
             
-            # Update orders if needed
+            # Update orders if needed and we have an active OCO
             if update_required and self.oco_order_id:
                 self._cancel_oco_orders()
                 self._place_oco_orders()
@@ -690,10 +737,29 @@ class RiskManager:
             f"Stop loss price: {self._adjust_price_precision(self.stop_loss_price)}\n"
             f"Take profit price: {self._adjust_price_precision(self.take_profit_price)}\n"
             f"Historical high: {self._adjust_price_precision(self.highest_price)}\n"
-            f"Historical low: {self._adjust_price_precision(self.lowest_price)}"
+            f"Historical low: {self._adjust_price_precision(self.lowest_price)}\n"
+            f"Update thresholds: {self.min_update_threshold_percent*100}% price change, "
+            f"{self.min_update_interval_seconds/60} min interval"
         )
         
         if self.oco_order_id:
             status_text += f"\nActive OCO order ID: {self.oco_order_id}"
             
         return status_text
+
+    def update_thresholds(self, price_threshold=None, time_interval=None):
+        """Update the thresholds used for OCO order updates"""
+        if price_threshold is not None:
+            self.min_update_threshold_percent = max(0.001, min(0.1, price_threshold))
+            
+        if time_interval is not None:
+            self.min_update_interval_seconds = max(60, min(3600, time_interval * 60))
+            
+        self.logger.info(
+            f"Risk management thresholds updated: "
+            f"{self.min_update_threshold_percent*100}% price change, "
+            f"{self.min_update_interval_seconds/60} min interval"
+        )
+        
+        return f"Risk management thresholds updated: {self.min_update_threshold_percent*100}% price change, " \
+               f"{self.min_update_interval_seconds/60} min interval"
