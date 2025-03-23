@@ -223,6 +223,29 @@ class BinanceClient:
                 pass
         return False
 
+    def _adjust_price_precision(self, price):
+        """
+        Format price to appropriate precision and validate it's not zero
+        
+        Args:
+            price: Price value to format
+            
+        Returns:
+            str: Formatted price string with appropriate precision
+        """
+        # Validate price is greater than 0
+        if price <= 0:
+            self.logger.warning(f"Attempted to format invalid price: {price}, using minimum price")
+            # Use a small valid price as fallback
+            price = 0.00000001
+        
+        # Format with 8 decimal places as a safe default
+        # In production, this should use symbol-specific precision rules
+        formatted_price = "{:.8f}".format(price)
+        
+        # Remove trailing zeros and return
+        return formatted_price.rstrip('0').rstrip('.') if '.' in formatted_price else formatted_price
+
     def get_exchange_info(self, symbol=None):
         """Get exchange information"""
         # Periodically retry WebSocket connection if it's down
@@ -268,6 +291,11 @@ class BinanceClient:
     def place_limit_order(self, symbol, side, quantity, price):
         """Place limit order"""
         try:
+            # Validate price before sending
+            if float(price) <= 0:
+                self.logger.error(f"Invalid price value: {price} for {side} order")
+                raise ValueError(f"Invalid price value: {price}")
+                
             # Ensure using string formats
             params = {
                 'symbol': symbol,
@@ -330,6 +358,11 @@ class BinanceClient:
     def place_stop_loss_order(self, symbol, quantity, stop_price):
         """Place stop loss order"""
         try:
+            # Validate price
+            if float(stop_price) <= 0:
+                self.logger.error(f"Invalid stop price: {stop_price}")
+                raise ValueError(f"Invalid stop price: {stop_price}")
+                
             params = {
                 'symbol': symbol,
                 'side': 'SELL',
@@ -346,6 +379,11 @@ class BinanceClient:
     def place_take_profit_order(self, symbol, quantity, stop_price):
         """Place take profit order"""
         try:
+            # Validate price
+            if float(stop_price) <= 0:
+                self.logger.error(f"Invalid stop price: {stop_price}")
+                raise ValueError(f"Invalid stop price: {stop_price}")
+                
             params = {
                 'symbol': symbol,
                 'side': 'SELL',
@@ -362,27 +400,39 @@ class BinanceClient:
     def new_oco_order(self, symbol, side, quantity, price, stopPrice, stopLimitPrice=None, stopLimitTimeInForce="GTC", **kwargs):
         """Create OCO (One-Cancels-the-Other) order"""
         try:
+            # Validate prices
+            if float(price) <= 0 or float(stopPrice) <= 0:
+                self.logger.error(f"Invalid prices for OCO order: price={price}, stopPrice={stopPrice}")
+                raise ValueError(f"Invalid prices for OCO order")
+                
+            # Build base parameters (removing the incorrect aboveType and belowType)
             params = {
                 'symbol': symbol,
                 'side': side,
                 'quantity': str(quantity),
                 'price': str(price),
                 'stopPrice': str(stopPrice),
-                'stopLimitTimeInForce': stopLimitTimeInForce,
-                # Add the missing required parameters
-                'aboveType': 'LIMIT',  # Order type for price above trigger price
-                'belowType': 'STOP_LOSS_LIMIT'  # Order type for price below trigger price
+                'stopLimitTimeInForce': stopLimitTimeInForce
             }
             
+            # Add stopLimitPrice if provided or calculate based on stopPrice
             if stopLimitPrice:
-                params['stopLimitPrice'] = str(stopLimitPrice)
+                if float(stopLimitPrice) <= 0:
+                    self.logger.warning(f"Invalid stopLimitPrice: {stopLimitPrice}, calculating based on stopPrice")
+                    stop_limit_price = float(stopPrice) * 0.99  # 1% below stop price
+                    params['stopLimitPrice'] = self._adjust_price_precision(stop_limit_price)
+                else:
+                    params['stopLimitPrice'] = str(stopLimitPrice)
             else:
-                # If stopLimitPrice isn't provided, use a default (slightly below stopPrice)
+                # If not provided, use a default value slightly below stopPrice
                 stop_limit_price = float(stopPrice) * 0.99  # 1% below stop price
-                params['stopLimitPrice'] = str(self._adjust_price_precision(stop_limit_price))
+                params['stopLimitPrice'] = self._adjust_price_precision(stop_limit_price)
                 
             # Add other optional parameters
             params.update(kwargs)
+            
+            # Log the parameters for debugging
+            self.logger.debug(f"Sending OCO order with parameters: {params}")
             
             return self._execute_with_fallback("new_oco_order", "new_oco_order", **params)
         except Exception as e:
