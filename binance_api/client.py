@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from binance.spot import Spot
 from binance.error import ClientError
 import config
+from utils.format_utils import format_price
 
 # Import the WebSocket API client
 try:
@@ -246,40 +247,17 @@ class BinanceClient:
 
     def _adjust_price_precision(self, price):
         """
-        Format price to appropriate precision and ensure it's never zero
+        Format price with appropriate precision
         
         Args:
             price: Price value to format
             
         Returns:
-            str: Formatted price string that is never "0"
+            str: Formatted price string
         """
-        try:
-            # Handle non-numeric inputs
-            price_float = float(price)
-        except (ValueError, TypeError):
-            self.logger.warning(f"Invalid price value: {price}, using minimum price")
-            return "0.00000001"  # Minimum valid price
-            
-        # Validate price is positive
-        if price_float <= 0:
-            self.logger.warning(f"Non-positive price value: {price}, using minimum price")
-            return "0.00000001"  # Minimum valid price
-        
-        # For very small prices, ensure enough decimal places
-        if price_float < 0.001:
-            # Use 8 decimal places for very small values
-            formatted_price = "{:.8f}".format(price_float)
-        else:
-            # General formatter - 8 decimal places as safe default
-            formatted_price = "{:.8f}".format(price_float)
-        
-        # Remove trailing zeros but ensure not returning "0"
-        result = formatted_price.rstrip('0').rstrip('.') if '.' in formatted_price else formatted_price
-        if not result or result == "0":
-            return "0.00000001"  # Minimum valid price
-            
-        return result
+        # 使用默认精度 8 作为安全值，因为客户端可能没有获取具体交易对的精度
+        precision = 8
+        return format_price(price, precision)
 
     def get_exchange_info(self, symbol=None):
         """Get exchange information"""
