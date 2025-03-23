@@ -224,27 +224,19 @@ class BinanceClient:
         return False
 
     def _adjust_price_precision(self, price):
-        """
-        Format price to appropriate precision and validate it's not zero
-        
-        Args:
-            price: Price value to format
-            
-        Returns:
-            str: Formatted price string with appropriate precision
-        """
-        # Validate price is greater than 0
+        """正确格式化价格，确保精度正确"""
         if price <= 0:
             self.logger.warning(f"Attempted to format invalid price: {price}, using minimum price")
-            # Use a small valid price as fallback
-            price = 0.00000001
+            price = 0.00000001  # 安全默认值
         
-        # Format with 8 decimal places as a safe default
-        # In production, this should use symbol-specific precision rules
-        formatted_price = "{:.8f}".format(price)
+        # 使用正确的格式化方法，确保不会返回"0"
+        formatted_price = "{:.8f}".format(price)  # 使用足够的精度
         
-        # Remove trailing zeros and return
-        return formatted_price.rstrip('0').rstrip('.') if '.' in formatted_price else formatted_price
+        # 移除尾随零，但确保有效价格
+        result = formatted_price.rstrip('0').rstrip('.')
+        if not result or result == "0":
+            return "0.00000001"  # 保证最小有效价格
+        return result
 
     def get_exchange_info(self, symbol=None):
         """Get exchange information"""

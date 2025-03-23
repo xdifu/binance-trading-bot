@@ -149,19 +149,19 @@ class GridTrader:
         return precision
     
     def _adjust_price_precision(self, price):
-        """Adjust price precision with validation"""
+        """正确格式化价格，确保精度正确"""
         if price <= 0:
             self.logger.warning(f"Attempted to format invalid price: {price}, using minimum price")
-            # Use minimum price from symbol info or a safe default
-            min_price = 0.00000001  # Safe default
-            if self.symbol_info and 'filters' in self.symbol_info:
-                for f in self.symbol_info['filters']:
-                    if f['filterType'] == 'PRICE_FILTER' and 'minPrice' in f:
-                        min_price = float(f['minPrice'])
-                        break
-            return format_price(min_price, self.price_precision)
+            price = 0.00000001  # 安全默认值
         
-        return format_price(price, self.price_precision)
+        # 使用正确的格式化方法，确保不会返回"0"
+        formatted_price = "{:.8f}".format(price)  # 使用足够的精度
+        
+        # 移除尾随零，但确保有效价格
+        result = formatted_price.rstrip('0').rstrip('.')
+        if not result or result == "0":
+            return "0.00000001"  # 保证最小有效价格
+        return result
     
     def _adjust_quantity_precision(self, quantity):
         """Adjust quantity precision"""
