@@ -24,7 +24,7 @@ GRID_LEVELS = 5  # 网格数量
 GRID_SPACING = 1.5  # 网格间距（百分比）
 CAPITAL_PER_LEVEL = 6  # 每个网格的资金（USDT）
 GRID_RANGE_PERCENT = 8  # 网格范围（百分比）
-RECALCULATION_PERIOD = 7  # 重新计算网格的周期（天）
+RECALCULATION_PERIOD = 2  # 重新计算网格的周期（天）
 ATR_PERIOD = 14  # ATR计算周期
 
 # 风险管理设置
