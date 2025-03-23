@@ -1,15 +1,28 @@
+# Updated requirements.txt for Binance Grid Trading Bot
+
 # Core dependencies
-python-binance>=1.0.16
-python-telegram-bot>=20.0
-python-dotenv>=0.19.0
-msgspec>=0.18.0  # High-performance serialization/deserialization
-websocket-client>=1.4.0  # For WebSocket API client
-cryptography>=39.0.0  # For handling ED25519/RSA private keys
+python-binance>=1.0.16       # Official Binance Python client
+python-telegram-bot>=20.5.0  # Telegram bot integration with async support
+python-dotenv>=1.0.0         # Environment variable management
+msgspec>=0.18.5              # High-performance serialization/deserialization
+websocket-client>=1.7.0      # WebSocket client for market data
+cryptography>=42.0.0         # For ED25519/RSA private key handling
 
 # Data processing and analysis
-pandas>=1.3.0
-numpy>=1.20.0
+pandas>=2.1.0                # Data analysis library
+numpy>=1.26.0                # Numerical computing support
 
-# Utilities
-requests>=2.28.0  # For HTTP requests
-aiohttp>=3.8.1  # For async HTTP requests
+# Async/concurrent utilities
+aiohttp>=3.9.0               # Async HTTP client/server
+asyncio>=3.4.3               # Async programming support
+
+# Networking and utilities
+requests>=2.31.0             # HTTP library for REST API fallback
+urllib3>=2.0.0               # HTTP client (requests dependency)
+pyOpenSSL>=23.3.0            # SSL/TLS toolkit for secure connections
+certifi>=2023.11.17          # CA certificate bundle for certificate validation
+
+# Optional tools for development
+pytest>=7.4.0                # For writing tests
+pytest-asyncio>=0.21.1       # Async pytest support
+black>=23.10.0               # Code formatter
