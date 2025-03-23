@@ -157,8 +157,10 @@ class BinanceClient:
         # For methods that require signed requests, add adjusted timestamp
         if any(keyword in rest_method_name for keyword in ['account', 'order', 'oco', 'myTrades', 'openOrders']):
             if 'timestamp' not in kwargs:
-                kwargs['timestamp'] = self._get_timestamp()
-                self.logger.debug(f"Added adjusted timestamp: {kwargs['timestamp']} to {rest_method_name}")
+                # 添加额外安全偏移量(-1000ms)确保时间戳总是小于服务器时间
+                safety_offset = -1000  # 安全偏移量，1秒
+                kwargs['timestamp'] = self._get_timestamp() + safety_offset
+                self.logger.debug(f"Added timestamp with safety offset: {kwargs['timestamp']} to {rest_method_name}")
                 
         # Try WebSocket API first if available
         if self.websocket_available and self.ws_client:
