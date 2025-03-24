@@ -594,13 +594,29 @@ class BinanceClient:
         return self._sync_time()
     
     def _standardize_oco_response(self, response):
-        """统一OCO订单响应格式"""
-        if not isinstance(response, dict):
-            return response
-            
-        # 如果是WebSocket API的响应格式(包含result字段)
-        if 'result' in response and isinstance(response['result'], dict):
-            return response['result']
+        """Standardize OCO order response format to ensure dict-like access"""
         
-        # 如果是REST API的响应格式
-        return response
+        # Handle StandardizedMessage objects - convert them to dictionaries
+        if hasattr(response, '__class__') and response.__class__.__name__ == 'StandardizedMessage':
+            # Convert StandardizedMessage to dictionary
+            response_dict = {}
+            for attr in dir(response):
+                # Skip private attributes and methods
+                if not attr.startswith('_') and not callable(getattr(response, attr)):
+                    value = getattr(response, attr)
+                    # Recursively convert nested StandardizedMessage objects
+                    if hasattr(value, '__class__') and value.__class__.__name__ == 'StandardizedMessage':
+                        value = self._standardize_oco_response(value)
+                    response_dict[attr] = value
+            return {"result": response_dict}
+        
+        # If not a dict or StandardizedMessage, wrap in a dict with 'result' key
+        if not isinstance(response, dict):
+            return {"result": response}
+            
+        # If it's WebSocket API response format (contains result field)
+        if 'result' in response and isinstance(response['result'], dict):
+            return response
+        
+        # If it's REST API response format, wrap it
+        return {"result": response}
