@@ -620,3 +620,22 @@ class BinanceClient:
         
         # If it's REST API response format, wrap it
         return {"result": response}
+    
+    def cancel_oco_order(self, symbol, orderListId):
+        """Cancel an OCO order by order list ID"""
+        try:
+            # Try WebSocket API first if available
+            if self.websocket_available and self.ws_client:
+                try:
+                    return self.ws_client.cancel_oco_order(symbol=symbol, orderListId=orderListId)
+                except Exception as e:
+                    self.logger.warning(f"WebSocket API call failed for cancel_oco_order: {e}")
+            
+            # Fall back to REST API
+            if self.rest_client:
+                return self.rest_client.cancel_oco_order(symbol=symbol, orderListId=orderListId)
+            
+            raise RuntimeError("Neither WebSocket nor REST API client is available")
+        except Exception as e:
+            self.logger.error(f"Failed to cancel OCO order: {e}")
+            raise
