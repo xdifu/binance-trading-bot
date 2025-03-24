@@ -612,3 +612,15 @@ class BinanceClient:
         Returns: bool - Whether the synchronization was successful
         """
         return self._sync_time()
+    
+    def _standardize_oco_response(self, response):
+        """统一OCO订单响应格式"""
+        if not isinstance(response, dict):
+            return response
+            
+        # 如果是WebSocket API的响应格式(包含result字段)
+        if 'result' in response and isinstance(response['result'], dict):
+            return response['result']
+        
+        # 如果是REST API的响应格式
+        return response
