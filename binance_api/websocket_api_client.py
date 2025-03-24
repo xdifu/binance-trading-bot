@@ -911,29 +911,6 @@ class BinanceWebSocketAPIClient:
                 "error": f"Key validation failed: {str(e)}"
             }
 
-    def new_oco_order(self, **params):
-        """
-        发送OCO订单请求到WebSocket API
-        
-        按照币安最新API文档，OCO订单使用orderList.place.oco端点
-        必需参数:
-        - symbol: 交易对符号
-        - side: 订单方向 (BUY/SELL)
-        - quantity: 订单数量
-        - aboveType: 上方订单类型
-        - belowType: 下方订单类型
-        
-        至少需要以下参数之一:
-        - abovePrice/aboveStopPrice: 上方订单价格/触发价格
-        - belowPrice/下面触发价格
-                
-        Returns:
-            dict: 服务器响应
-        """
-        # 使用最新的OCO订单API端点
-        request_id = self._send_signed_request("orderList.place.oco", params)
-        return self._wait_for_response(request_id)
-
     def new_oco_order(self, symbol, side, quantity, price, stopPrice, stopLimitPrice=None, 
                      stopLimitTimeInForce="GTC", aboveType=None, belowType=None, **kwargs):
         """WebSocket API implementation of OCO order
