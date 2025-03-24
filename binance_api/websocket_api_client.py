@@ -989,3 +989,18 @@ class BinanceWSClient:
         except Exception as e:
             self.logger.error(f"Error creating OCO order via WebSocket API: {e}")
             raise
+
+    def cancel_oco_order(self, symbol, orderListId):
+        """Cancel OCO order via WebSocket API"""
+        try:
+            params = {
+                "symbol": symbol,
+                "orderListId": orderListId
+            }
+            
+            # Send the request using the orderList.cancel endpoint
+            request_id = self.client._send_signed_request("orderList.cancel", params)
+            return self.client._wait_for_response(request_id)
+        except Exception as e:
+            self.logger.error(f"Error cancelling OCO order via WebSocket API: {e}")
+            raise
