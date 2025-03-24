@@ -5,49 +5,59 @@ from datetime import datetime
 from utils.format_utils import format_price, format_quantity, get_precision_from_filters
 
 class RiskManager:
-    def __init__(self, binance_client, telegram_bot=None):
+    def __init__(self, binance_client, telegram_bot=None, asset_manager=None):
         """
-        Initialize risk management system
+        Initialize risk management module
         
         Args:
-            binance_client: BinanceClient instance for API operations
-            telegram_bot: Optional TelegramBot instance for notifications
+            binance_client: Binance API client instance
+            telegram_bot: Optional Telegram bot for notifications
+            asset_manager: Optional AssetManager instance for precision information
         """
         self.binance_client = binance_client
         self.telegram_bot = telegram_bot
-        self.symbol = config.SYMBOL
-        self.trailing_stop_loss_percent = config.TRAILING_STOP_LOSS_PERCENT / 100  # Convert to decimal
-        self.trailing_take_profit_percent = config.TRAILING_TAKE_PROFIT_PERCENT / 100  # Convert to decimal
+        self.asset_manager = asset_manager  # 存储资产管理器引用
         
-        # Initialize logger
+        # 配置参数初始化
+        self.symbol = config.SYMBOL
+        self.stop_loss_pct = config.STOP_LOSS_PCT / 100
+        self.take_profit_pct = config.TAKE_PROFIT_PCT / 100
+        self.capital_at_risk_pct = config.CAPITAL_AT_RISK_PCT / 100
+        
+        # 设置精度信息
+        # 如果提供了资产管理器，使用它的精度信息
+        if self.asset_manager:
+            self.price_precision = self.asset_manager.price_precision
+            self.quantity_precision = self.asset_manager.quantity_precision
+        else:
+            # 原有精度获取代码保持不变作为后备
+            self.price_precision = self._get_price_precision()
+            self.quantity_precision = self._get_quantity_precision()
+        
+        # 初始化日志
         self.logger = logging.getLogger(__name__)
         
-        # Track connection type for logging
-        self.using_websocket = self.binance_client.get_client_status()["websocket_available"]
-        self.logger.info(f"Using WebSocket API for risk management: {self.using_websocket}")
-        
-        # Get symbol information and set precision
-        self.symbol_info = self._get_symbol_info()
-        self.price_precision = self._get_price_precision()
-        self.quantity_precision = self._get_quantity_precision()
-        
-        # Price tracking variables
-        self.stop_loss_price = None
-        self.highest_price = None
-        self.lowest_price = None
-        self.take_profit_price = None
+        # OCO订单跟踪状态
         self.oco_order_id = None
-        self.is_active = False
-        
-        # Update thresholds to reduce API calls - configurable if needed
-        self.min_update_threshold_percent = 0.01  # 1% minimum price movement
-        self.min_update_interval_seconds = 600    # 10 minutes minimum between updates
-        
-        # Track last update time
+        self.pending_oco_orders = {}
+        self.last_price = None
         self.last_update_time = 0
         
-        # Track pending operations for better error handling
-        self.pending_oco_orders = {}
+        # 设置更新阈值参数
+        self.min_update_threshold_percent = 0.01  # 默认1%价格变化触发更新
+        self.min_update_interval_seconds = 3600   # 默认1小时最小更新间隔
+        
+        # 同步的波动率值
+        self.volatility_factor = 0.08  # 默认8%
+        
+        # 获取账户余额
+        self.balances = {}
+        self.update_account_balances()
+        
+        # 检查WebSocket API可用性以便日志记录
+        client_status = self.binance_client.get_client_status()
+        self.using_websocket = client_status["websocket_available"]
+        self.logger.info(f"Using WebSocket API for risk management: {self.using_websocket}")
 
     def _get_symbol_info(self):
         """
