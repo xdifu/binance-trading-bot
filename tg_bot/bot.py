@@ -24,7 +24,8 @@ class TelegramBot:
             "status": self._handle_status,
             "startgrid": self._handle_start_grid,
             "stopgrid": self._handle_stop_grid,
-            "risk": self._handle_risk_status
+            "risk": self._handle_risk_status,
+            "setsymbol": self._handle_set_symbol,  # New command for updating trading pair
         }
         
         for cmd, handler in commands.items():
@@ -43,13 +44,12 @@ class TelegramBot:
         self.logger.info("Starting Telegram bot")
         self.is_running = True
         
-        # 替换有问题的调试日志
+        # Safer access to internal handlers for logging
         try:
-            # 更安全的访问方式，不依赖内部结构
             handlers_count = len(self.application.handlers)
             registered_commands = []
             for group in self.application.handlers:
-                if group:  # 检查是否为空
+                if group:  # Check if not empty
                     for handler in group:
                         if isinstance(handler, CommandHandler):
                             registered_commands.extend(handler.commands)
@@ -143,7 +143,8 @@ class TelegramBot:
                 "/status - Get current grid trading status\n"
                 "/startgrid - Start grid trading\n"
                 "/stopgrid - Stop grid trading\n"
-                "/risk - View risk management status"
+                "/risk - View risk management status\n"
+                "/setsymbol [SYMBOL] - Change trading pair (e.g., /setsymbol BTCUSDT)"
             )
             await update.message.reply_text(help_text)
         await self._handle_authorized_command(update, handler)
@@ -205,6 +206,106 @@ class TelegramBot:
                 status_text = "Risk management module not initialized"
             
             await update.message.reply_text(status_text)
+        await self._handle_authorized_command(update, handler)
+    
+    async def _handle_set_symbol(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /setsymbol command to update the trading pair"""
+        async def handler(update):
+            # Check if command has arguments
+            if not context.args or len(context.args) != 1:
+                await update.message.reply_text(
+                    "Please provide a valid symbol format: /setsymbol BTCUSDT"
+                )
+                return
+
+            # Get the input symbol and convert to uppercase
+            new_symbol = context.args[0].upper()
+            
+            # Basic validation of symbol format
+            if not new_symbol or not isinstance(new_symbol, str) or len(new_symbol) < 5:
+                await update.message.reply_text("Invalid symbol format. Example: BTCUSDT")
+                return
+            
+            # Verify the symbol exists on Binance
+            await update.message.reply_text(f"Verifying symbol {new_symbol}...")
+            
+            try:
+                # Check if grid_trader is initialized
+                if not self.grid_trader or not self.grid_trader.binance_client:
+                    await update.message.reply_text("Error: Trading system not initialized properly")
+                    return
+                
+                # Get symbol info to verify it exists
+                symbol_info = self.grid_trader.binance_client.get_symbol_info(new_symbol)
+                
+                if not symbol_info:
+                    await update.message.reply_text(f"Error: Symbol {new_symbol} not found on Binance")
+                    return
+                    
+                # Check if the symbol is tradable
+                if symbol_info.get('status') != 'TRADING':
+                    await update.message.reply_text(
+                        f"Error: Symbol {new_symbol} exists but is not currently tradable. "
+                        f"Status: {symbol_info.get('status')}"
+                    )
+                    return
+                    
+                # Check if grid trading is running, stop it if needed
+                grid_was_running = False
+                if self.grid_trader and self.grid_trader.is_running:
+                    grid_was_running = True
+                    await update.message.reply_text("Stopping current grid trading to update symbol...")
+                    self.grid_trader.stop()
+                    if self.risk_manager and self.risk_manager.is_active:
+                        self.risk_manager.deactivate()
+                
+                # Update the trading symbol
+                old_symbol = config.SYMBOL
+                config.SYMBOL = new_symbol
+                
+                # Update grid trader's symbol
+                if hasattr(self.grid_trader, '_symbol'):
+                    self.grid_trader._symbol = new_symbol
+                self.grid_trader.symbol = new_symbol
+                
+                # Reload symbol info
+                self.grid_trader.symbol_info = self.grid_trader._get_symbol_info()
+                self.grid_trader.tick_size = self.grid_trader._get_tick_size()
+                self.grid_trader.step_size = self.grid_trader._get_step_size()
+                self.grid_trader.price_precision = self.grid_trader._get_price_precision()
+                self.grid_trader.quantity_precision = self.grid_trader._get_quantity_precision()
+                
+                # Log and notify about the change
+                success_message = f"✅ Symbol updated from {old_symbol} to {new_symbol}"
+                self.logger.info(success_message)
+                await update.message.reply_text(success_message)
+                
+                # Show symbol details
+                min_notional = "unknown"
+                for f in symbol_info.get('filters', []):
+                    if f.get('filterType') == 'NOTIONAL':
+                        min_notional = f.get('minNotional', 'unknown')
+                        break
+                
+                info_message = (
+                    f"Symbol: {new_symbol}\n"
+                    f"Status: {symbol_info.get('status')}\n"
+                    f"Price precision: {self.grid_trader.price_precision}\n"
+                    f"Quantity precision: {self.grid_trader.quantity_precision}\n"
+                    f"Minimum notional value: {min_notional}"
+                )
+                await update.message.reply_text(info_message)
+                
+                # Ask user if they want to restart grid trading
+                if grid_was_running:
+                    restart_message = "Would you like to restart grid trading with the new symbol?\n/startgrid - Start grid trading"
+                    await update.message.reply_text(restart_message)
+                
+            except Exception as e:
+                error_message = f"❌ Failed to update symbol: {str(e)}"
+                self.logger.error(error_message)
+                await update.message.reply_text(error_message)
+        
         await self._handle_authorized_command(update, handler)
     
     async def _handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
