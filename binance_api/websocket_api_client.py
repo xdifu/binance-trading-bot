@@ -949,10 +949,13 @@ class BinanceWSClient:
         """
         Create an OCO order via WebSocket API
         
-        This implementation follows Binance's official OCO order structure, ensuring at least one contingent order leg.
-        For risk management purposes, we create:
-        - A limit maker order for take profit (abovePrice)
-        - A stop-loss order for downside protection (belowStopPrice + belowPrice)
+        For SELL orders (risk management):
+        - above leg: STOP_LOSS (triggered when price drops to stopPrice)
+        - below leg: LIMIT_MAKER (executed when price rises to price)
+        
+        For BUY orders:
+        - above leg: LIMIT_MAKER (executed when price drops to price)
+        - below leg: STOP_LOSS (triggered when price rises to stopPrice)
         """
         try:
             # Create core parameters
@@ -962,16 +965,23 @@ class BinanceWSClient:
                 "quantity": str(quantity)  # Ensure string format
             }
             
-            # Set up the take-profit leg (above leg - typically LIMIT_MAKER)
-            params["aboveType"] = "LIMIT_MAKER"
-            params["abovePrice"] = str(price)  # Take profit price
+            if side == "SELL":  # Risk management OCO for selling
+                # Above leg is stop loss (triggers when price drops)
+                params["aboveType"] = "STOP_LOSS"
+                params["aboveStopPrice"] = str(stopPrice)  # Stop loss trigger price
+                
+                # Below leg is limit maker (executes when price rises)
+                params["belowType"] = "LIMIT_MAKER"
+                params["belowPrice"] = str(price)  # Take profit price
             
-            # Set up the stop-loss leg (below leg - must be STOP_LOSS to be contingent)
-            params["belowType"] = "STOP_LOSS"  # This order type makes it a contingent order
-            
-            # For STOP_LOSS type, we need both the trigger price and execution price
-            params["belowStopPrice"] = str(stopPrice)  # Stop-loss trigger price
-            params["belowPrice"] = str(float(stopPrice) * 0.997)  # Execution price (slightly lower)
+            else:  # BUY order OCO
+                # Above leg is limit maker (executes when price drops)
+                params["aboveType"] = "LIMIT_MAKER"
+                params["abovePrice"] = str(price)  # Limit buy price
+                
+                # Below leg is stop loss (triggers when price rises)
+                params["belowType"] = "STOP_LOSS"
+                params["belowStopPrice"] = str(stopPrice)  # Stop loss trigger price
             
             # Log the parameters for debugging
             self.logger.debug(f"Sending OCO order via WebSocket: {params}")
