@@ -850,3 +850,123 @@ class RiskManager:
         except Exception as e:
             self.logger.error(f"Error getting current price: {e}")
             return None
+
+    def _place_oco_order(self, stop_price, take_profit):
+        """Create OCO order with specific stop price and take profit price
+        
+        Args:
+            stop_price (float): Stop loss trigger price
+            take_profit (float): Take profit price
+            
+        Returns:
+            bool: True if the order was successfully placed, False otherwise
+        """
+        try:
+            # Check WebSocket availability before proceeding
+            client_status = self.binance_client.get_client_status()
+            self.using_websocket = client_status["websocket_available"]
+            api_type = "WebSocket API" if self.using_websocket else "REST API"
+            
+            # Get account balance
+            if self.asset_manager:
+                # Use asset manager if available
+                asset_balance = self.asset_manager.get_available_balance(self.base_asset)
+            else:
+                # Otherwise, get balance directly from the API
+                self.update_account_balances()
+                asset_balance = self.balances.get(self.base_asset, {}).get('free', 0)
+            
+            if asset_balance <= 0:
+                self.logger.info(f"No available {self.base_asset} for risk management")
+                return False
+                
+            # Set quantity (all available assets) and format
+            quantity = format_quantity(asset_balance, self.quantity_precision)
+            
+            # Format prices to appropriate precision
+            formatted_stop_price = format_price(stop_price, self.price_precision)
+            formatted_stop_limit_price = format_price(stop_price * 0.99, self.price_precision)  # 1% below stop for limit
+            formatted_take_profit = format_price(take_profit, self.price_precision)
+            
+            self.logger.info(f"Placing OCO order via {api_type}: Stop: {formatted_stop_price}, Take profit: {formatted_take_profit}, Qty: {quantity}")
+            
+            # Place OCO order with appropriate parameters
+            response = self.binance_client.new_oco_order(
+                symbol=self.symbol,
+                side="SELL",  # Sell assets
+                quantity=quantity,
+                price=formatted_take_profit,  # Take profit price
+                stopPrice=formatted_stop_price,  # Stop loss trigger price
+                stopLimitPrice=formatted_stop_limit_price,  # Stop limit price
+                stopLimitTimeInForce="GTC"  # Good Till Cancel
+            )
+            
+            # Handle different response formats from WebSocket vs REST
+            if isinstance(response, dict):
+                if 'orderListId' in response:
+                    # REST API format
+                    self.oco_order_id = response['orderListId']
+                elif 'result' in response and 'orderListId' in response['result']:
+                    # WebSocket API format
+                    self.oco_order_id = response['result']['orderListId']
+                    
+                # Update tracking structures with new order data
+                if self.oco_order_id:
+                    order_id_str = str(self.oco_order_id)
+                    self.pending_oco_orders[order_id_str] = {
+                        'stop_price': float(formatted_stop_price),
+                        'limit_price': float(formatted_take_profit),
+                        'quantity': float(quantity),
+                        'timestamp': int(time.time())
+                    }
+                    
+                    # Store reference prices for trailing functionality
+                    self.stop_loss_price = float(formatted_stop_price)
+                    self.take_profit_price = float(formatted_take_profit)
+                    
+                    # Get current price for high/low tracking
+                    current_price = self.get_current_price(force_refresh=True)
+                    if current_price:
+                        self.highest_price = current_price
+                        self.lowest_price = current_price
+                    
+                    # Initialize last update time
+                    self.last_update_time = time.time()
+                    
+                    # Send notification
+                    message = (f"Risk Management OCO Order Created via {api_type}\n"
+                              f"Quantity: {quantity} {self.base_asset}\n"
+                              f"Stop loss trigger: {formatted_stop_price}\n"
+                              f"Take profit price: {formatted_take_profit}")
+                    
+                    self.logger.info(message)
+                    if self.telegram_bot:
+                        self.telegram_bot.send_message(message)
+                        
+                    return True
+                else:
+                    self.logger.error("Failed to extract orderListId from OCO response")
+                    return False
+            else:
+                self.logger.error(f"Invalid OCO order response format: {type(response)}")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Failed to create OCO order: {e}")
+            
+            # If this was a WebSocket error, try once more with REST
+            if "connection" in str(e).lower() and self.using_websocket:
+                self.logger.warning("Connection issue during OCO order placement, falling back to REST API...")
+                
+                try:
+                    # Force client to update connection status
+                    client_status = self.binance_client.get_client_status()
+                    self.using_websocket = False  # Force REST API usage
+                    
+                    # Try again with REST API
+                    return self._place_oco_order(stop_price, take_profit)
+                except Exception as retry_error:
+                    self.logger.error(f"Fallback OCO order placement also failed: {retry_error}")
+                    return False
+            
+            return False
