@@ -1085,3 +1085,67 @@ class BinanceWSClient:
         # 使用orderList.place.oco端点
         request_id = self.client._send_signed_request("orderList.place.oco", params)
         return self.client._wait_for_response(request_id)
+    
+    def new_oco_order(self, symbol, side, quantity, price, stopPrice, stopLimitPrice=None, 
+                     stopLimitTimeInForce="GTC", aboveType=None, belowType=None, **kwargs):
+        """WebSocket API implementation of OCO order
+
+        适用于风险管理的OCO订单:
+        - Take-profit (止盈): 通常使用LIMIT_MAKER类型
+        - Stop-loss (止损): 通常使用STOP_LOSS类型
+        """
+        # 创建基本参数
+        params = {
+            "symbol": symbol,
+            "side": side,
+            "quantity": quantity
+        }
+        
+        # 对于止盈单 (take profit)，通常使用LIMIT_MAKER
+        if aboveType is not None:
+            params["aboveType"] = aboveType
+        else:
+            params["aboveType"] = "LIMIT_MAKER"
+        
+        # 设置止盈价格
+        if price:
+            params["abovePrice"] = price
+        
+        # 对于止损单 (stop loss)，可以是STOP_LOSS或LIMIT_MAKER
+        if belowType is not None:
+            params["belowType"] = belowType
+        else:
+            # 默认使用LIMIT_MAKER，因为它更简单且不需要额外参数
+            params["belowType"] = "LIMIT_MAKER"
+        
+        # 根据belowType设置参数
+        if params["belowType"] == "LIMIT_MAKER":
+            # LIMIT_MAKER只需要价格，不需要stopPrice
+            if stopPrice:
+                params["belowPrice"] = stopPrice
+        elif params["belowType"] == "STOP_LOSS":
+            # STOP_LOSS需要stopPrice作为触发价格
+            if stopPrice:
+                params["belowStopPrice"] = stopPrice
+                # 对于STOP_LOSS可能也需要设置执行价格
+                params["belowPrice"] = float(stopPrice) * 0.999  # 略低于触发价格
+        elif params["belowType"] == "STOP_LOSS_LIMIT":
+            # STOP_LOSS_LIMIT需要stopPrice和额外参数
+            if stopPrice:
+                params["belowStopPrice"] = stopPrice
+                if stopLimitPrice:
+                    params["belowPrice"] = stopLimitPrice
+                else:
+                    params["belowPrice"] = float(stopPrice) * 0.999
+                params["belowTimeInForce"] = stopLimitTimeInForce
+        
+        # 添加其他参数
+        for k, v in kwargs.items():
+            if k not in params:
+                params[k] = v
+        
+        self.logger.debug(f"Sending WebSocket OCO order with params: {params}")
+        
+        # 使用orderList.place.oco端点
+        request_id = self.client._send_signed_request("orderList.place.oco", params)
+        return self.client._wait_for_response(request_id)
