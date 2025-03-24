@@ -330,16 +330,12 @@ class GridTrader:
         Returns:
             str: Formatted price string
         """
-        if price <= 0:
-            self.logger.warning(f"Attempted to format invalid price: {price}, using minimum price")
-            return format_price(self.tick_size, self.price_precision)  # Return minimum tick size
-        
+        # Directly use format_price from utils - remove redundant validation
         return format_price(price, self.price_precision)
     
     def _adjust_quantity_precision(self, quantity):
         """
         Format quantity with appropriate precision for LOT_SIZE filter compliance
-        - Floors to step_size multiples (Binance requirement)
         
         Args:
             quantity (float): Original quantity value
@@ -347,15 +343,8 @@ class GridTrader:
         Returns:
             str: Formatted quantity string
         """
-        # Ensure quantity is positive
-        quantity = abs(float(quantity))
-        
-        # Floor to nearest valid step size (Binance rule for quantity)
-        step_size = self.step_size
-        floored_quantity = math.floor(quantity / step_size) * step_size
-        
-        # Format with correct precision
-        return "{:.{}f}".format(floored_quantity, self.quantity_precision)
+        # Directly use format_quantity from utils
+        return format_quantity(quantity, self.quantity_precision)
     
     def _setup_grid(self):
         """Set up grid levels and place initial orders"""
@@ -369,13 +358,8 @@ class GridTrader:
         client_status = self.binance_client.get_client_status()
         self.using_websocket = client_status["websocket_available"]
         
-        if self.using_websocket and not self.simulation_mode:
-            # WebSocket is available - use optimized order placement
-            self.logger.info("Using WebSocket API for grid setup")
-            self._place_grid_orders_with_websocket()
-        else:
-            # Use individual order placement
-            self._place_grid_orders_individually()
+        # Place grid orders (using unified method)
+        self._place_grid_orders()
     
     def _calculate_grid_levels(self):
         """
@@ -524,68 +508,84 @@ class GridTrader:
             self.logger.error(f"Error cancelling orders: {e}")
             return False
     
-    def _place_grid_orders_with_websocket(self):
-        """Place grid orders optimized for WebSocket API with fund locking"""
+    # OPTIMIZED: Unified order placement method replacing both previous methods
+    def _place_grid_orders(self):
+        """Place all grid orders with unified logic for both WebSocket and REST APIs"""
         for level in self.grid:
-            price = level['price']
-            side = level['side']
+            # Call the single order placement method for each level
+            self._place_grid_order(level)
             
-            # Get capital for this level (use dynamic capital if available, otherwise fall back to default)
-            capital = level.get('capital', self.capital_per_level)
+    def _place_grid_order(self, level):
+        """
+        Place a single grid order with unified WebSocket/REST handling
+        
+        Args:
+            level: The grid level dictionary with order details
             
-            # Validate price before proceeding
-            if price <= 0:
-                self.logger.error(f"Invalid price value: {price} for {side} order, skipping")
-                continue
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        price = level['price']
+        side = level['side']
+        
+        # Get capital for this level (use dynamic capital if available, otherwise fall back to default)
+        capital = level.get('capital', self.capital_per_level)
+        
+        # Validate price before proceeding
+        if price <= 0:
+            self.logger.error(f"Invalid price value: {price} for {side} order, skipping")
+            return False
             
-            # Calculate order quantity based on level's capital
-            quantity = capital / price
+        # Calculate order quantity based on level's capital
+        quantity = capital / price
+        
+        # Adjust quantity and price precision
+        formatted_quantity = self._adjust_quantity_precision(quantity)
+        formatted_price = self._adjust_price_precision(price)
+        
+        # Additional validation to ensure price isn't zero or invalid
+        if formatted_price == "0" or float(formatted_price) <= 0:
+            self.logger.error(f"Price formatting returned invalid value: '{formatted_price}' for {price}, skipping order")
+            return False
             
-            # Adjust quantity and price precision
-            formatted_quantity = self._adjust_quantity_precision(quantity)
-            formatted_price = self._adjust_price_precision(price)
+        try:
+            if self.simulation_mode:
+                # In simulation mode, just log the order without placing it
+                level['order_id'] = f"sim_{int(time.time())}_{side}_{formatted_price}"
+                self.logger.info(f"Simulation - Would place order: {side} {formatted_quantity} @ {formatted_price}")
+                return True
             
-            # Additional validation to ensure price isn't zero or invalid
-            if formatted_price == "0" or float(formatted_price) <= 0:
-                self.logger.error(f"Price formatting returned invalid value: '{formatted_price}' for {price}, skipping order")
-                continue
-                
+            # Check and lock funds - prevents race conditions
+            if side == 'BUY':
+                asset = 'USDT'
+                required = float(formatted_quantity) * float(formatted_price)
+            else:  # SELL
+                asset = self.symbol.replace('USDT', '')
+                required = float(formatted_quantity)
+            
+            # Try to lock the funds - this is atomic with the balance check
+            if not self._lock_funds(asset, required):
+                self.logger.warning(f"Could not lock funds for {side} order. Required: {required} {asset}")
+                return False
+            
             try:
-                if self.simulation_mode:
-                    # In simulation mode, just log the order without placing it
-                    level['order_id'] = f"sim_{int(time.time())}_{side}_{formatted_price}"
-                    self.logger.info(f"Simulation - Would place order: {side} {formatted_quantity} @ {formatted_price}")
-                    continue
+                # Generate a client order ID for tracking
+                client_order_id = f"grid_{int(time.time())}_{side}_{formatted_price}"
                 
-                # Check and lock funds - prevents race conditions
-                if side == 'BUY':
-                    asset = 'USDT'
-                    required = float(formatted_quantity) * float(formatted_price)
-                else:  # SELL
-                    asset = self.symbol.replace('USDT', '')
-                    required = float(formatted_quantity)
+                # Place order with appropriate client (WebSocket or REST)
+                order = self.binance_client.place_limit_order(
+                    self.symbol, 
+                    side, 
+                    formatted_quantity, 
+                    formatted_price
+                )
                 
-                # Try to lock the funds - this is atomic with the balance check
-                if not self._lock_funds(asset, required):
-                    self.logger.warning(f"Could not lock funds for {side} order. Required: {required} {asset}")
-                    continue
+                # Update the grid level with order ID
+                level['order_id'] = order['orderId']
+                level['timestamp'] = int(time.time())  # Add timestamp for order age tracking
                 
-                try:
-                    # Generate a client order ID for tracking
-                    client_order_id = f"grid_{int(time.time())}_{side}_{formatted_price}"
-                    
-                    # Place order with client order ID for tracking WebSocket updates
-                    order = self.binance_client.place_limit_order(
-                        self.symbol, 
-                        side, 
-                        formatted_quantity, 
-                        formatted_price
-                    )
-                    
-                    level['order_id'] = order['orderId']
-                    level['timestamp'] = int(time.time())  # Add timestamp for order age tracking
-                    
-                    # Add to pending orders for WebSocket response tracking
+                # Add to pending orders for WebSocket response tracking (if using WebSocket)
+                if self.using_websocket:
                     self.pending_orders[str(order['orderId'])] = {
                         'grid_index': self.grid.index(level),
                         'side': side,
@@ -595,102 +595,47 @@ class GridTrader:
                         'asset': asset,
                         'required': required
                     }
+                
+                self.logger.info(f"Order placed via {'WebSocket' if self.using_websocket else 'REST'}: "
+                                f"{side} {formatted_quantity} @ {formatted_price}, ID: {order['orderId']}")
+                return True
+                
+            except Exception as e:
+                # Release the funds if order placement fails
+                self._release_funds(asset, required)
+                self.logger.error(f"Failed to place order: {side} {formatted_quantity} @ {formatted_price}, Error: {e}")
+                
+                # Check if connection was lost and retry with fallback
+                if "connection" in str(e).lower() and self.using_websocket:
+                    self.logger.warning("WebSocket connection issue detected, retrying with REST fallback...")
                     
-                    self.logger.info(f"Order placed via {'WebSocket' if self.using_websocket else 'REST'}: {side} {formatted_quantity} @ {formatted_price}, ID: {order['orderId']}")
-                except Exception as e:
-                    # Release the funds if order placement fails
-                    self._release_funds(asset, required)
-                    self.logger.error(f"Failed to place order: {side} {formatted_quantity} @ {formatted_price}, Error: {e}")
+                    # Update status and retry placement
+                    client_status = self.binance_client.get_client_status()
+                    self.using_websocket = False  # Force REST for fallback
                     
-                    # Check if connection was lost
-                    if "connection" in str(e).lower() and self.using_websocket:
-                        self.logger.warning("WebSocket connection issue detected, retrying with fallback...")
-                        # Update status and retry placement
-                        client_status = self.binance_client.get_client_status()
-                        self.using_websocket = client_status["websocket_available"]
+                    try:
+                        # Try again with REST
+                        order = self.binance_client.place_limit_order(
+                            self.symbol, 
+                            side, 
+                            formatted_quantity, 
+                            formatted_price
+                        )
                         
-                        # Try again - will use REST if WebSocket is now unavailable
-                        try:
-                            order = self.binance_client.place_limit_order(
-                                self.symbol, 
-                                side, 
-                                formatted_quantity, 
-                                formatted_price
-                            )
-                            level['order_id'] = order['orderId']
-                            level['timestamp'] = int(time.time())  # Add timestamp for order age tracking
-                            self.logger.info(f"Order placed via fallback: {side} {formatted_quantity} @ {formatted_price}, ID: {order['orderId']}")
-                        except Exception as retry_error:
-                            # Still failed, make sure we release the funds
-                            self._release_funds(asset, required)
-                            self.logger.error(f"Fallback order placement also failed: {retry_error}")
-            except Exception as e:
-                self.logger.error(f"Error in order preparation: {e}")
-
-    def _place_grid_orders_individually(self):
-        """Place grid orders individually (traditional method) with fund locking"""
-        for level in self.grid:
-            price = level['price']
-            side = level['side']
-            
-            # Get capital for this level (use dynamic capital if available, otherwise fall back to default)
-            capital = level.get('capital', self.capital_per_level)
-            
-            # Validate price before proceeding
-            if price <= 0:
-                self.logger.error(f"Invalid price value: {price} for {side} order, skipping")
-                continue
-                
-            # Calculate order quantity based on level's capital
-            quantity = capital / price
-            
-            # Adjust quantity and price precision
-            formatted_quantity = self._adjust_quantity_precision(quantity)
-            formatted_price = self._adjust_price_precision(price)
-            
-            # Additional validation to ensure price isn't zero or invalid
-            if formatted_price == "0" or float(formatted_price) <= 0:
-                self.logger.error(f"Price formatting returned invalid value: '{formatted_price}' for {price}, skipping order")
-                continue
-                
-            try:
-                if self.simulation_mode:
-                    # In simulation mode, just log the order without placing it
-                    level['order_id'] = f"sim_{int(time.time())}_{side}_{formatted_price}"
-                    self.logger.info(f"Simulation - Would place order: {side} {formatted_quantity} @ {formatted_price}")
-                    continue
-                
-                # Check and lock funds - prevents race conditions
-                if side == 'BUY':
-                    asset = 'USDT'
-                    required = float(formatted_quantity) * float(formatted_price)
-                else:  # SELL
-                    asset = self.symbol.replace('USDT', '')
-                    required = float(formatted_quantity)
-                
-                # Try to lock the funds - this is atomic with the balance check
-                if not self._lock_funds(asset, required):
-                    self.logger.warning(f"Could not lock funds for {side} order. Required: {required} {asset}")
-                    continue
-                
-                try:
-                    # Place order
-                    order = self.binance_client.place_limit_order(
-                        self.symbol, 
-                        side, 
-                        formatted_quantity, 
-                        formatted_price
-                    )
-                    
-                    level['order_id'] = order['orderId']
-                    level['timestamp'] = int(time.time())  # Add timestamp for order age tracking
-                    self.logger.info(f"Order placed successfully: {side} {formatted_quantity} @ {formatted_price}, ID: {order['orderId']}")
-                except Exception as e:
-                    # Release the funds if order placement fails
-                    self._release_funds(asset, required)
-                    self.logger.error(f"Failed to place order: {side} {formatted_quantity} @ {formatted_price}, Error: {e}")
-            except Exception as e:
-                self.logger.error(f"Error in order preparation: {e}")
+                        level['order_id'] = order['orderId']
+                        level['timestamp'] = int(time.time())
+                        
+                        self.logger.info(f"Order placed via REST fallback: {side} {formatted_quantity} @ {formatted_price}, "
+                                        f"ID: {order['orderId']}")
+                        return True
+                    except Exception as retry_error:
+                        # Still failed, make sure we release the funds
+                        self._release_funds(asset, required)
+                        self.logger.error(f"Fallback order placement also failed: {retry_error}")
+                return False
+        except Exception as e:
+            self.logger.error(f"Error in order preparation: {e}")
+            return False
     
     def _get_current_atr(self):
         """
@@ -810,6 +755,53 @@ class GridTrader:
             return
         
         # Get essential order information, handling both structured and dict formats
+        order_status, order_id, symbol, side, price, quantity = self._extract_order_data(order_data)
+        
+        # Skip if not our symbol or not filled
+        if symbol != self.symbol or order_status != 'FILLED':
+            return
+            
+        self.logger.info(f"Order filled: {side} {quantity} @ {price} (ID: {order_id})")
+        
+        # Check if this is a pending order we're tracking
+        str_order_id = str(order_id)
+        if str_order_id in self.pending_orders:
+            # Remove from pending orders
+            pending_info = self.pending_orders.pop(str_order_id)
+            self.logger.debug(f"Pending order {str_order_id} fulfilled from tracking")
+            
+            # Release locked funds for the fulfilled order
+            self._release_funds(pending_info['asset'], pending_info['required'])
+        
+        # Find matching grid level
+        matching_level = None
+        level_index = -1
+        for i, level in enumerate(self.grid):
+            if level['order_id'] == order_id or str(level['order_id']) == str_order_id:
+                matching_level = level
+                level_index = i
+                break
+        
+        if not matching_level:
+            self.logger.warning(f"Received fill for order {order_id} but couldn't find in grid")
+            # Try to reconcile grid with open orders - this is a recovery mechanism
+            self._reconcile_grid_with_open_orders()
+            return
+        
+        # Process the filled order and place the opposite order
+        self._process_filled_order(matching_level, level_index, side, quantity, price)
+    
+    # OPTIMIZED: Extract order data method to reduce code duplication
+    def _extract_order_data(self, order_data):
+        """
+        Extract essential order data from different formats
+        
+        Args:
+            order_data: Order data object or dict
+            
+        Returns:
+            tuple: (status, order_id, symbol, side, price, quantity)
+        """
         if isinstance(order_data, dict):
             order_status = order_data.get('X')
             order_id = order_data.get('i')
@@ -828,198 +820,185 @@ class GridTrader:
                 quantity = float(order_data.q)
             except AttributeError as e:
                 self.logger.error(f"Failed to parse order update: {e}, data: {order_data}")
-                return
+                return None, None, None, None, 0, 0
+                
+        return order_status, order_id, symbol, side, price, quantity
+    
+    # OPTIMIZED: Process filled order method separated from handler
+    def _process_filled_order(self, matching_level, level_index, side, quantity, price):
+        """
+        Process a filled order and place the opposite order
         
-        # Skip if not our symbol
-        if symbol != self.symbol:
-            return
+        Args:
+            matching_level: Grid level that was filled
+            level_index: Index of the level in the grid
+            side: Order side (BUY/SELL)
+            quantity: Order quantity
+            price: Order price
             
-        # Handle order filled event
-        if order_status == 'FILLED':
-            self.logger.info(f"Order filled: {side} {quantity} @ {price} (ID: {order_id})")
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        # Create opposite order
+        new_side = "SELL" if side == "BUY" else "BUY"
+        
+        # Adjust quantity precision
+        formatted_quantity = self._adjust_quantity_precision(quantity)
+        
+        # Set price with increased spread for new order (1.5% instead of 1%)
+        if new_side == "SELL":
+            # For SELL orders after BUY executed, set higher price (+1.5%)
+            new_price = price * 1.015  # Increased from 1.01 to 1.015
+            formatted_price = self._adjust_price_precision(new_price)
+        else:
+            # For BUY orders after SELL executed, set lower price (-1.5%)
+            new_price = price * 0.985  # Increased from 0.99 to 0.985
+            formatted_price = self._adjust_price_precision(new_price)
+        
+        # Calculate expected profit and trading fees
+        expected_profit = abs(float(new_price) - float(price)) / float(price) * 100
+        trading_fee = 0.075 * 2  # 0.075% per trade, x2 for round-trip (BNB payment rate)
+        
+        # Only create reverse order if profit exceeds fees by a safe margin
+        if expected_profit <= trading_fee * 2:  # Profit should be at least 2x the fees
+            self.logger.info(f"Skipping reverse order - insufficient profit margin: {expected_profit:.4f}% vs fees: {trading_fee:.4f}%")
+            return False
+        
+        # Use config value for minimum order check instead of hardcoded value
+        min_order_value = config.CAPITAL_PER_LEVEL  # Use grid capital setting as minimum order threshold
+        order_value = float(formatted_quantity) * float(formatted_price)
+        if order_value < min_order_value:
+            self.logger.info(f"Skipping small order - value too low: {order_value:.2f} USDT < {min_order_value} USDT")
+            return False
+        
+        # Double-check price formatting
+        if formatted_price == "0" or float(formatted_price) <= 0:
+            self.logger.error(f"Invalid formatted price: {formatted_price} for {price}, using minimum valid price")
+            formatted_price = self._adjust_price_precision(self.tick_size)  # Use minimum valid price
+        
+        # Determine capital for dynamic allocation
+        capital = self._calculate_dynamic_capital_for_level(float(formatted_price))
+        
+        # Now place the order using the regular order placement logic
+        if self.simulation_mode:
+            self.logger.info(f"Simulation - Would place opposite order: {new_side} {formatted_quantity} @ {formatted_price}")
+            matching_level['side'] = new_side
+            matching_level['order_id'] = f"sim_{int(time.time())}_{new_side}_{formatted_price}"
+            message = f"Grid trade executed (simulation): {side} {formatted_quantity} @ {price}\nOpposite order would be: {new_side} {formatted_quantity} @ {formatted_price}"
+            if self.telegram_bot:
+                self.telegram_bot.send_message(message)
+            return True
+        
+        # Check and lock funds - prevents race conditions
+        if new_side == 'BUY':
+            asset = 'USDT'
+            required = float(formatted_quantity) * float(formatted_price)
+        else:  # SELL
+            asset = self.symbol.replace('USDT', '')
+            required = float(formatted_quantity)
+        
+        # Try to lock the funds
+        if not self._lock_funds(asset, required):
+            message = f"⚠️ Cannot place opposite order: Insufficient {asset} balance. Required: {required}, Available: {self.binance_client.check_balance(asset) - self.locked_balances.get(asset, 0)}"
+            self.logger.warning(message)
+            if self.telegram_bot:
+                self.telegram_bot.send_message(message)
+            return False
+        
+        # Place the order with error handling
+        try:
+            order = self.binance_client.place_limit_order(
+                self.symbol, 
+                new_side, 
+                formatted_quantity, 
+                formatted_price
+            )
             
-            # Check if this is a pending order we're tracking
-            str_order_id = str(order_id)
-            if str_order_id in self.pending_orders:
-                # Remove from pending orders
-                pending_info = self.pending_orders.pop(str_order_id)
-                self.logger.debug(f"Pending order {str_order_id} fulfilled from tracking")
-                
-                # Release locked funds for the fulfilled order
-                self._release_funds(pending_info['asset'], pending_info['required'])
+            # Update grid level
+            matching_level['side'] = new_side
+            matching_level['order_id'] = order['orderId']
             
-            # Find matching grid level
-            matching_level = None
-            level_index = -1
-            for i, level in enumerate(self.grid):
-                if level['order_id'] == order_id or str(level['order_id']) == str_order_id:
-                    matching_level = level
-                    level_index = i
-                    break
+            # Add to pending orders tracking if using WebSocket
+            if self.using_websocket:
+                self.pending_orders[str(order['orderId'])] = {
+                    'grid_index': level_index,
+                    'side': new_side,
+                    'price': float(formatted_price),
+                    'quantity': float(formatted_quantity),
+                    'timestamp': int(time.time()),
+                    'asset': asset,
+                    'required': required
+                }
             
-            if not matching_level:
-                self.logger.warning(f"Received fill for order {order_id} but couldn't find in grid")
-                # Try to reconcile grid with open orders - this is a recovery mechanism
-                self._reconcile_grid_with_open_orders()
-                return
+            message = f"Grid trade executed: {side} {formatted_quantity} @ {price}\nOpposite order placed: {new_side} {formatted_quantity} @ {formatted_price}"
+            self.logger.info(message)
+            if self.telegram_bot:
+                self.telegram_bot.send_message(message)
+            return True
             
-            # Create opposite order
-            new_side = "SELL" if side == "BUY" else "BUY"
+        except Exception as e:
+            # Release locked funds if order placement fails
+            self._release_funds(asset, required)
+            self.logger.error(f"Failed to place opposite order: {e}")
             
-            # Adjust quantity precision
-            formatted_quantity = self._adjust_quantity_precision(quantity)
-            
-            # Set price with increased spread for new order (1.5% instead of 1%)
-            if new_side == "SELL":
-                # For SELL orders after BUY executed, set higher price (+1.5%)
-                new_price = price * 1.015  # Increased from 1.01 to 1.015
-                formatted_price = self._adjust_price_precision(new_price)
-            else:
-                # For BUY orders after SELL executed, set lower price (-1.5%)
-                new_price = price * 0.985  # Increased from 0.99 to 0.985
-                formatted_price = self._adjust_price_precision(new_price)
-            
-            # Calculate expected profit and trading fees
-            expected_profit = abs(float(new_price) - float(price)) / float(price) * 100
-            trading_fee = 0.075 * 2  # 0.075% per trade, x2 for round-trip (BNB payment rate)
-            
-            # Only create reverse order if profit exceeds fees by a safe margin
-            if expected_profit <= trading_fee * 2:  # Profit should be at least 2x the fees
-                self.logger.info(f"Skipping reverse order - insufficient profit margin: {expected_profit:.4f}% vs fees: {trading_fee:.4f}%")
-                return
-            
-            # Use config value for minimum order check instead of hardcoded value
-            min_order_value = config.CAPITAL_PER_LEVEL  # Use grid capital setting as minimum order threshold
-            order_value = float(formatted_quantity) * float(formatted_price)
-            if order_value < min_order_value:
-                self.logger.info(f"Skipping small order - value too low: {order_value:.2f} USDT < {min_order_value} USDT")
-                return
-            
-            # Double-check price formatting
-            if formatted_price == "0" or float(formatted_price) <= 0:
-                self.logger.error(f"Invalid formatted price: {formatted_price} for {price}, using minimum valid price")
-                formatted_price = self._adjust_price_precision(self.tick_size)  # Use minimum valid price
-            
-            # Determine appropriate capital allocation for reverse order based on price zone
-            current_price = self.current_market_price
-            grid_range = current_price * self.grid_range_percent
-            core_range = grid_range * self.core_zone_percentage
-            core_upper = current_price + (core_range / 2)
-            core_lower = current_price - (core_range / 2)
-
-            # Determine capital based on price zone
-            if core_lower <= float(formatted_price) <= core_upper:
-                # This is a core zone order - gets more capital
-                distance_factor = 1 - min(1, abs(float(formatted_price) - current_price) / core_range) if core_range > 0 else 0
-                capital_multiplier = 1 + (distance_factor * 0.3)
-                capital = self.capital_per_level * self.core_capital_ratio * capital_multiplier
-                self.logger.debug(f"Core zone reverse order with {capital:.2f} USDT capital (multiplier: {capital_multiplier:.2f})")
-            else:
-                # Edge zone order - gets less capital
-                capital = self.capital_per_level * (1 - self.core_capital_ratio)
-                self.logger.debug(f"Edge zone reverse order with {capital:.2f} USDT capital")
-
-            # Now calculate required funds based on the dynamically calculated capital
-            if new_side == 'BUY':
-                asset = 'USDT'
-                required = float(formatted_quantity) * float(formatted_price)
-            else:  # SELL
-                asset = self.symbol.replace('USDT', '')
-                required = float(formatted_quantity)
-            
-            try:
-                if self.simulation_mode:
-                    self.logger.info(f"Simulation - Would place opposite order: {new_side} {formatted_quantity} @ {formatted_price}")
+            # If WebSocket connection error, try with REST API
+            if "connection" in str(e).lower() and self.using_websocket:
+                try:
+                    self.logger.warning("Connection error - falling back to REST API for opposite order")
+                    
+                    # Force update of client status
+                    client_status = self.binance_client.get_client_status()
+                    self.using_websocket = False  # Force REST for fallback
+                    
+                    # Try again with REST
+                    order = self.binance_client.place_limit_order(
+                        self.symbol, 
+                        new_side, 
+                        formatted_quantity, 
+                        formatted_price
+                    )
+                    
+                    # Update grid
                     matching_level['side'] = new_side
-                    matching_level['order_id'] = f"sim_{int(time.time())}_{new_side}_{formatted_price}"
-                    message = f"Grid trade executed (simulation): {side} {formatted_quantity} @ {formatted_price}\nOpposite order would be: {new_side} {formatted_quantity} @ {formatted_price}"
+                    matching_level['order_id'] = order['orderId']
+                    
+                    message = f"Grid trade executed: {side} {formatted_quantity} @ {price}\nOpposite order placed via fallback: {new_side} {formatted_quantity} @ {formatted_price}"
+                    self.logger.info(message)
                     if self.telegram_bot:
                         self.telegram_bot.send_message(message)
-                    return
-                
-                # Check and lock funds - prevents race conditions
-                if new_side == 'BUY':
-                    asset = 'USDT'
-                    required = float(formatted_quantity) * float(formatted_price)
-                else:  # SELL
-                    asset = self.symbol.replace('USDT', '')
-                    required = float(formatted_quantity)
-                
-                # Try to lock the funds - this is atomic with the balance check
-                if not self._lock_funds(asset, required):
-                    message = f"⚠️ Cannot place opposite order: Insufficient {asset} balance. Required: {required}, Available: {self.binance_client.check_balance(asset) - self.locked_balances.get(asset, 0)}"
-                    self.logger.warning(message)
-                    if self.telegram_bot:
-                        self.telegram_bot.send_message(message)
-                    return
-                
-                # Update connection status before placing order
-                client_status = self.binance_client.get_client_status()
-                self.using_websocket = client_status["websocket_available"]
-                api_type = "WebSocket API" if self.using_websocket else "REST API"
-                
-                # Place opposite order
-                new_order = self.binance_client.place_limit_order(
-                    self.symbol, 
-                    new_side, 
-                    formatted_quantity, 
-                    formatted_price
-                )
-                
-                # Update grid
-                matching_level['side'] = new_side
-                matching_level['order_id'] = new_order['orderId']
-                
-                # Add to pending orders tracking if using WebSocket
-                if self.using_websocket:
-                    self.pending_orders[str(new_order['orderId'])] = {
-                        'grid_index': level_index,
-                        'side': new_side,
-                        'price': float(formatted_price),
-                        'quantity': float(formatted_quantity),
-                        'timestamp': int(time.time()),
-                        'asset': asset,
-                        'required': required
-                    }
-                
-                message = f"Grid trade executed: {side} {formatted_quantity} @ {formatted_price}\nOpposite order placed via {api_type}: {new_side} {formatted_quantity} @ {formatted_price}"
-                self.logger.info(message)
-                if self.telegram_bot:
-                    self.telegram_bot.send_message(message)
-            except Exception as e:
-                # Release locked funds if order placement fails
-                self._release_funds(asset, required)
-                self.logger.error(f"Failed to place opposite order: {e}")
-                
-                # If WebSocket connection error, try with REST API
-                if "connection" in str(e).lower() and self.using_websocket:
-                    try:
-                        self.logger.warning("Connection error - falling back to REST API for opposite order")
-                        
-                        # Force update of client status
-                        client_status = self.binance_client.get_client_status()
-                        self.using_websocket = client_status["websocket_available"]
-                        
-                        # Try again - will use REST if WebSocket is now unavailable
-                        new_order = self.binance_client.place_limit_order(
-                            self.symbol, 
-                            new_side, 
-                            formatted_quantity, 
-                            formatted_price
-                        )
-                        
-                        # Update grid
-                        matching_level['side'] = new_side
-                        matching_level['order_id'] = new_order['orderId']
-                        
-                        message = f"Grid trade executed: {side} {formatted_quantity} @ {formatted_price}\nOpposite order placed via fallback: {new_side} {formatted_quantity} @ {formatted_price}"
-                        self.logger.info(message)
-                        if self.telegram_bot:
-                            self.telegram_bot.send_message(message)
-                    except Exception as retry_error:
-                        self._release_funds(asset, required)  # Make sure to release funds on retry failure
-                        self.logger.error(f"Fallback order placement also failed: {retry_error}")
+                    return True
+                except Exception as retry_error:
+                    self._release_funds(asset, required)  # Make sure to release funds on retry failure
+                    self.logger.error(f"Fallback order placement also failed: {retry_error}")
+            return False
 
+    # OPTIMIZED: New helper method for capital calculation
+    def _calculate_dynamic_capital_for_level(self, price):
+        """
+        Calculate appropriate capital allocation based on price zone
+        
+        Args:
+            price: The price for the order
+            
+        Returns:
+            float: The capital allocation for this price level
+        """
+        current_price = self.current_market_price
+        grid_range = current_price * self.grid_range_percent
+        core_range = grid_range * self.core_zone_percentage
+        core_upper = current_price + (core_range / 2)
+        core_lower = current_price - (core_range / 2)
+
+        # Determine capital based on price zone
+        if core_lower <= price <= core_upper:
+            # This is a core zone order - gets more capital
+            distance_factor = 1 - min(1, abs(price - current_price) / core_range) if core_range > 0 else 0
+            capital_multiplier = 1 + (distance_factor * 0.3)
+            return self.capital_per_level * self.core_capital_ratio * capital_multiplier
+        else:
+            # Edge zone order - gets less capital
+            return self.capital_per_level * (1 - self.core_capital_ratio)
+    
     def _lock_funds(self, asset, amount):
         """
         Lock funds for a particular asset to prevent race conditions
@@ -1155,58 +1134,6 @@ class GridTrader:
                 self.grid[i]['capital'] = new_grid[new_index]['capital']
                 
                 # Place the new order
-                self._place_single_grid_order(self.grid[i])
+                self._place_grid_order(self.grid[i])
                 
         return len(orders_to_cancel)
-    
-    def _place_single_grid_order(self, level):
-        """Place a single grid order based on level information"""
-        price = level['price']
-        side = level['side']
-        capital = level.get('capital', self.capital_per_level)
-        
-        # Calculate quantity based on capital
-        quantity = capital / price
-        
-        # Format values
-        formatted_quantity = self._adjust_quantity_precision(quantity)
-        formatted_price = self._adjust_price_precision(price)
-        
-        # Check minimum value
-        order_value = float(formatted_quantity) * float(formatted_price)
-        min_order_value = self.capital_per_level  # Use grid capital setting as minimum order threshold
-        if order_value < min_order_value:
-            self.logger.info(f"Skipping small order - value too low: {order_value:.2f} USDT < {min_order_value} USDT")
-            return False
-        
-        # Lock funds
-        if side == 'BUY':
-            asset = 'USDT'
-            required = order_value
-        else:
-            asset = self.symbol.replace('USDT', '')
-            required = float(formatted_quantity)
-        
-        if not self._lock_funds(asset, required):
-            self.logger.warning(f"Could not lock funds for {side} order. Required: {required} {asset}")
-            return False
-        
-        try:
-            # Place order
-            order = self.binance_client.place_limit_order(
-                self.symbol, 
-                side, 
-                formatted_quantity, 
-                formatted_price
-            )
-            
-            # Update level
-            level['order_id'] = order['orderId']
-            level['timestamp'] = int(time.time())
-            
-            self.logger.info(f"Order placed: {side} {formatted_quantity} @ {formatted_price}, ID: {order['orderId']}")
-            return True
-        except Exception as e:
-            self._release_funds(asset, required)
-            self.logger.error(f"Failed to place order: {e}")
-            return False
