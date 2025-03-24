@@ -268,6 +268,16 @@ class TelegramBot:
                     self.grid_trader._symbol = new_symbol
                 self.grid_trader.symbol = new_symbol
                 
+                # Add this code: Update risk manager's symbol
+                if self.risk_manager:
+                    # If risk management is active, deactivate first
+                    if self.risk_manager.is_active:
+                        self.risk_manager.deactivate()
+                        
+                    # Update risk manager's symbol
+                    self.risk_manager.update_symbol(new_symbol)
+                    self.logger.info(f"Risk manager updated to use symbol {new_symbol}")
+                
                 # Reload symbol info
                 self.grid_trader.symbol_info = self.grid_trader._get_symbol_info()
                 self.grid_trader.tick_size = self.grid_trader._get_tick_size()
