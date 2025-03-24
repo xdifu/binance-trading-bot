@@ -848,3 +848,30 @@ class RiskManager:
                 self.logger.warning(f"账户信息格式不正确: {type(account_info)}")
         except Exception as e:
             self.logger.error(f"更新账户余额失败: {e}")
+
+    def update_symbol(self, new_symbol):
+        """更新交易对符号和相关参数"""
+        old_symbol = self.symbol
+        self.symbol = new_symbol
+        
+        # 更新基础资产名称
+        old_base_asset = self.base_asset  # 保存旧资产名称以便日志记录
+        self.base_asset = new_symbol.replace('USDT', '')
+        
+        # 重置价格相关状态
+        self.last_price = None
+        
+        # 重置OCO订单状态
+        self.oco_order_id = None
+        
+        # 获取新交易对的精度信息
+        self._set_precision_from_symbol_info()
+        
+        self.logger.info(f"Risk Manager updated symbol from {old_symbol} to {new_symbol}")
+        self.logger.info(f"Base asset changed from {old_base_asset} to {self.base_asset}")
+        
+        # 如果风险管理已激活，需要取消旧OCO订单并创建新订单
+        if self.is_active:
+            self._cancel_oco_orders()  # 取消旧交易对的OCO订单
+        
+        return True
