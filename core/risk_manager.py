@@ -358,13 +358,27 @@ class RiskManager:
             self.using_websocket = client_status["websocket_available"]
             api_type = "WebSocket API" if self.using_websocket else "REST API"
             
+            # Critical fix: Always refresh current price first to ensure we use the correct symbol
+            current_price = float(self.binance_client.get_symbol_price(self.symbol))
+            self.logger.info(f"Current price for {self.symbol}: {current_price}")
+            
+            # Update highest/lowest price tracking with current price to prevent stale data
+            if not self.highest_price or current_price > self.highest_price:
+                self.highest_price = current_price
+            if not self.lowest_price or current_price < self.lowest_price:
+                self.lowest_price = current_price
+            
+            # Recalculate stop loss and take profit based on current price
+            safety_margin = 0.01  # 1% safety margin
+            self.stop_loss_price = current_price * (1 - self.trailing_stop_loss_percent)
+            self.take_profit_price = current_price * (1 + self.trailing_take_profit_percent)
+            
             # Get account balance - Always use current symbol to determine the asset
             balance = self.binance_client.get_account_info()
             asset = self.symbol.replace('USDT', '')  # Ensure we get the correct asset for current symbol
             
             # Find corresponding asset balance - handle different response formats
             asset_balance = None
-            
             if isinstance(balance, dict):
                 if 'balances' in balance:
                     # REST API format
@@ -386,135 +400,64 @@ class RiskManager:
             # Set quantity (all available assets) and format
             quantity = self._adjust_quantity_precision(asset_balance)
             
-            # Get current price - IMPORTANT: Get fresh price for the current symbol
-            current_price = float(self.binance_client.get_symbol_price(self.symbol))
-            self.logger.debug(f"Current price for {self.symbol}: {current_price}")
-            
             # Get symbol info for price filter constraints
             symbol_info = self.binance_client.get_symbol_info(self.symbol)
-            self.logger.debug(f"Retrieved symbol info for {self.symbol}: {'Success' if symbol_info else 'Failed'}")
             
-            # Original stop loss and take profit prices
-            original_stop_price = self.stop_loss_price
-            original_take_profit_price = self.take_profit_price
+            # Initialize price range variables
+            min_price = current_price * 0.85  # Default: 15% below current price 
+            max_price = current_price * 1.15  # Default: 15% above current price
             
-            # Initialize variables to track price ranges
-            min_price = None
-            max_price = None
-            default_max_deviation = 0.05  # 5% default max deviation as fallback
-            
-            # Extract PERCENT_PRICE_BY_SIDE filter if available (most strict for OCO orders)
-            percent_price_by_side_filter = None
-            percent_price_filter = None
-            
+            # Get correct price filters based on symbol_info
             if symbol_info and 'filters' in symbol_info:
                 for filter_item in symbol_info['filters']:
-                    # First look for PERCENT_PRICE_BY_SIDE filter (more specific for OCOs)
                     if filter_item['filterType'] == 'PERCENT_PRICE_BY_SIDE':
-                        percent_price_by_side_filter = filter_item
-                        self.logger.debug(f"Found PERCENT_PRICE_BY_SIDE filter: {filter_item}")
+                        # This filter is most relevant for OCO orders
+                        bid_multiplier_up = float(filter_item.get('bidMultiplierUp', 1.2))
+                        ask_multiplier_down = float(filter_item.get('askMultiplierDown', 0.8))
                         
-                    # Also check for standard PERCENT_PRICE filter as fallback
+                        # Apply specific multipliers for OCO with SELL side
+                        max_price = current_price * bid_multiplier_up
+                        min_price = current_price * ask_multiplier_down
+                        
+                        self.logger.info(f"Applied PERCENT_PRICE_BY_SIDE filter: {min_price:.4f} to {max_price:.4f}")
+                        break
                     elif filter_item['filterType'] == 'PERCENT_PRICE':
-                        percent_price_filter = filter_item
+                        # Generic percent price filter
+                        multiplier_up = float(filter_item.get('multiplierUp', 1.2))
+                        multiplier_down = float(filter_item.get('multiplierDown', 0.8))
+                        max_price = current_price * multiplier_up
+                        min_price = current_price * multiplier_down
             
-            # First try to use PERCENT_PRICE_BY_SIDE filter for best accuracy
-            if percent_price_by_side_filter:
-                # This filter has different multipliers for BUY vs SELL and for price above/below market
-                # For OCO order with SELL side:
-                # - bidMultiplierUp: upper limit for take profit (limit price above market)
-                # - askMultiplierDown: lower limit for stop loss (stop price below market)
-                
-                if 'bidMultiplierUp' in percent_price_by_side_filter and 'askMultiplierDown' in percent_price_by_side_filter:
-                    bid_multiplier_up = float(percent_price_by_side_filter['bidMultiplierUp'])
-                    ask_multiplier_down = float(percent_price_by_side_filter['askMultiplierDown'])
-                    
-                    # Apply multipliers based on side (we're using SELL for risk management)
-                    max_price = current_price * bid_multiplier_up       # Upper limit for take profit
-                    min_price = current_price * ask_multiplier_down      # Lower limit for stop loss
-                    
-                    self.logger.info(
-                        f"Using PERCENT_PRICE_BY_SIDE filter - Price range: {min_price:.4f} to {max_price:.4f} "
-                        f"(current: {current_price:.4f})"
-                    )
-                    
-            # Fallback to standard PERCENT_PRICE filter if BY_SIDE not available
-            elif percent_price_filter:
-                multiplier_up = float(percent_price_filter.get('multiplierUp', 1.0 + default_max_deviation))
-                multiplier_down = float(percent_price_filter.get('multiplierDown', 1.0 - default_max_deviation))
-                
-                # Calculate allowed price range
-                max_price = current_price * multiplier_up
-                min_price = current_price * multiplier_down
-                
-                self.logger.info(
-                    f"Using PERCENT_PRICE filter - Price range: {min_price:.4f} to {max_price:.4f} "
-                    f"(current: {current_price:.4f})"
-                )
+            # Apply additional safety margin to avoid edge cases
+            safe_max = max_price * 0.95  # Stay 5% below maximum
+            safe_min = min_price * 1.05  # Stay 5% above minimum
             
-            # If no price filters found, apply conservative default limits
-            # This is adaptive based on asset price magnitude
-            if min_price is None or max_price is None:
-                # Detect asset price magnitude to apply appropriate defaults
-                # High-priced assets (like BTC) can have smaller % movements
-                # Low-priced assets can have larger % movements
-                
-                if current_price > 1000:  # Very high-priced asset
-                    max_deviation = 0.01  # 1% deviation
-                    self.logger.info(f"Using conservative 1% deviation for high-value asset ({current_price:.2f})")
-                elif current_price > 100:  # High-priced asset
-                    max_deviation = 0.02  # 2% deviation
-                    self.logger.info(f"Using conservative 2% deviation for high-value asset ({current_price:.2f})")
-                elif current_price > 10:   # Medium-priced asset (like TRUMP)
-                    max_deviation = 0.025  # 2.5% deviation
-                    self.logger.info(f"Using conservative 2.5% deviation for medium-value asset ({current_price:.2f})")
-                elif current_price > 1:    # Low-priced asset
-                    max_deviation = 0.035  # 3.5% deviation
-                    self.logger.info(f"Using standard 3.5% deviation for standard asset ({current_price:.2f})")
-                else:                      # Very low-priced asset
-                    max_deviation = 0.05   # 5% deviation
-                    self.logger.info(f"Using standard 5% deviation for low-value asset ({current_price:.2f})")
-                
-                # Apply conservative limits based on price magnitude
-                max_price = current_price * (1 + max_deviation)
-                min_price = current_price * (1 - max_deviation)
+            # Critical fix: Ensure stop price < current price < limit price for SELL orders
+            # This is required by Binance OCO order rules
+            if self.stop_loss_price >= current_price or self.stop_loss_price < safe_min:
+                old_stop = self.stop_loss_price
+                self.stop_loss_price = min(current_price * 0.95, safe_min)
+                self.logger.warning(f"Adjusted stop loss from {old_stop:.4f} to {self.stop_loss_price:.4f} to comply with price rules")
             
-            # Add additional safety margin to avoid edge cases (10% safety buffer)
-            price_range = max_price - min_price
-            safety_margin = price_range * 0.1  # 10% safety margin
+            if self.take_profit_price <= current_price or self.take_profit_price > safe_max:
+                old_take = self.take_profit_price
+                self.take_profit_price = max(current_price * 1.05, safe_max)
+                self.logger.warning(f"Adjusted take profit from {old_take:.4f} to {self.take_profit_price:.4f} to comply with price rules")
             
-            safe_min = min_price + safety_margin
-            safe_max = max_price - safety_margin
-            
-            self.logger.debug(f"Price limits with safety margin - min: {safe_min:.4f}, max: {safe_max:.4f}")
-            
-            # Adjust prices to stay within limits
-            if self.stop_loss_price < safe_min:
-                self.logger.warning(
-                    f"Stop loss price {self.stop_loss_price:.4f} is below allowed minimum {safe_min:.4f}. "
-                    f"Adjusting to {safe_min:.4f}."
-                )
-                self.stop_loss_price = safe_min
-            
-            if self.take_profit_price > safe_max:
-                self.logger.warning(
-                    f"Take profit price {self.take_profit_price:.4f} is above allowed maximum {safe_max:.4f}. "
-                    f"Adjusting to {safe_max:.4f}."
-                )
-                self.take_profit_price = safe_max
-            
-            # Log adjustments if prices were changed
-            if original_stop_price != self.stop_loss_price or original_take_profit_price != self.take_profit_price:
-                self.logger.info(
-                    f"Adjusted prices to comply with exchange filters - "
-                    f"Stop: {self.stop_loss_price:.4f} (was {original_stop_price:.4f}), "
-                    f"Take profit: {self.take_profit_price:.4f} (was {original_take_profit_price:.4f})"
-                )
-            
-            # Format stop loss and take profit prices
+            # Format prices correctly
             stop_price = self._adjust_price_precision(self.stop_loss_price)
             stop_limit_price = self._adjust_price_precision(self.stop_loss_price * 0.99)
             limit_price = self._adjust_price_precision(self.take_profit_price)
+            
+            # Final safety check - ensure stop < current < limit for SELL OCO orders
+            current_price_str = self._adjust_price_precision(current_price)
+            self.logger.info(f"OCO price check: stop ({stop_price}) < current ({current_price_str}) < limit ({limit_price})")
+            
+            if float(stop_price) >= float(current_price_str) or float(limit_price) <= float(current_price_str):
+                self.logger.error(f"Invalid OCO price relationship: stop ({stop_price}) < current ({current_price_str}) < limit ({limit_price})")
+                if self.telegram_bot:
+                    self.telegram_bot.send_message(f"⚠️ Cannot create OCO order: invalid price relationship")
+                return False
             
             self.logger.info(f"Placing OCO order via {api_type}: Stop: {stop_price}, Limit: {limit_price}, Qty: {quantity}")
             
