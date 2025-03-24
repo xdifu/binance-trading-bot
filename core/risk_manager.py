@@ -920,3 +920,34 @@ class RiskManager:
         
         return f"Risk management thresholds updated: {self.min_update_threshold_percent*100}% price change, " \
                f"{self.min_update_interval_seconds/60} min interval"
+    
+    def update_symbol(self, new_symbol):
+        """
+        Update the trading symbol and reset related state
+        
+        Args:
+            new_symbol: New trading symbol to use
+        """
+        old_symbol = self.symbol
+        self.symbol = new_symbol
+        
+        # Reset price tracking for the new symbol
+        self.stop_loss_price = None
+        self.highest_price = None
+        self.lowest_price = None
+        self.take_profit_price = None
+        
+        # Cancel any existing OCO orders
+        if self.oco_order_id:
+            self._cancel_oco_orders()
+            self.oco_order_id = None
+        
+        # Reset pending operations tracking
+        self.pending_oco_orders = {}
+        
+        # Update symbol info and precision settings for the new symbol
+        self.symbol_info = self._get_symbol_info()
+        self.price_precision = self._get_price_precision()
+        self.quantity_precision = self._get_quantity_precision()
+        
+        self.logger.info(f"Risk manager symbol updated from {old_symbol} to {new_symbol}")
