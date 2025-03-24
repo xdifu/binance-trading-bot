@@ -950,12 +950,12 @@ class BinanceWSClient:
         Create an OCO order via WebSocket API
         
         For SELL orders (risk management):
-        - above leg: STOP_LOSS (triggered when price drops to stopPrice)
-        - below leg: LIMIT_MAKER (executed when price rises to price)
+        - above leg: LIMIT_MAKER (take profit - executed when price rises)
+        - below leg: STOP_LOSS (stop loss - triggered when price drops)
         
         For BUY orders:
-        - above leg: LIMIT_MAKER (executed when price drops to price)
-        - below leg: STOP_LOSS (triggered when price rises to stopPrice)
+        - above leg: STOP_LOSS (stop loss - triggered when price rises)
+        - below leg: LIMIT_MAKER (take profit - executed when price drops)
         """
         try:
             # Create core parameters
@@ -966,22 +966,22 @@ class BinanceWSClient:
             }
             
             if side == "SELL":  # Risk management OCO for selling
-                # Above leg is stop loss (triggers when price drops)
+                # Above leg is LIMIT_MAKER (take profit - executed when price rises)
+                params["aboveType"] = "LIMIT_MAKER"
+                params["abovePrice"] = str(price)  # Take profit price
+                
+                # Below leg is STOP_LOSS (stop loss - triggered when price drops)
+                params["belowType"] = "STOP_LOSS"
+                params["belowStopPrice"] = str(stopPrice)  # Stop loss trigger price
+            
+            else:  # BUY order OCO
+                # Above leg is STOP_LOSS (stop loss - triggered when price rises)
                 params["aboveType"] = "STOP_LOSS"
                 params["aboveStopPrice"] = str(stopPrice)  # Stop loss trigger price
                 
-                # Below leg is limit maker (executes when price rises)
+                # Below leg is LIMIT_MAKER (take profit - executed when price drops)
                 params["belowType"] = "LIMIT_MAKER"
                 params["belowPrice"] = str(price)  # Take profit price
-            
-            else:  # BUY order OCO
-                # Above leg is limit maker (executes when price drops)
-                params["aboveType"] = "LIMIT_MAKER"
-                params["abovePrice"] = str(price)  # Limit buy price
-                
-                # Below leg is stop loss (triggers when price rises)
-                params["belowType"] = "STOP_LOSS"
-                params["belowStopPrice"] = str(stopPrice)  # Stop loss trigger price
             
             # Log the parameters for debugging
             self.logger.debug(f"Sending OCO order via WebSocket: {params}")
