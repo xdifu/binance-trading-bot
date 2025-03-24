@@ -851,3 +851,21 @@ class RiskManager:
             self._cancel_oco_orders()  # 取消旧交易对的OCO订单
         
         return True
+
+    def get_current_price(self, force_refresh=False):
+        """获取当前价格，支持强制刷新"""
+        try:
+            # 如果强制刷新或者没有缓存价格，则从交易所获取
+            if force_refresh or not self.last_price:
+                price_data = self.binance_client.get_symbol_price(self.symbol)
+                if isinstance(price_data, dict):
+                    self.last_price = float(price_data.get('price', 0))
+                else:
+                    self.last_price = float(price_data)
+                    
+                self.last_update_time = time.time()
+                
+            return self.last_price
+        except Exception as e:
+            self.logger.error(f"Error getting current price: {e}")
+            return None
