@@ -944,32 +944,17 @@ class BinanceWSClient:
             self.logger.error(f"Connectivity check failed: {e}")
             return False
 
-    def new_oco_order(self, symbol, side, quantity, price, stopPrice, stopLimitPrice=None, 
-                     stopLimitTimeInForce="GTC", aboveType=None, belowType=None, **kwargs):
-        """WebSocket API implementation of OCO order
-        
-        WebSocket API doesn't require aboveType and belowType parameters, so we filter them out
-        """
-        # 创建一个不包含aboveType和belowType的参数字典
-        filtered_kwargs = {k: v for k, v in kwargs.items() 
-                          if k not in ['aboveType', 'belowType']}
-        
-        # 构建必需的参数
+    def new_oco_order(self, symbol, side, quantity, price, stopPrice, **kwargs):
+        """发送OCO订单请求到WebSocket API"""
         params = {
             "symbol": symbol,
             "side": side,
             "quantity": quantity,
             "price": price,
-            "stopPrice": stopPrice
+            "stopPrice": stopPrice,
+            **kwargs
         }
         
-        # 添加可选参数
-        if stopLimitPrice:
-            params["stopLimitPrice"] = stopLimitPrice
-            params["stopLimitTimeInForce"] = stopLimitTimeInForce
-        
-        # 合并其他参数
-        params.update(filtered_kwargs)
-        
-        # 调用WebSocket客户端的new_oco_order方法
-        return self.client.new_oco_order(**params)
+        # 使用统一的请求发送方法
+        request_id = self.client._send_signed_request("order.oco", params)
+        return self.client._wait_for_response(request_id)
