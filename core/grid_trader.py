@@ -1039,20 +1039,25 @@ class GridTrader:
         """
         with self.balance_lock:
             # Get current balance
-            current_balance = self.binance_client.check_balance(asset)
+            if self.asset_manager:
+                available_balance = self.asset_manager.get_available_balance(asset)
+            else:
+                # 保留原有代码作为后备
+                account_info = self.binance_client.get_account()
+                available_balance = float(next((b for b in account_info['balances'] if b['asset'] == asset), {'free': '0'})['free'])
             
             # Get current locked amount (default 0)
             current_locked = self.locked_balances.get(asset, 0)
             
             # Calculate available balance
-            available = current_balance - current_locked
+            available = available_balance - current_locked
             
             # Check if we have enough available balance
             if available < amount:
                 self.logger.warning(
                     f"Insufficient {asset} balance for locking: "
                     f"Required: {amount}, Available: {available} "
-                    f"(Total: {current_balance}, Already locked: {current_locked})"
+                    f"(Total: {available_balance}, Already locked: {current_locked})"
                 )
                 return False
             
@@ -1060,7 +1065,7 @@ class GridTrader:
             self.locked_balances[asset] = current_locked + amount
             self.logger.debug(
                 f"Locked {amount} {asset}, total locked now: {self.locked_balances[asset]}, "
-                f"remaining available: {current_balance - self.locked_balances[asset]}"
+                f"remaining available: {available_balance - self.locked_balances[asset]}"
             )
             return True
     
