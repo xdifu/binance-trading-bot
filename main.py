@@ -34,8 +34,11 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+# 导入新模块
+from core.asset_order_manager import AssetOrderManager
+
 class GridTradingBot:
-    def __init__(self):
+    def __init__(self, config_path=None):
         """Initialize the trading bot with all necessary components"""
         self.binance_client = BinanceClient()
         self.telegram_bot = None
@@ -67,17 +70,22 @@ class GridTradingBot:
         except Exception as e:
             logger.error(f"Failed to initialize Telegram bot: {e}")
         
+        # 初始化资产订单管理器（在初始化grid_trader前）
+        self.asset_order_manager = AssetOrderManager(self.binance_client)
+        
         # Initialize grid trading strategy
         self.grid_trader = GridTrader(
             binance_client=self.binance_client,
-            telegram_bot=self.telegram_bot
+            telegram_bot=self.telegram_bot,
+            asset_manager=self.asset_order_manager  # 新增参数
         )
         logger.info("Grid trading strategy initialized successfully")
         
         # Initialize risk management
         self.risk_manager = RiskManager(
             binance_client=self.binance_client,
-            telegram_bot=self.telegram_bot
+            telegram_bot=self.telegram_bot,
+            asset_manager=self.asset_order_manager  # 新增参数
         )
         logger.info("Risk management module initialized successfully")
         
