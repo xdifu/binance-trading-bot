@@ -6,36 +6,30 @@ from utils.format_utils import format_price, format_quantity, get_precision_from
 
 class RiskManager:
     def __init__(self, binance_client, telegram_bot=None, asset_manager=None):
-        """
-        Initialize risk management module
-        
-        Args:
-            binance_client: Binance API client instance
-            telegram_bot: Optional Telegram bot for notifications
-            asset_manager: Optional AssetManager instance for precision information
-        """
+        """初始化风险管理模块"""
         self.binance_client = binance_client
         self.telegram_bot = telegram_bot
-        self.asset_manager = asset_manager  # 存储资产管理器引用
+        self.asset_manager = asset_manager
         
         # 配置参数初始化
         self.symbol = config.SYMBOL
+        self.base_asset = self.symbol.replace('USDT', '')
+        
+        # 风险参数配置
         self.stop_loss_pct = config.STOP_LOSS_PCT / 100
         self.take_profit_pct = config.TAKE_PROFIT_PCT / 100
         self.capital_at_risk_pct = config.CAPITAL_AT_RISK_PCT / 100
         
-        # 新增：添加缺失的属性初始化
-        self.is_active = False
-        self.trailing_stop_loss_percent = config.TRAILING_STOP_LOSS_PERCENT / 100
-        self.trailing_take_profit_percent = config.TRAILING_TAKE_PROFIT_PERCENT / 100
+        # 添加缺失的属性
+        self.is_active = False  # 风险管理启用状态
+        self.trailing_stop_loss_percent = config.TRAILING_STOP_LOSS_PERCENT / 100  # 追踪止损百分比
+        self.trailing_take_profit_percent = config.TRAILING_TAKE_PROFIT_PERCENT / 100  # 追踪止盈百分比
         
         # 设置精度信息
-        # 如果提供了资产管理器，使用它的精度信息
         if self.asset_manager:
             self.price_precision = self.asset_manager.price_precision
             self.quantity_precision = self.asset_manager.quantity_precision
         else:
-            # 原有精度获取代码保持不变作为后备
             self.price_precision = self._get_price_precision()
             self.quantity_precision = self._get_quantity_precision()
         
@@ -49,8 +43,8 @@ class RiskManager:
         self.last_update_time = 0
         
         # 设置更新阈值参数
-        self.min_update_threshold_percent = config.RISK_UPDATE_THRESHOLD_PERCENT / 100  # 使用配置值
-        self.min_update_interval_seconds = config.RISK_UPDATE_INTERVAL_MINUTES * 60     # 使用配置值
+        self.min_update_threshold_percent = config.RISK_UPDATE_THRESHOLD_PERCENT / 100
+        self.min_update_interval_seconds = config.RISK_UPDATE_INTERVAL_MINUTES * 60
         
         # 同步的波动率值
         self.volatility_factor = 0.08  # 默认8%
