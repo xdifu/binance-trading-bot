@@ -396,7 +396,7 @@ class RiskManager:
             
             self.logger.info(f"Placing OCO order via {api_type}: Stop: {stop_price}, Limit: {limit_price}, Qty: {quantity}")
             
-            # Place OCO order with standard parameters (removed aboveType and belowType)
+            # Place OCO order with standard parameters
             response = self.binance_client.new_oco_order(
                 symbol=self.symbol,
                 side="SELL",  # Sell assets
@@ -406,6 +406,14 @@ class RiskManager:
                 stopLimitPrice=stop_limit_price,  # Stop limit price
                 stopLimitTimeInForce="GTC"  # Good Till Cancel
             )
+            
+            # Check if the response indicates an error
+            if isinstance(response, dict) and not response.get('success', True):
+                error_info = response.get('error', {})
+                error_code = error_info.get('code', 'Unknown')
+                error_msg = error_info.get('msg', 'Unknown error')
+                self.logger.error(f"Error {error_code}: {error_msg}")
+                return False
             
             # Handle different response formats from WebSocket vs REST
             if isinstance(response, dict):

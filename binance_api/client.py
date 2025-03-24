@@ -482,7 +482,7 @@ class BinanceClient:
             **kwargs: Additional parameters to pass to the API
         """
         try:
-            # 创建包含所有参数的字典
+            # Create params dictionary with all parameters
             all_params = {
                 "symbol": symbol,
                 "side": side,
@@ -491,36 +491,57 @@ class BinanceClient:
                 "stopPrice": stopPrice
             }
             
-            # 添加可选参数
+            # Add optional parameters
             if stopLimitPrice:
                 all_params["stopLimitPrice"] = stopLimitPrice
                 all_params["stopLimitTimeInForce"] = stopLimitTimeInForce
             
-            # 处理aboveType和belowType参数（仅用于REST API）
-            # 这些参数在WebSocket API中将被忽略
+            # Handle aboveType and belowType parameters (for REST API only)
+            # These parameters are ignored by WebSocket API
             if aboveType is not None:
                 all_params["aboveType"] = aboveType
             elif "aboveType" not in kwargs:
-                all_params["aboveType"] = "LIMIT_MAKER"  # 默认值
+                all_params["aboveType"] = "LIMIT_MAKER"  # Default value
                 
             if belowType is not None:
                 all_params["belowType"] = belowType
             elif "belowType" not in kwargs:
-                all_params["belowType"] = "LIMIT_MAKER"  # 默认值
+                all_params["belowType"] = "LIMIT_MAKER"  # Default value
             
-            # 合并其他参数
+            # Merge other parameters
             for k, v in kwargs.items():
                 if k not in all_params:
                     all_params[k] = v
             
-            # 调用WebSocket或REST API
+            # Call WebSocket or REST API
             response = self._execute_with_fallback("new_oco_order", "new_oco_order", **all_params)
                 
-            # 统一响应格式
-            return self._standardize_oco_response(response)
+            # Check if response contains error information
+            if isinstance(response, dict) and 'error' in response:
+                error_code = response.get('error', {}).get('code')
+                error_msg = response.get('error', {}).get('msg', 'Unknown error')
+                self.logger.error(f"OCO order failed with error {error_code}: {error_msg}")
+                # Return response with error info so caller knows order failed
+                return {"result": None, "error": response.get('error'), "success": False}
+            
+            # If using WebSocket API, also check status field
+            if isinstance(response, dict) and response.get('status', 200) != 200:
+                error_code = response.get('status')
+                error_msg = "Non-success status code"
+                self.logger.error(f"OCO order failed with status {error_code}")
+                return {"result": None, "error": {"code": error_code, "msg": error_msg}, "success": False}
+                
+            # Standardize response format and add success flag
+            standardized_response = self._standardize_oco_response(response)
+            if "result" in standardized_response and standardized_response["result"]:
+                standardized_response["success"] = True
+            else:
+                standardized_response["success"] = False
+                
+            return standardized_response
         except Exception as e:
             self.logger.error(f"Failed to create OCO order: {e}")
-            raise
+            return {"result": None, "error": {"code": -1000, "msg": str(e)}, "success": False}
             
     def check_balance(self, asset):
         """Check if balance is sufficient for an asset"""
