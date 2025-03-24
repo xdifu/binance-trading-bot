@@ -315,3 +315,26 @@ class TelegramBot:
             return
         
         await update.message.reply_text("Please use /help to see available commands")
+    
+    def cmd_symbol(self, update, context):
+        """处理更改交易对命令"""
+        # 获取新交易对
+        args = context.args
+        if not args:
+            update.message.reply_text("请提供交易对，例如: /symbol BTCUSDT")
+            return
+            
+        new_symbol = args[0].upper()
+        
+        try:
+            # 首先更新资产管理器
+            if hasattr(self.trading_bot, 'asset_order_manager'):
+                old_symbol, new_symbol = self.trading_bot.asset_order_manager.update_symbol(new_symbol)
+            
+            # 然后更新网格交易器和风险管理器
+            self.trading_bot.grid_trader.update_symbol(new_symbol)
+            self.trading_bot.risk_manager.update_symbol(new_symbol)
+            
+            update.message.reply_text(f"✅ Symbol updated from {old_symbol} to {new_symbol}")
+        except Exception as e:
+            update.message.reply_text(f"❌ Failed to update symbol: {str(e)}")
