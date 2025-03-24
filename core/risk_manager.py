@@ -837,7 +837,7 @@ class RiskManager:
         """获取当前价格，支持强制刷新"""
         try:
             # 如果强制刷新或者没有缓存价格，则从交易所获取
-            if force_refresh or self.last_price is None:
+            if force_refresh或self.last_price is None:
                 price_data = self.binance_client.get_symbol_price(self.symbol)
                 if isinstance(price_data, dict):
                     self.last_price = float(price_data.get('price', 0))
@@ -852,27 +852,17 @@ class RiskManager:
             return None
 
     def _place_oco_order(self, stop_price, take_profit):
-        """Create OCO order with specific stop price and take profit price
-        
-        Args:
-            stop_price (float): Stop loss trigger price
-            take_profit (float): Take profit price
-            
-        Returns:
-            bool: True if the order was successfully placed, False otherwise
-        """
+        """Create OCO order with specific stop price and take profit price"""
         try:
-            # Check WebSocket availability before proceeding
+            # Check WebSocket availability
             client_status = self.binance_client.get_client_status()
             self.using_websocket = client_status["websocket_available"]
             api_type = "WebSocket API" if self.using_websocket else "REST API"
             
-            # Get account balance
+            # Get balance
             if self.asset_manager:
-                # Use asset manager if available
                 asset_balance = self.asset_manager.get_available_balance(self.base_asset)
             else:
-                # Otherwise, get balance directly from the API
                 self.update_account_balances()
                 asset_balance = self.balances.get(self.base_asset, {}).get('free', 0)
             
@@ -880,28 +870,42 @@ class RiskManager:
                 self.logger.info(f"No available {self.base_asset} for risk management")
                 return False
                 
-            # Set quantity (all available assets) and format
+            # Format values
             quantity = format_quantity(asset_balance, self.quantity_precision)
-            
-            # Format prices to appropriate precision
             formatted_stop_price = format_price(stop_price, self.price_precision)
-            formatted_stop_limit_price = format_price(stop_price * 0.99, self.price_precision)  # 1% below stop for limit
+            formatted_stop_limit_price = format_price(stop_price * 0.99, self.price_precision)
             formatted_take_profit = format_price(take_profit, self.price_precision)
             
             self.logger.info(f"Placing OCO order via {api_type}: Stop: {formatted_stop_price}, Take profit: {formatted_take_profit}, Qty: {quantity}")
             
-            # Place OCO order with appropriate parameters
-            response = self.binance_client.new_oco_order(
-                symbol=self.symbol,
-                side="SELL",  # Sell assets
-                quantity=quantity,
-                price=formatted_take_profit,  # Take profit price
-                stopPrice=formatted_stop_price,  # Stop loss trigger price
-                stopLimitPrice=formatted_stop_limit_price,  # Stop limit price
-                stopLimitTimeInForce="GTC"  # Good Till Cancel
-            )
+            # Place OCO order with correct parameter names for WebSocket API
+            if self.using_websocket:
+                response = self.binance_client.new_oco_order(
+                    symbol=self.symbol,
+                    side="SELL",
+                    quantity=quantity,
+                    # Required WebSocket API parameters
+                    aboveType="STOP_LOSS_LIMIT",
+                    belowType="LIMIT_MAKER",
+                    # Additional parameters
+                    abovePrice=formatted_stop_limit_price,
+                    aboveStopPrice=formatted_stop_price,
+                    aboveTimeInForce="GTC",
+                    belowPrice=formatted_take_profit
+                )
+            else:
+                # Use REST API format
+                response = self.binance_client.new_oco_order(
+                    symbol=self.symbol,
+                    side="SELL",
+                    quantity=quantity,
+                    price=formatted_take_profit,
+                    stopPrice=formatted_stop_price,
+                    stopLimitPrice=formatted_stop_limit_price,
+                    stopLimitTimeInForce="GTC"
+                )
             
-            # Handle different response formats from WebSocket vs REST
+            # Rest of the function remains the same
             if isinstance(response, dict):
                 if 'orderListId' in response:
                     # REST API format
