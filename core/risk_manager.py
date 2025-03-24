@@ -134,64 +134,40 @@ class RiskManager:
         """
         return format_quantity(quantity, self.quantity_precision)
         
-    def activate(self, grid_lowest, grid_highest):
-        """
-        Activate risk management system
-        
-        Args:
-            grid_lowest (float): Lowest grid price
-            grid_highest (float): Highest grid price
-        """
+    def activate(self):
+        """激活风险管理模块"""
         try:
-            # Check WebSocket availability before proceeding
-            client_status = self.binance_client.get_client_status()
-            self.using_websocket = client_status["websocket_available"]
-            api_type = "WebSocket API" if self.using_websocket else "REST API"
+            # 强制刷新价格，不使用缓存
+            self.last_price = None  # 清除缓存的价格
+            current_price = self.get_current_price(force_refresh=True)
             
-            # Get current price
-            current_price = self.binance_client.get_symbol_price(self.symbol)
+            if not current_price:
+                self.logger.error("Failed to get current price, cannot activate risk management")
+                return False
             
-            # Set initial stop loss and take profit prices
-            self.stop_loss_price = grid_lowest * (1 - self.trailing_stop_loss_percent)
-            self.take_profit_price = grid_highest * (1 + self.trailing_take_profit_percent)
+            # 计算止损和止盈价格
+            stop_price = current_price * (1 - self.trailing_stop_loss_percent)
+            take_profit = current_price * (1 + self.trailing_take_profit_percent)
             
-            # Set historical high and low prices
-            self.highest_price = current_price
-            self.lowest_price = current_price
+            # 格式化为适当精度
+            stop_price = float(format_price(stop_price, self.price_precision))
+            take_profit = float(format_price(take_profit, self.price_precision))
             
-            # Initialize last update time
-            self.last_update_time = time.time()
+            # 创建OCO订单
+            result = self._place_oco_order(stop_price, take_profit)
             
-            message = (f"Risk Management Activated via {api_type}\n"
-                       f"Current price: {current_price}\n"
-                       f"Stop loss price: {self.stop_loss_price}\n"
-                       f"Take profit price: {self.take_profit_price}")
+            if result:
+                self.is_active = True
+                self.logger.info(f"Risk Management Activated via {'WebSocket API' if self.using_websocket else 'REST API'}")
+                self.logger.info(f"Current price: {current_price}")
+                self.logger.info(f"Stop loss price: {stop_price}")
+                self.logger.info(f"Take profit price: {take_profit}")
+                return True
             
-            self.logger.info(message)
-            if self.telegram_bot:
-                self.telegram_bot.send_message(message)
-            
-            self.is_active = True
-            
-            # Create initial OCO order
-            self._place_oco_orders()
-            
+            return False
         except Exception as e:
             self.logger.error(f"Failed to activate risk management: {e}")
-            
-            # If this was a WebSocket error, try once more with REST
-            if "connection" in str(e).lower() and self.using_websocket:
-                self.logger.warning("Connection issue detected, falling back to REST API...")
-                
-                try:
-                    # Force client to update connection status
-                    client_status = self.binance_client.get_client_status()
-                    self.using_websocket = client_status["websocket_available"]
-                    
-                    # Try again - will use REST if WebSocket is now unavailable
-                    self._retry_activate(grid_lowest, grid_highest)
-                except Exception as retry_error:
-                    self.logger.error(f"Fallback activation also failed: {retry_error}")
+            return False
     
     def _retry_activate(self, grid_lowest, grid_highest):
         """
