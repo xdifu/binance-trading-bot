@@ -991,9 +991,10 @@ class BinanceWSClient:
         # 根据新的WebSocket API，使用正确的参数名称
         # WebSocket API现在使用orderList.place.oco而不是order.oco
         
-        # 添加其他参数，但排除已经设置的或可能冲突的
+        # 添加其他参数，但排除WebSocket API不支持的特定参数
+        websocket_unsupported_params = ['aboveType', 'belowType']
         for k, v in kwargs.items():
-            if k not in params and k not in ['aboveType', 'belowType']:
+            if k not in params and k not in websocket_unsupported_params:
                 params[k] = v
         
         # 使用最新的API端点，币安WebSocket API已弃用order.oco，改用orderList.place.oco
