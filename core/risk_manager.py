@@ -200,56 +200,23 @@ class RiskManager:
         self._place_oco_orders()
     
     def deactivate(self):
-        """Deactivate risk management system"""
+        """停用风险管理模块"""
         if not self.is_active:
-            return
-        
+            self.logger.debug("Risk Management already inactive")
+            return True
+            
         try:
-            # Cancel existing OCO orders
+            # 取消所有OCO订单
             self._cancel_oco_orders()
             
+            # 更新状态
             self.is_active = False
-            self.stop_loss_price = None
-            self.take_profit_price = None
-            self.highest_price = None
-            self.lowest_price = None
-            self.oco_order_id = None
-            self.pending_oco_orders = {}
-            self.last_update_time = 0
             
-            message = "Risk Management Deactivated"
-            self.logger.info(message)
-            if self.telegram_bot:
-                self.telegram_bot.send_message(message)
+            self.logger.info("Risk Management Deactivated")
+            return True
         except Exception as e:
             self.logger.error(f"Failed to deactivate risk management: {e}")
-            
-            # If this was a WebSocket error, try once more with REST
-            if "connection" in str(e).lower() and self.using_websocket:
-                self.logger.warning("Connection issue during deactivation, falling back to REST API...")
-                
-                try:
-                    # Force client to update connection status
-                    client_status = self.binance_client.get_client_status()
-                    self.using_websocket = client_status["websocket_available"]
-                    
-                    # Reset OCO tracking
-                    self.oco_order_id = None
-                    self.pending_oco_orders = {}
-                    
-                    # Complete deactivation
-                    self.is_active = False
-                    self.stop_loss_price = None
-                    self.take_profit_price = None
-                    self.highest_price = None
-                    self.lowest_price = None
-                    
-                    message = "Risk Management Deactivated (REST fallback)"
-                    self.logger.info(message)
-                    if self.telegram_bot:
-                        self.telegram_bot.send_message(message)
-                except Exception as retry_error:
-                    self.logger.error(f"Fallback deactivation also failed: {retry_error}")
+            return False
 
     def check_price(self, current_price):
         """
