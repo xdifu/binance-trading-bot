@@ -1126,3 +1126,55 @@ class GridTrader:
                 self._place_single_grid_order(self.grid[i])
                 
         return len(orders_to_cancel)
+    
+    def _place_single_grid_order(self, level):
+        """Place a single grid order based on level information"""
+        price = level['price']
+        side = level['side']
+        capital = level.get('capital', self.capital_per_level)
+        
+        # Calculate quantity based on capital
+        quantity = capital / price
+        
+        # Format values
+        formatted_quantity = self._adjust_quantity_precision(quantity)
+        formatted_price = self._adjust_price_precision(price)
+        
+        # Check minimum value
+        order_value = float(formatted_quantity) * float(formatted_price)
+        min_order_value = self.capital_per_level  # Use grid capital setting as minimum order threshold
+        if order_value < min_order_value:
+            self.logger.info(f"Skipping small order - value too low: {order_value:.2f} USDT < {min_order_value} USDT")
+            return False
+        
+        # Lock funds
+        if side == 'BUY':
+            asset = 'USDT'
+            required = order_value
+        else:
+            asset = self.symbol.replace('USDT', '')
+            required = float(formatted_quantity)
+        
+        if not self._lock_funds(asset, required):
+            self.logger.warning(f"Could not lock funds for {side} order. Required: {required} {asset}")
+            return False
+        
+        try:
+            # Place order
+            order = self.binance_client.place_limit_order(
+                self.symbol, 
+                side, 
+                formatted_quantity, 
+                formatted_price
+            )
+            
+            # Update level
+            level['order_id'] = order['orderId']
+            level['timestamp'] = int(time.time())
+            
+            self.logger.info(f"Order placed: {side} {formatted_quantity} @ {formatted_price}, ID: {order['orderId']}")
+            return True
+        except Exception as e:
+            self._release_funds(asset, required)
+            self.logger.error(f"Failed to place order: {e}")
+            return False
