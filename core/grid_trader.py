@@ -900,6 +900,33 @@ class GridTrader:
                 self.logger.error(f"Invalid formatted price: {formatted_price} for {price}, using minimum valid price")
                 formatted_price = self._adjust_price_precision(self.tick_size)  # Use minimum valid price
             
+            # Determine appropriate capital allocation for reverse order based on price zone
+            current_price = self.current_market_price
+            grid_range = current_price * self.grid_range_percent
+            core_range = grid_range * self.core_zone_percentage
+            core_upper = current_price + (core_range / 2)
+            core_lower = current_price - (core_range / 2)
+
+            # Determine capital based on price zone
+            if core_lower <= float(formatted_price) <= core_upper:
+                # This is a core zone order - gets more capital
+                distance_factor = 1 - min(1, abs(float(formatted_price) - current_price) / core_range) if core_range > 0 else 0
+                capital_multiplier = 1 + (distance_factor * 0.3)
+                capital = self.capital_per_level * self.core_capital_ratio * capital_multiplier
+                self.logger.debug(f"Core zone reverse order with {capital:.2f} USDT capital (multiplier: {capital_multiplier:.2f})")
+            else:
+                # Edge zone order - gets less capital
+                capital = self.capital_per_level * (1 - self.core_capital_ratio)
+                self.logger.debug(f"Edge zone reverse order with {capital:.2f} USDT capital")
+
+            # Now calculate required funds based on the dynamically calculated capital
+            if new_side == 'BUY':
+                asset = 'USDT'
+                required = float(formatted_quantity) * float(formatted_price)
+            else:  # SELL
+                asset = self.symbol.replace('USDT', '')
+                required = float(formatted_quantity)
+            
             try:
                 if self.simulation_mode:
                     self.logger.info(f"Simulation - Would place opposite order: {new_side} {formatted_quantity} @ {formatted_price}")
