@@ -925,7 +925,7 @@ class BinanceWebSocketAPIClient:
         
         至少需要以下参数之一:
         - abovePrice/aboveStopPrice: 上方订单价格/触发价格
-        - belowPrice/belowStopPrice: 下方订单价格/触发价格
+        - belowPrice/下面触发价格
                 
         Returns:
             dict: 服务器响应
@@ -1070,6 +1070,10 @@ class BinanceWSClient:
         # 设置下方订单停止触发价格 (Stop-Loss触发价格)
         if stopPrice:
             params["belowStopPrice"] = stopPrice  # 止损触发价格
+        
+            # 补充belowPrice参数 (对于STOP_LOSS类型，我们需要设置一个价格，通常略低于触发价格)
+            # 对于stop loss，价格通常应该略低于触发价格
+            params["belowPrice"] = float(stopPrice) * 0.999  # 0.1% 低于触发价格
         
         # 添加额外参数
         for k, v in kwargs.items():
