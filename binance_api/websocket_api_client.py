@@ -915,9 +915,18 @@ class BinanceWebSocketAPIClient:
         """
         发送OCO订单请求到WebSocket API
         
-        Args:
-            **params: OCO订单参数
-            
+        按照币安最新API文档，OCO订单使用orderList.place.oco端点
+        必需参数:
+        - symbol: 交易对符号
+        - side: 订单方向 (BUY/SELL)
+        - quantity: 订单数量
+        - aboveType: 上方订单类型
+        - belowType: 下方订单类型
+        
+        至少需要以下参数之一:
+        - abovePrice/aboveStopPrice: 上方订单价格/触发价格
+        - belowPrice/belowStopPrice: 下方订单价格/触发价格
+                
         Returns:
             dict: 服务器响应
         """
