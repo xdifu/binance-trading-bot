@@ -387,7 +387,55 @@ class RiskManager:
             quantity = self._adjust_quantity_precision(asset_balance)
             
             # Get current price
-            current_price = self.binance_client.get_symbol_price(self.symbol)
+            current_price = float(self.binance_client.get_symbol_price(self.symbol))
+            
+            # Get symbol info for price filter constraints
+            symbol_info = self.binance_client.get_symbol_info(self.symbol)
+            
+            # Original stop loss and take profit prices
+            original_stop_price = self.stop_loss_price
+            original_take_profit_price = self.take_profit_price
+            
+            # Adjust prices based on price filters if available
+            if symbol_info and 'filters' in symbol_info:
+                # Check for PERCENT_PRICE filter
+                percent_price_filter = None
+                for filter_item in symbol_info['filters']:
+                    if filter_item['filterType'] == 'PERCENT_PRICE':
+                        percent_price_filter = filter_item
+                        break
+                
+                if percent_price_filter:
+                    # Extract multiplier limits
+                    multiplier_up = float(percent_price_filter.get('multiplierUp', 5.0))
+                    multiplier_down = float(percent_price_filter.get('multiplierDown', 0.2))
+                    
+                    # Calculate allowed price range
+                    max_price = current_price * multiplier_up
+                    min_price = current_price * multiplier_down
+                    
+                    # Adjust prices to stay within limits
+                    if original_stop_price < min_price:
+                        self.logger.warning(
+                            f"Stop loss price {original_stop_price} is below allowed minimum {min_price}. "
+                            f"Adjusting to {min_price}."
+                        )
+                        self.stop_loss_price = min_price
+                    
+                    if original_take_profit_price > max_price:
+                        self.logger.warning(
+                            f"Take profit price {original_take_profit_price} is above allowed maximum {max_price}. "
+                            f"Adjusting to {max_price}."
+                        )
+                        self.take_profit_price = max_price
+                    
+                    # Log adjustments
+                    if original_stop_price != self.stop_loss_price or original_take_profit_price != self.take_profit_price:
+                        self.logger.info(
+                            f"Adjusted prices to comply with exchange filters - "
+                            f"Stop: {self.stop_loss_price:.4f} (was {original_stop_price:.4f}), "
+                            f"Take profit: {self.take_profit_price:.4f} (was {original_take_profit_price:.4f})"
+                        )
             
             # Format stop loss and take profit prices
             stop_price = self._adjust_price_precision(self.stop_loss_price)
@@ -408,15 +456,21 @@ class RiskManager:
             )
             
             # Check if the response indicates an error
-            if isinstance(response, dict) and not response.get('success', True):
-                error_info = response.get('error', {})
-                error_code = error_info.get('code', 'Unknown')
-                error_msg = error_info.get('msg', 'Unknown error')
-                self.logger.error(f"Error {error_code}: {error_msg}")
-                return False
-            
-            # Handle different response formats from WebSocket vs REST
             if isinstance(response, dict):
+                if not response.get('success', True) or 'error' in response:
+                    error_info = response.get('error', {})
+                    error_code = error_info.get('code', 'Unknown')
+                    error_msg = error_info.get('msg', 'Unknown error')
+                    self.logger.error(f"Error {error_code}: {error_msg}")
+                    
+                    # Send notification about the failure
+                    if self.telegram_bot:
+                        self.telegram_bot.send_message(
+                            f"⚠️ Failed to create risk management orders: {error_msg}"
+                        )
+                    return False
+                
+                # Handle different response formats from WebSocket vs REST
                 if 'orderListId' in response:
                     # REST API format
                     self.oco_order_id = response['orderListId']
@@ -432,13 +486,17 @@ class RiskManager:
                     'timestamp': int(time.time())
                 }
             
-            message = (f"Risk Management OCO Order Created via {api_type}\n"
-                      f"Quantity: {quantity} {asset}\n"
-                      f"Stop loss trigger: {stop_price}\n"
-                      f"Take profit price: {limit_price}")
-            self.logger.info(message)
-            if self.telegram_bot:
-                self.telegram_bot.send_message(message)
+                message = (f"Risk Management OCO Order Created via {api_type}\n"
+                          f"Quantity: {quantity} {asset}\n"
+                          f"Stop loss trigger: {stop_price}\n"
+                          f"Take profit price: {limit_price}")
+                self.logger.info(message)
+                if self.telegram_bot:
+                    self.telegram_bot.send_message(message)
+                return True
+            else:
+                self.logger.error(f"Invalid response format from OCO order creation")
+                return False
                 
         except Exception as e:
             self.logger.error(f"Failed to create OCO order: {e}")
@@ -453,9 +511,11 @@ class RiskManager:
                     self.using_websocket = client_status["websocket_available"]
                     
                     # Try again - will use REST if WebSocket is now unavailable
-                    self._retry_place_oco_orders()
+                    return self._retry_place_oco_orders()
                 except Exception as retry_error:
                     self.logger.error(f"Fallback OCO order placement also failed: {retry_error}")
+                    return False
+            return False
 
     def _retry_place_oco_orders(self):
         """Retry placing OCO orders with updated client status"""
