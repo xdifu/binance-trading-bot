@@ -996,6 +996,6 @@ class BinanceWSClient:
             if k not in params and k not in ['aboveType', 'belowType']:
                 params[k] = v
         
-        # 使用最新的API端点
+        # 使用最新的API端点，币安WebSocket API已弃用order.oco，改用orderList.place.oco
         request_id = self.client._send_signed_request("orderList.place.oco", params)
         return self.client._wait_for_response(request_id)
