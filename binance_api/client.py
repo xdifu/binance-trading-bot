@@ -477,23 +477,45 @@ class BinanceClient:
             stopPrice: Stop price
             stopLimitPrice: Stop limit price (optional)
             stopLimitTimeInForce: Time in force for stop limit order (default: GTC)
-            aboveType: Legacy parameter (not used in current API)
-            belowType: Legacy parameter (not used in current API)
+            aboveType: Above leg order type (optional)
+            belowType: Below leg order type (optional)
             **kwargs: Additional parameters to pass to the API
-            
-        Returns:
-            dict: Order response
         """
         try:
-            response = self._execute_with_fallback(
-                "new_oco_order", "new_oco_order",
-                symbol, side, quantity, price, stopPrice, stopLimitPrice,
-                stopLimitTimeInForce, 
-                # 确保添加aboveType和belowType参数，为REST API回退做准备
-                aboveType=aboveType if aboveType is not None else "LIMIT_MAKER",
-                belowType=belowType if belowType is not None else "LIMIT_MAKER",
-                **kwargs
-            )
+            # 创建包含所有参数的字典
+            all_params = {
+                "symbol": symbol,
+                "side": side,
+                "quantity": quantity,
+                "price": price,
+                "stopPrice": stopPrice
+            }
+            
+            # 添加可选参数
+            if stopLimitPrice:
+                all_params["stopLimitPrice"] = stopLimitPrice
+                all_params["stopLimitTimeInForce"] = stopLimitTimeInForce
+            
+            # 处理aboveType和belowType参数（仅用于REST API）
+            # 这些参数在WebSocket API中将被忽略
+            if aboveType is not None:
+                all_params["aboveType"] = aboveType
+            elif "aboveType" not in kwargs:
+                all_params["aboveType"] = "LIMIT_MAKER"  # 默认值
+                
+            if belowType is not None:
+                all_params["belowType"] = belowType
+            elif "belowType" not in kwargs:
+                all_params["belowType"] = "LIMIT_MAKER"  # 默认值
+            
+            # 合并其他参数
+            for k, v in kwargs.items():
+                if k not in all_params:
+                    all_params[k] = v
+            
+            # 调用WebSocket或REST API
+            response = self._execute_with_fallback("new_oco_order", "new_oco_order", **all_params)
+                
             # 统一响应格式
             return self._standardize_oco_response(response)
         except Exception as e:
