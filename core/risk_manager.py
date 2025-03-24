@@ -24,6 +24,11 @@ class RiskManager:
         self.take_profit_pct = config.TAKE_PROFIT_PCT / 100
         self.capital_at_risk_pct = config.CAPITAL_AT_RISK_PCT / 100
         
+        # 新增：添加缺失的属性初始化
+        self.is_active = False
+        self.trailing_stop_loss_percent = config.TRAILING_STOP_LOSS_PERCENT / 100
+        self.trailing_take_profit_percent = config.TRAILING_TAKE_PROFIT_PERCENT / 100
+        
         # 设置精度信息
         # 如果提供了资产管理器，使用它的精度信息
         if self.asset_manager:
@@ -44,8 +49,8 @@ class RiskManager:
         self.last_update_time = 0
         
         # 设置更新阈值参数
-        self.min_update_threshold_percent = 0.01  # 默认1%价格变化触发更新
-        self.min_update_interval_seconds = 3600   # 默认1小时最小更新间隔
+        self.min_update_threshold_percent = config.RISK_UPDATE_THRESHOLD_PERCENT / 100  # 使用配置值
+        self.min_update_interval_seconds = config.RISK_UPDATE_INTERVAL_MINUTES * 60     # 使用配置值
         
         # 同步的波动率值
         self.volatility_factor = 0.08  # 默认8%
