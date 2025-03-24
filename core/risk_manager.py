@@ -398,77 +398,118 @@ class RiskManager:
             original_stop_price = self.stop_loss_price
             original_take_profit_price = self.take_profit_price
             
-            # For TRUMPUSDT, use more conservative settings due to lower liquidity
-            if "TRUMP" in self.symbol:
-                # Adjust the percentages to be more conservative for TRUMP
-                max_deviation = 0.03  # 3% maximum deviation for TRUMPUSDT
-                self.logger.info(f"Using more conservative price limits for {self.symbol} (max {max_deviation*100}% deviation)")
+            # Initialize variables to track price ranges
+            min_price = None
+            max_price = None
+            default_max_deviation = 0.05  # 5% default max deviation as fallback
+            
+            # Extract PERCENT_PRICE_BY_SIDE filter if available (most strict for OCO orders)
+            percent_price_by_side_filter = None
+            percent_price_filter = None
+            
+            if symbol_info and 'filters' in symbol_info:
+                for filter_item in symbol_info['filters']:
+                    # First look for PERCENT_PRICE_BY_SIDE filter (more specific for OCOs)
+                    if filter_item['filterType'] == 'PERCENT_PRICE_BY_SIDE':
+                        percent_price_by_side_filter = filter_item
+                        self.logger.debug(f"Found PERCENT_PRICE_BY_SIDE filter: {filter_item}")
+                        
+                    # Also check for standard PERCENT_PRICE filter as fallback
+                    elif filter_item['filterType'] == 'PERCENT_PRICE':
+                        percent_price_filter = filter_item
+            
+            # First try to use PERCENT_PRICE_BY_SIDE filter for best accuracy
+            if percent_price_by_side_filter:
+                # This filter has different multipliers for BUY vs SELL and for price above/below market
+                # For OCO order with SELL side:
+                # - bidMultiplierUp: upper limit for take profit (limit price above market)
+                # - askMultiplierDown: lower limit for stop loss (stop price below market)
                 
-                # Recalculate stop loss and take profit with tighter bounds
+                if 'bidMultiplierUp' in percent_price_by_side_filter and 'askMultiplierDown' in percent_price_by_side_filter:
+                    bid_multiplier_up = float(percent_price_by_side_filter['bidMultiplierUp'])
+                    ask_multiplier_down = float(percent_price_by_side_filter['askMultiplierDown'])
+                    
+                    # Apply multipliers based on side (we're using SELL for risk management)
+                    max_price = current_price * bid_multiplier_up       # Upper limit for take profit
+                    min_price = current_price * ask_multiplier_down      # Lower limit for stop loss
+                    
+                    self.logger.info(
+                        f"Using PERCENT_PRICE_BY_SIDE filter - Price range: {min_price:.4f} to {max_price:.4f} "
+                        f"(current: {current_price:.4f})"
+                    )
+                    
+            # Fallback to standard PERCENT_PRICE filter if BY_SIDE not available
+            elif percent_price_filter:
+                multiplier_up = float(percent_price_filter.get('multiplierUp', 1.0 + default_max_deviation))
+                multiplier_down = float(percent_price_filter.get('multiplierDown', 1.0 - default_max_deviation))
+                
+                # Calculate allowed price range
+                max_price = current_price * multiplier_up
+                min_price = current_price * multiplier_down
+                
+                self.logger.info(
+                    f"Using PERCENT_PRICE filter - Price range: {min_price:.4f} to {max_price:.4f} "
+                    f"(current: {current_price:.4f})"
+                )
+            
+            # If no price filters found, apply conservative default limits
+            # This is adaptive based on asset price magnitude
+            if min_price is None or max_price is None:
+                # Detect asset price magnitude to apply appropriate defaults
+                # High-priced assets (like BTC) can have smaller % movements
+                # Low-priced assets can have larger % movements
+                
+                if current_price > 1000:  # Very high-priced asset
+                    max_deviation = 0.01  # 1% deviation
+                    self.logger.info(f"Using conservative 1% deviation for high-value asset ({current_price:.2f})")
+                elif current_price > 100:  # High-priced asset
+                    max_deviation = 0.02  # 2% deviation
+                    self.logger.info(f"Using conservative 2% deviation for high-value asset ({current_price:.2f})")
+                elif current_price > 10:   # Medium-priced asset (like TRUMP)
+                    max_deviation = 0.025  # 2.5% deviation
+                    self.logger.info(f"Using conservative 2.5% deviation for medium-value asset ({current_price:.2f})")
+                elif current_price > 1:    # Low-priced asset
+                    max_deviation = 0.035  # 3.5% deviation
+                    self.logger.info(f"Using standard 3.5% deviation for standard asset ({current_price:.2f})")
+                else:                      # Very low-priced asset
+                    max_deviation = 0.05   # 5% deviation
+                    self.logger.info(f"Using standard 5% deviation for low-value asset ({current_price:.2f})")
+                
+                # Apply conservative limits based on price magnitude
                 max_price = current_price * (1 + max_deviation)
                 min_price = current_price * (1 - max_deviation)
-                
-                # Adjust prices to stay within these conservative limits
-                if original_stop_price < min_price:
-                    self.logger.warning(
-                        f"Stop loss price {original_stop_price} is below conservative minimum {min_price}. "
-                        f"Adjusting to {min_price}."
-                    )
-                    self.stop_loss_price = min_price
-                
-                if original_take_profit_price > max_price:
-                    self.logger.warning(
-                        f"Take profit price {original_take_profit_price} is above conservative maximum {max_price}. "
-                        f"Adjusting to {max_price}."
-                    )
-                    self.take_profit_price = max_price
-                    
-                # Log that we're using special handling for TRUMP
-                self.logger.info(f"Using special price constraints for {self.symbol}")
             
-            # Adjust prices based on price filters if available
-            if symbol_info and 'filters' in symbol_info:
-                # Check for PERCENT_PRICE filter
-                percent_price_filter = None
-                for filter_item in symbol_info['filters']:
-                    if filter_item['filterType'] == 'PERCENT_PRICE':
-                        percent_price_filter = filter_item
-                        self.logger.debug(f"Found PERCENT_PRICE filter for {self.symbol}: {percent_price_filter}")
-                        break
-                
-                if percent_price_filter:
-                    # Extract multiplier limits
-                    multiplier_up = float(percent_price_filter.get('multiplierUp', 5.0))
-                    multiplier_down = float(percent_price_filter.get('multiplierDown', 0.2))
-                    
-                    # Calculate allowed price range
-                    max_price = current_price * multiplier_up
-                    min_price = current_price * multiplier_down
-                    
-                    self.logger.debug(f"Price limits from filter - min: {min_price}, max: {max_price}")
-                    
-                    # Adjust prices to stay within limits
-                    if self.stop_loss_price < min_price:
-                        self.logger.warning(
-                            f"Stop loss price {self.stop_loss_price} is below allowed minimum {min_price}. "
-                            f"Adjusting to {min_price}."
-                        )
-                        self.stop_loss_price = min_price
-                    
-                    if self.take_profit_price > max_price:
-                        self.logger.warning(
-                            f"Take profit price {self.take_profit_price} is above allowed maximum {max_price}. "
-                            f"Adjusting to {max_price}."
-                        )
-                        self.take_profit_price = max_price
-                    
-                    # Log adjustments
-                    if original_stop_price != self.stop_loss_price or original_take_profit_price != self.take_profit_price:
-                        self.logger.info(
-                            f"Adjusted prices to comply with exchange filters - "
-                            f"Stop: {self.stop_loss_price:.4f} (was {original_stop_price:.4f}), "
-                            f"Take profit: {self.take_profit_price:.4f} (was {original_take_profit_price:.4f})"
-                        )
+            # Add additional safety margin to avoid edge cases (10% safety buffer)
+            price_range = max_price - min_price
+            safety_margin = price_range * 0.1  # 10% safety margin
+            
+            safe_min = min_price + safety_margin
+            safe_max = max_price - safety_margin
+            
+            self.logger.debug(f"Price limits with safety margin - min: {safe_min:.4f}, max: {safe_max:.4f}")
+            
+            # Adjust prices to stay within limits
+            if self.stop_loss_price < safe_min:
+                self.logger.warning(
+                    f"Stop loss price {self.stop_loss_price:.4f} is below allowed minimum {safe_min:.4f}. "
+                    f"Adjusting to {safe_min:.4f}."
+                )
+                self.stop_loss_price = safe_min
+            
+            if self.take_profit_price > safe_max:
+                self.logger.warning(
+                    f"Take profit price {self.take_profit_price:.4f} is above allowed maximum {safe_max:.4f}. "
+                    f"Adjusting to {safe_max:.4f}."
+                )
+                self.take_profit_price = safe_max
+            
+            # Log adjustments if prices were changed
+            if original_stop_price != self.stop_loss_price or original_take_profit_price != self.take_profit_price:
+                self.logger.info(
+                    f"Adjusted prices to comply with exchange filters - "
+                    f"Stop: {self.stop_loss_price:.4f} (was {original_stop_price:.4f}), "
+                    f"Take profit: {self.take_profit_price:.4f} (was {original_take_profit_price:.4f})"
+                )
             
             # Format stop loss and take profit prices
             stop_price = self._adjust_price_precision(self.stop_loss_price)
