@@ -911,45 +911,6 @@ class BinanceWebSocketAPIClient:
                 "error": f"Key validation failed: {str(e)}"
             }
 
-    def new_oco_order(self, symbol, side, quantity, price, stopPrice, stopLimitPrice=None, 
-                     stopLimitTimeInForce="GTC", aboveType=None, belowType=None, **kwargs):
-        """WebSocket API implementation of OCO order
-
-        在币安WebSocket API中，OCO订单需要至少一个条件性订单:
-        - 条件性订单必须是STOP_LOSS或STOP_LOSS_LIMIT类型
-        - 需要设置相应的stopPrice作为触发价格
-        """
-        params = {
-            "symbol": symbol,
-            "side": side,
-            "quantity": quantity
-        }
-        
-        # 设置上方止盈订单为LIMIT_MAKER类型
-        params["aboveType"] = "LIMIT_MAKER"
-        if price:
-            params["abovePrice"] = price  # 止盈价格
-        
-        # 设置下方止损订单为STOP_LOSS类型(条件性订单)
-        params["belowType"] = "STOP_LOSS"  # 这是一个条件性订单类型
-        
-        if stopPrice:
-            # 为STOP_LOSS类型设置触发价格
-            params["belowStopPrice"] = stopPrice  # 止损触发价格
-            # 止损执行价格略低于触发价格(确保成交)
-            params["belowPrice"] = float(stopPrice) * 0.999
-        
-        # 添加其他参数
-        for k, v in kwargs.items():
-            if k not in params:
-                params[k] = v
-        
-        self.logger.debug(f"Sending WebSocket OCO order with params: {params}")
-        
-        # 使用orderList.place.oco端点
-        request_id = self.client._send_signed_request("orderList.place.oco", params)
-        return self.client._wait_for_response(request_id)
-
 
 # Compatibility layer with client.py
 class BinanceWSClient:
@@ -985,64 +946,40 @@ class BinanceWSClient:
 
     def new_oco_order(self, symbol, side, quantity, price, stopPrice, stopLimitPrice=None, 
                      stopLimitTimeInForce="GTC", aboveType=None, belowType=None, **kwargs):
-        """WebSocket API implementation of OCO order
-
-        适用于风险管理的OCO订单:
-        - Take-profit (止盈): 通常使用LIMIT_MAKER类型
-        - Stop-loss (止损): 通常使用STOP_LOSS类型
         """
-        # 创建基本参数
-        params = {
-            "symbol": symbol,
-            "side": side,
-            "quantity": quantity
-        }
+        Create an OCO order via WebSocket API
         
-        # 对于止盈单 (take profit)，通常使用LIMIT_MAKER
-        if aboveType is not None:
-            params["aboveType"] = aboveType
-        else:
+        This implementation follows Binance's official OCO order structure, ensuring at least one contingent order leg.
+        For risk management purposes, we create:
+        - A limit maker order for take profit (abovePrice)
+        - A stop-loss order for downside protection (belowStopPrice + belowPrice)
+        """
+        try:
+            # Create core parameters
+            params = {
+                "symbol": symbol,
+                "side": side,
+                "quantity": str(quantity)  # Ensure string format
+            }
+            
+            # Set up the take-profit leg (above leg - typically LIMIT_MAKER)
             params["aboveType"] = "LIMIT_MAKER"
-        
-        # 设置止盈价格
-        if price:
-            params["abovePrice"] = price
-        
-        # 对于止损单 (stop loss)，可以是STOP_LOSS或LIMIT_MAKER
-        if belowType is not None:
-            params["belowType"] = belowType
-        else:
-            # 默认使用LIMIT_MAKER，因为它更简单且不需要额外参数
-            params["belowType"] = "LIMIT_MAKER"
-        
-        # 根据belowType设置参数
-        if params["belowType"] == "LIMIT_MAKER":
-            # LIMIT_MAKER只需要价格，不需要stopPrice
-            if stopPrice:
-                params["belowPrice"] = stopPrice
-        elif params["belowType"] == "STOP_LOSS":
-            # STOP_LOSS需要stopPrice作为触发价格
-            if stopPrice:
-                params["belowStopPrice"] = stopPrice
-                # 对于STOP_LOSS可能也需要设置执行价格
-                params["belowPrice"] = float(stopPrice) * 0.999  # 略低于触发价格
-        elif params["belowType"] == "STOP_LOSS_LIMIT":
-            # STOP_LOSS_LIMIT需要stopPrice和额外参数
-            if stopPrice:
-                params["belowStopPrice"] = stopPrice
-                if stopLimitPrice:
-                    params["belowPrice"] = stopLimitPrice
-                else:
-                    params["belowPrice"] = float(stopPrice) * 0.999
-                params["belowTimeInForce"] = stopLimitTimeInForce
-        
-        # 添加其他参数
-        for k, v in kwargs.items():
-            if k not in params:
-                params[k] = v
-        
-        self.logger.debug(f"Sending WebSocket OCO order with params: {params}")
-        
-        # 使用orderList.place.oco端点
-        request_id = self.client._send_signed_request("orderList.place.oco", params)
-        return self.client._wait_for_response(request_id)
+            params["abovePrice"] = str(price)  # Take profit price
+            
+            # Set up the stop-loss leg (below leg - must be STOP_LOSS to be contingent)
+            params["belowType"] = "STOP_LOSS"  # This order type makes it a contingent order
+            
+            # For STOP_LOSS type, we need both the trigger price and execution price
+            params["belowStopPrice"] = str(stopPrice)  # Stop-loss trigger price
+            params["belowPrice"] = str(float(stopPrice) * 0.997)  # Execution price (slightly lower)
+            
+            # Log the parameters for debugging
+            self.logger.debug(f"Sending OCO order via WebSocket: {params}")
+            
+            # Send the request using the orderList.place.oco endpoint
+            request_id = self.client._send_signed_request("orderList.place.oco", params)
+            return self.client._wait_for_response(request_id)
+            
+        except Exception as e:
+            self.logger.error(f"Error creating OCO order via WebSocket API: {e}")
+            raise
