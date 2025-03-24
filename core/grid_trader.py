@@ -1155,3 +1155,38 @@ class GridTrader:
                 self._place_grid_order(self.grid[i])
                 
         return len(orders_to_cancel)
+    
+    def update_symbol(self, new_symbol):
+        """Update the trading symbol"""
+        if self.is_running:
+            self.stop()  # Stop current trading first
+        
+        # Save old symbol for logging
+        old_symbol = self.symbol
+        self.symbol = new_symbol
+        
+        # Get new symbol information and update precisions
+        symbol_info = self.binance_client.get_symbol_info(self.symbol)
+        
+        # Reset and update precision values 
+        self.price_precision = self._get_price_precision()
+        self.quantity_precision = self._get_quantity_precision()
+        
+        # Re-calculate trading parameters based on new symbol
+        self.base_asset = new_symbol.replace('USDT', '')
+        self.quote_asset = 'USDT'  # Assuming all pairs are USDT based
+        
+        # Update other relevant properties
+        self.orders = {}
+        self.fund_lock = {self.base_asset: 0.0, self.quote_asset: 0.0}
+        
+        # Log the updated values
+        self.logger.info(f"Symbol updated from {old_symbol} to {new_symbol}")
+        self.logger.info(f"Price precision: {self.price_precision}")
+        self.logger.info(f"Quantity precision: {self.quantity_precision}")
+        
+        if self.telegram_bot:
+            self.telegram_bot.send_message(f"✅ Symbol updated from {old_symbol} to {new_symbol}")
+        
+        # Return True to indicate success
+        return True
