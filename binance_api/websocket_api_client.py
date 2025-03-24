@@ -945,43 +945,39 @@ class BinanceWSClient:
             return False
 
     def new_oco_order(self, symbol, side, quantity, price, stopPrice, stopLimitPrice=None, 
-                     stopLimitTimeInForce="GTC", aboveType=None, belowType=None, **kwargs):
+                     stopLimitTimeInForce="GTC", **kwargs):
         """
         Create an OCO order via WebSocket API
         
-        For SELL orders (risk management):
-        - above leg: LIMIT_MAKER (take profit - executed when price rises)
-        - below leg: STOP_LOSS (stop loss - triggered when price drops)
-        
-        For BUY orders:
-        - above leg: STOP_LOSS (stop loss - triggered when price rises)
-        - below leg: LIMIT_MAKER (take profit - executed when price drops)
+        Args:
+            symbol: Trading pair symbol
+            side: Order side (BUY/SELL)
+            quantity: Order quantity
+            price: Limit order price
+            stopPrice: Stop price
+            stopLimitPrice: Stop limit price (optional)
+            stopLimitTimeInForce: Time in force for stop limit order (default: GTC)
+            **kwargs: Additional parameters
         """
         try:
             # Create core parameters
             params = {
                 "symbol": symbol,
                 "side": side,
-                "quantity": str(quantity)  # Ensure string format
+                "quantity": str(quantity),  # Ensure string format
+                "price": str(price),        # Ensure string format
+                "stopPrice": str(stopPrice) # Ensure string format
             }
             
-            if side == "SELL":  # Risk management OCO for selling
-                # Above leg is LIMIT_MAKER (take profit - executed when price rises)
-                params["aboveType"] = "LIMIT_MAKER"
-                params["abovePrice"] = str(price)  # Take profit price
+            # Add optional parameters
+            if stopLimitPrice:
+                params["stopLimitPrice"] = str(stopLimitPrice)
+                params["stopLimitTimeInForce"] = stopLimitTimeInForce
                 
-                # Below leg is STOP_LOSS (stop loss - triggered when price drops)
-                params["belowType"] = "STOP_LOSS"
-                params["belowStopPrice"] = str(stopPrice)  # Stop loss trigger price
-            
-            else:  # BUY order OCO
-                # Above leg is STOP_LOSS (stop loss - triggered when price rises)
-                params["aboveType"] = "STOP_LOSS"
-                params["aboveStopPrice"] = str(stopPrice)  # Stop loss trigger price
-                
-                # Below leg is LIMIT_MAKER (take profit - executed when price drops)
-                params["belowType"] = "LIMIT_MAKER"
-                params["belowPrice"] = str(price)  # Take profit price
+            # Add any additional parameters
+            for k, v in kwargs.items():
+                if k not in params:
+                    params[k] = v
             
             # Log the parameters for debugging
             self.logger.debug(f"Sending OCO order via WebSocket: {params}")
