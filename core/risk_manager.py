@@ -878,34 +878,18 @@ class RiskManager:
             
             self.logger.info(f"Placing OCO order via {api_type}: Stop: {formatted_stop_price}, Take profit: {formatted_take_profit}, Qty: {quantity}")
             
-            # Place OCO order with correct parameter names for WebSocket API
-            if self.using_websocket:
-                response = self.binance_client.new_oco_order(
-                    symbol=self.symbol,
-                    side="SELL",
-                    quantity=quantity,
-                    # Required WebSocket API parameters
-                    aboveType="STOP_LOSS_LIMIT",
-                    belowType="LIMIT_MAKER",
-                    # Additional parameters
-                    abovePrice=formatted_stop_limit_price,
-                    aboveStopPrice=formatted_stop_price,
-                    aboveTimeInForce="GTC",
-                    belowPrice=formatted_take_profit
-                )
-            else:
-                # Use REST API format
-                response = self.binance_client.new_oco_order(
-                    symbol=self.symbol,
-                    side="SELL",
-                    quantity=quantity,
-                    price=formatted_take_profit,
-                    stopPrice=formatted_stop_price,
-                    stopLimitPrice=formatted_stop_limit_price,
-                    stopLimitTimeInForce="GTC"
-                )
+            # Use consistent parameters for both API types but include all required parameters
+            response = self.binance_client.new_oco_order(
+                symbol=self.symbol,
+                side="SELL",
+                quantity=quantity,
+                price=formatted_take_profit,        # Always required
+                stopPrice=formatted_stop_price,     # Always required
+                stopLimitPrice=formatted_stop_limit_price,
+                stopLimitTimeInForce="GTC"
+            )
             
-            # Rest of the function remains the same
+            # Handle the response
             if isinstance(response, dict):
                 if 'orderListId' in response:
                     # REST API format
