@@ -1035,3 +1035,49 @@ class BinanceWSClient:
         # 使用orderList.place.oco端点 (这是币安最新的API端点)
         request_id = self.client._send_signed_request("orderList.place.oco", params)
         return self.client._wait_for_response(request_id)
+    
+    def new_oco_order(self, symbol, side, quantity, price, stopPrice, stopLimitPrice=None, 
+                     stopLimitTimeInForce="GTC", aboveType=None, belowType=None, **kwargs):
+        """WebSocket API implementation of OCO order
+        
+        适用于风险管理的OCO订单:
+        - Take-profit (止盈): 上方LIMIT_MAKER订单
+        - Stop-loss (止损): 下方STOP_LOSS订单
+        """
+        # 创建基本参数
+        params = {
+            "symbol": symbol,
+            "side": side,
+            "quantity": quantity
+        }
+        
+        # 设置Take-Profit (上方订单 - above leg)
+        if aboveType is not None:
+            params["aboveType"] = aboveType
+        else:
+            params["aboveType"] = "LIMIT_MAKER"  # 默认为限价挂单
+        
+        # 设置上方订单价格 (Take-Profit价格)
+        if price:
+            params["abovePrice"] = price  # 止盈价格
+        
+        # 设置Stop-Loss (下方订单 - below leg)
+        if belowType is not None:
+            params["belowType"] = belowType
+        else:
+            params["belowType"] = "STOP_LOSS"  # 默认为止损单
+            
+        # 设置下方订单停止触发价格 (Stop-Loss触发价格)
+        if stopPrice:
+            params["belowStopPrice"] = stopPrice  # 止损触发价格
+        
+        # 添加额外参数
+        for k, v in kwargs.items():
+            if k not in params:
+                params[k] = v
+        
+        self.logger.debug(f"Sending WebSocket OCO order with params: {params}")
+        
+        # 使用orderList.place.oco端点
+        request_id = self.client._send_signed_request("orderList.place.oco", params)
+        return self.client._wait_for_response(request_id)
