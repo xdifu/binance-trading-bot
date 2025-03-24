@@ -46,6 +46,11 @@ TRAILING_TAKE_PROFIT_PERCENT = float(os.getenv("TRAILING_TAKE_PROFIT_PERCENT", "
 RISK_UPDATE_THRESHOLD_PERCENT = float(os.getenv("RISK_UPDATE_THRESHOLD_PERCENT", "0.01"))  # 风险阈值更新百分比，减小可更灵敏地调整止损位
 RISK_UPDATE_INTERVAL_MINUTES = float(os.getenv("RISK_UPDATE_INTERVAL_MINUTES", "10"))  # 风险更新间隔(分钟)，减小可更频繁更新止损止盈
 
+# Risk management settings
+STOP_LOSS_PCT = 5.0  # 止损百分比，例如 5% 
+TAKE_PROFIT_PCT = 2.0  # 止盈百分比，例如 2%
+CAPITAL_AT_RISK_PCT = 100.0  # 风险资金百分比，默认为 100%
+
 # 高级交易设置
 TRADING_FEE_RATE = float(os.getenv("TRADING_FEE_RATE", "0.075"))  # 交易手续费率(%)，根据实际费率调整，影响利润计算
 MIN_NOTIONAL_VALUE = float(os.getenv("MIN_NOTIONAL_VALUE", CAPITAL_PER_LEVEL))  # 最小订单价值(USDT)，低于此值的订单将被跳过
