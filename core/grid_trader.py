@@ -583,6 +583,7 @@ class GridTrader:
                     )
                     
                     level['order_id'] = order['orderId']
+                    level['timestamp'] = int(time.time())  # Add timestamp for order age tracking
                     
                     # Add to pending orders for WebSocket response tracking
                     self.pending_orders[str(order['orderId'])] = {
@@ -617,6 +618,7 @@ class GridTrader:
                                 formatted_price
                             )
                             level['order_id'] = order['orderId']
+                            level['timestamp'] = int(time.time())  # Add timestamp for order age tracking
                             self.logger.info(f"Order placed via fallback: {side} {formatted_quantity} @ {formatted_price}, ID: {order['orderId']}")
                         except Exception as retry_error:
                             # Still failed, make sure we release the funds
@@ -681,6 +683,7 @@ class GridTrader:
                     )
                     
                     level['order_id'] = order['orderId']
+                    level['timestamp'] = int(time.time())  # Add timestamp for order age tracking
                     self.logger.info(f"Order placed successfully: {side} {formatted_quantity} @ {formatted_price}, ID: {order['orderId']}")
                 except Exception as e:
                     # Release the funds if order placement fails
