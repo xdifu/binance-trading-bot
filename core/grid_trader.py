@@ -768,6 +768,11 @@ class GridTrader:
             except Exception as e:
                 self.logger.error(f"Failed to recalculate grid: {e}")
         
+        # Additionally check for stale orders
+        stale_orders_count = self._check_for_stale_orders()
+        if stale_orders_count > 0:
+            self.logger.info(f"Rebalanced {stale_orders_count} stale orders")
+        
         return False
     
     def _reconcile_grid_with_open_orders(self):
