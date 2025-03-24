@@ -508,7 +508,10 @@ class BinanceClient:
                 'quantity': str(quantity),
                 'price': formatted_price,
                 'stopPrice': formatted_stop_price,
-                'stopLimitTimeInForce': stopLimitTimeInForce
+                'stopLimitTimeInForce': stopLimitTimeInForce,
+                # 确保添加aboveType和belowType参数，为REST API回退做准备
+                'aboveType': aboveType if aboveType is not None else "LAST_PRICE",
+                'belowType': belowType if belowType is not None else "LAST_PRICE"
             }
             
             # Handle stopLimitPrice with validation
