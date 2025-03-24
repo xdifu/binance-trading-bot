@@ -128,20 +128,40 @@ class RiskManager:
         """
         return format_quantity(quantity, self.quantity_precision)
         
-    def activate(self):
-        """激活风险管理模块"""
+    def activate(self, min_price=None, max_price=None):
+        """激活风险管理模块
+        
+        Args:
+            min_price (float, optional): 网格最小价格
+            max_price (float, optional): 网格最大价格
+        
+        Returns:
+            bool: 激活是否成功
+        """
         try:
-            # 强制刷新价格，不使用缓存
-            self.last_price = None  # 清除缓存的价格
+            # 获取当前价格
             current_price = self.get_current_price(force_refresh=True)
             
             if not current_price:
-                self.logger.error("Failed to get current price, cannot activate risk management")
+                self.logger.error("无法获取当前价格，无法激活风险管理")
                 return False
             
-            # 计算止损和止盈价格
-            stop_price = current_price * (1 - self.trailing_stop_loss_percent)
-            take_profit = current_price * (1 + self.trailing_take_profit_percent)
+            # 如果提供了价格范围，可以使用它们来设置更精确的止损止盈水平
+            if min_price is not None and max_price is not None:
+                self.logger.debug(f"使用提供的价格范围: {min_price:.4f} - {max_price:.4f}")
+                # 例如，可以设置止损在网格下方一定比例
+                grid_range = max_price - min_price
+                stop_price = current_price * (1 - self.trailing_stop_loss_percent)
+                # 确保止损不会太接近网格
+                stop_price = min(stop_price, min_price - (grid_range * 0.1))
+                
+                take_profit = current_price * (1 + self.trailing_take_profit_percent)
+                # 确保止盈不会太接近网格
+                take_profit = max(take_profit, max_price + (grid_range * 0.1))
+            else:
+                # 使用默认的百分比计算
+                stop_price = current_price * (1 - self.trailing_stop_loss_percent)
+                take_profit = current_price * (1 + self.trailing_take_profit_percent)
             
             # 格式化为适当精度
             stop_price = float(format_price(stop_price, self.price_precision))
@@ -817,7 +837,7 @@ class RiskManager:
         """获取当前价格，支持强制刷新"""
         try:
             # 如果强制刷新或者没有缓存价格，则从交易所获取
-            if force_refresh or not self.last_price:
+            if force_refresh或不:
                 price_data = self.binance_client.get_symbol_price(self.symbol)
                 if isinstance(price_data, dict):
                     self.last_price = float(price_data.get('price', 0))
