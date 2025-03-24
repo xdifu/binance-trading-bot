@@ -836,8 +836,8 @@ class RiskManager:
     def get_current_price(self, force_refresh=False):
         """获取当前价格，支持强制刷新"""
         try:
-            # 如果强制刷新或者没有缓存价格，则从交易所获取
-            if force_refresh或self.last_price is None:
+            # If a forced refresh occurs or no cached price is available, retrieve the price from the exchange.
+            if force_refresh or self.last_price is None:
                 price_data = self.binance_client.get_symbol_price(self.symbol)
                 if isinstance(price_data, dict):
                     self.last_price = float(price_data.get('price', 0))
