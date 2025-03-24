@@ -976,9 +976,9 @@ class BinanceWSClient:
             side: Order side (BUY/SELL)
             quantity: Order quantity
             price: Limit order price (will be mapped to belowPrice in WebSocket API)
-            stopPrice: Stop price (will be mapped to aboveStopPrice in WebSocket API)
-            stopLimitPrice: Stop limit price (will be mapped to abovePrice in WebSocket API)
-            stopLimitTimeInForce: Time in force for stop limit order (will be mapped to aboveTimeInForce)
+            stopPrice: Stop price (will be mapped to aboveStopPrice for certain order types)
+            stopLimitPrice: Stop limit price (will be mapped to abovePrice when appropriate)
+            stopLimitTimeInForce: Time in force for stop limit order
             aboveType: Above leg order type (STOP_LOSS, STOP_LOSS_LIMIT, LIMIT_MAKER)
             belowType: Below leg order type (STOP_LOSS, STOP_LOSS_LIMIT, LIMIT_MAKER)
             **kwargs: Additional parameters
@@ -990,34 +990,42 @@ class BinanceWSClient:
             "quantity": quantity
         }
         
-        # 映射aboveType (上方订单类型), WebSocket API必需
+        # 设置默认值并确保有正确的订单类型
         if aboveType is not None:
             params["aboveType"] = aboveType
         else:
             params["aboveType"] = "STOP_LOSS"  # 默认止损类型
         
-        # 映射belowType (下方订单类型), WebSocket API必需
         if belowType is not None:
             params["belowType"] = belowType
         else:
             params["belowType"] = "LIMIT_MAKER"  # 默认限价类型
         
-        # 映射REST API参数到WebSocket API参数
+        # 只有在aboveType是LIMIT_MAKER时使用abovePrice
+        if params["aboveType"] == "LIMIT_MAKER":
+            if stopPrice:
+                params["abovePrice"] = stopPrice
+        
+        # 只有在aboveType是STOP_LOSS或STOP_LOSS_LIMIT时使用aboveStopPrice    
+        elif params["aboveType"] in ["STOP_LOSS", "STOP_LOSS_LIMIT"]:
+            if stopPrice:
+                params["aboveStopPrice"] = stopPrice
+                
+            # STOP_LOSS_LIMIT需要额外的价格和timeInForce参数
+            if params["aboveType"] == "STOP_LOSS_LIMIT":
+                if stopLimitPrice:
+                    params["abovePrice"] = stopLimitPrice
+                else:
+                    # 如果没有提供stopLimitPrice，使用略高于stopPrice的值
+                    params["abovePrice"] = float(stopPrice) * 1.001
+                
+                params["aboveTimeInForce"] = stopLimitTimeInForce
+        
+        # 设置belowPrice (下方订单价格)
         if price:
-            params["belowPrice"] = price  # 下方订单价格
-            
-        if stopPrice:
-            params["aboveStopPrice"] = stopPrice  # 上方订单触发价格
+            params["belowPrice"] = price
         
-        # 如果提供了stopLimitPrice，则用作abovePrice
-        if stopLimitPrice:
-            params["abovePrice"] = stopLimitPrice  # 上方订单价格
-            
-        # 映射timeInForce
-        if stopLimitTimeInForce and (aboveType == "STOP_LOSS_LIMIT" or params["aboveType"] == "STOP_LOSS_LIMIT"):
-            params["aboveTimeInForce"] = stopLimitTimeInForce
-        
-        # 添加其他参数，但避免重名
+        # 添加其他参数
         for k, v in kwargs.items():
             if k not in params:
                 params[k] = v
