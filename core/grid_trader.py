@@ -1053,3 +1053,76 @@ class GridTrader:
             previous_locks = self.locked_balances.copy()
             self.locked_balances = {}
             self.logger.info(f"Reset all fund locks. Previous locks: {previous_locks}")
+    
+    def _check_for_stale_orders(self):
+        """Cancel and reallocate orders that have been open too long without execution"""
+        if not self.is_running or self.simulation_mode:
+            return 0
+            
+        current_time = int(time.time())
+        max_order_age = 24 * 3600  # 24 hours in seconds
+        
+        # Track orders to cancel
+        orders_to_cancel = []
+        
+        # Get current market price
+        current_price = self.binance_client.get_symbol_price(self.symbol)
+        
+        # First identify stale orders far from current price
+        for i, level in enumerate(self.grid):
+            if level.get('order_id') and level.get('timestamp'):
+                # Check age
+                if current_time - level['timestamp'] > max_order_age:
+                    # Calculate distance from current price
+                    price_distance = abs(level['price'] - current_price) / current_price
+                    
+                    # If order is old and far from price, cancel it
+                    if price_distance > 0.03:  # More than 3% away from current price
+                        self.logger.info(f"Marking stale order ID {level['order_id']} for cancellation, " 
+                                        f"age: {(current_time - level['timestamp'])/3600:.1f} hours, "
+                                        f"distance from price: {price_distance*100:.1f}%")
+                        orders_to_cancel.append((i, level))
+        
+        # Cancel identified orders
+        for i, level in orders_to_cancel:
+            try:
+                self.binance_client.cancel_order(symbol=self.symbol, order_id=level['order_id'])
+                self.logger.info(f"Cancelled stale order ID {level['order_id']}")
+                
+                # Release locked funds
+                if level['side'] == 'BUY':
+                    asset = 'USDT'
+                    capital = level.get('capital', self.capital_per_level)
+                    self._release_funds(asset, capital)
+                else:
+                    asset = self.symbol.replace('USDT', '')
+                    quantity = level.get('capital', self.capital_per_level) / level['price']
+                    self._release_funds(asset, quantity)
+                    
+                # Mark for recreation with updated parameters
+                level['order_id'] = None
+                
+            except Exception as e:
+                self.logger.error(f"Failed to cancel stale order: {e}")
+        
+        # Now place new orders for the cancelled ones, with updated price levels
+        if orders_to_cancel:
+            # Recalculate grid to get fresh price levels
+            new_grid = self._calculate_grid_levels()
+            
+            # Update cancelled orders with new prices from similar positions in the new grid
+            for i, old_level in orders_to_cancel:
+                # Find corresponding position in new grid
+                grid_position = i / len(self.grid)
+                new_index = int(grid_position * len(new_grid))
+                new_index = min(max(0, new_index), len(new_grid) - 1)
+                
+                # Update the level with new price but keep it at same relative position
+                self.grid[i]['price'] = new_grid[new_index]['price']
+                self.grid[i]['side'] = new_grid[new_index]['side']
+                self.grid[i]['capital'] = new_grid[new_index]['capital']
+                
+                # Place the new order
+                self._place_single_grid_order(self.grid[i])
+                
+        return len(orders_to_cancel)
