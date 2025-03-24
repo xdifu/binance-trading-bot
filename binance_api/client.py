@@ -485,59 +485,17 @@ class BinanceClient:
             dict: Order response
         """
         try:
-            # Validate and format all prices
-            try:
-                price_float = float(price)
-                stop_price_float = float(stopPrice)
-                
-                if price_float <= 0 or stop_price_float <= 0:
-                    self.logger.error(f"Invalid prices for OCO order: price={price}, stopPrice={stopPrice}")
-                    raise ValueError(f"Invalid prices for OCO order")
-            except (ValueError, TypeError):
-                self.logger.error(f"Non-numeric prices for OCO order: price={price}, stopPrice={stopPrice}")
-                raise ValueError(f"Non-numeric prices for OCO order")
-            
-            # Format all prices properly
-            formatted_price = self._adjust_price_precision(price_float)
-            formatted_stop_price = self._adjust_price_precision(stop_price_float)
-                
-            # Build base parameters
-            params = {
-                'symbol': symbol,
-                'side': side,
-                'quantity': str(quantity),
-                'price': formatted_price,
-                'stopPrice': formatted_stop_price,
-                'stopLimitTimeInForce': stopLimitTimeInForce,
+            response = self._execute_with_fallback(
+                "new_oco_order", "new_oco_order",
+                symbol, side, quantity, price, stopPrice, stopLimitPrice,
+                stopLimitTimeInForce, 
                 # 确保添加aboveType和belowType参数，为REST API回退做准备
-                'aboveType': aboveType if aboveType is not None else "LAST_PRICE",
-                'belowType': belowType if belowType is not None else "LAST_PRICE"
-            }
-            
-            # Handle stopLimitPrice with validation
-            if stopLimitPrice:
-                try:
-                    stop_limit_price_float = float(stopLimitPrice)
-                    if stop_limit_price_float <= 0:
-                        self.logger.warning(f"Invalid stopLimitPrice: {stopLimitPrice}, calculating based on stopPrice")
-                        stop_limit_price_float = stop_price_float * 0.99  # 1% below stop price
-                except (ValueError, TypeError):
-                    self.logger.warning(f"Non-numeric stopLimitPrice: {stopLimitPrice}, calculating based on stopPrice")
-                    stop_limit_price_float = stop_price_float * 0.99  # 1% below stop price
-                    
-                params['stopLimitPrice'] = self._adjust_price_precision(stop_limit_price_float)
-            else:
-                # If not provided, use a default value slightly below stopPrice
-                stop_limit_price_float = stop_price_float * 0.99  # 1% below stop price
-                params['stopLimitPrice'] = self._adjust_price_precision(stop_limit_price_float)
-                
-            # Add other optional parameters
-            params.update(kwargs)
-            
-            # Log the parameters for debugging
-            self.logger.debug(f"Sending OCO order with parameters: {params}")
-            
-            return self._execute_with_fallback("new_oco_order", "new_oco_order", **params)
+                aboveType=aboveType if aboveType is not None else "LIMIT_MAKER",
+                belowType=belowType if belowType is not None else "LIMIT_MAKER",
+                **kwargs
+            )
+            # 统一响应格式
+            return self._standardize_oco_response(response)
         except Exception as e:
             self.logger.error(f"Failed to create OCO order: {e}")
             raise
