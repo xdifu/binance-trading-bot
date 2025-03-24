@@ -530,13 +530,16 @@ class GridTrader:
             price = level['price']
             side = level['side']
             
+            # Get capital for this level (use dynamic capital if available, otherwise fall back to default)
+            capital = level.get('capital', self.capital_per_level)
+            
             # Validate price before proceeding
             if price <= 0:
                 self.logger.error(f"Invalid price value: {price} for {side} order, skipping")
                 continue
             
-            # Calculate order quantity
-            quantity = self.capital_per_level / price
+            # Calculate order quantity based on level's capital
+            quantity = capital / price
             
             # Adjust quantity and price precision
             formatted_quantity = self._adjust_quantity_precision(quantity)
