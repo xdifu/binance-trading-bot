@@ -300,6 +300,11 @@ class BinanceClient:
             self.logger.error(f"Failed to get account info: {e}")
             raise
 
+    def get_account(self):
+        """Alias for get_account_info() for compatibility with AssetOrderManager"""
+        self.logger.debug("Using get_account() alias for get_account_info()")
+        return self.get_account_info()
+
     def get_symbol_price(self, symbol):
         """Get current price for symbol"""
         try:
