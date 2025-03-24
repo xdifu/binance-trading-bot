@@ -81,6 +81,28 @@ class UserDataMessage(Struct):
     E: int          # Event time
     # All other fields are dynamic and will be passed through
 
+class StandardizedMessage:
+    def __init__(self, data):
+        for key, value in data.items():
+            # Handle nested dictionaries by recursively standardizing
+            if isinstance(value, dict):
+                value = StandardizedMessage(value)
+            setattr(self, key, value)
+    
+    def get(self, key, default=None):
+        """Implement dictionary-like get method for compatibility"""
+        return getattr(self, key, default)
+    
+    # Add additional dictionary-like methods for better compatibility
+    def __getitem__(self, key):
+        try:
+            return getattr(self, key)
+        except AttributeError:
+            raise KeyError(key)
+            
+    def __contains__(self, key):
+        return hasattr(self, key)
+
 class MarketDataWebsocketManager:
     """
     WebSocket manager for Binance market data streams
@@ -235,14 +257,6 @@ class MarketDataWebsocketManager:
         """
         # Convert all dictionary keys to attributes for consistent access
         # This helps main.py to use consistent dot notation regardless of message source
-        class StandardizedMessage:
-            def __init__(self, data):
-                for key, value in data.items():
-                    # Handle nested dictionaries by recursively standardizing
-                    if isinstance(value, dict):
-                        value = StandardizedMessage(value)
-                    setattr(self, key, value)
-        
         return StandardizedMessage(message_dict)
     
     # Individual message type handlers
