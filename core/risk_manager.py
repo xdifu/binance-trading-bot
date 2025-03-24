@@ -807,3 +807,39 @@ class RiskManager:
         
         return f"Risk management thresholds updated: {self.min_update_threshold_percent*100}% price change, " \
                f"{self.min_update_interval_seconds/60} min interval"
+
+    def update_account_balances(self):
+        """更新账户余额信息"""
+        try:
+            account_info = self.binance_client.get_account_info()
+            
+            # 处理不同API响应格式的差异
+            if isinstance(account_info, dict):
+                if 'balances' in account_info:
+                    # REST API格式
+                    balances_data = account_info['balances']
+                elif 'result' in account_info and 'balances' in account_info['result']:
+                    # WebSocket API格式
+                    balances_data = account_info['result']['balances']
+                else:
+                    self.logger.warning("无法从账户信息中提取余额数据")
+                    return
+                
+                # 更新余额字典
+                for balance in balances_data:
+                    asset = balance.get('asset')
+                    free = float(balance.get('free', 0))
+                    locked = float(balance.get('locked', 0))
+                    
+                    if asset:
+                        self.balances[asset] = {
+                            'free': free,
+                            'locked': locked,
+                            'total': free + locked
+                        }
+                
+                self.logger.debug(f"已更新账户余额信息: {len(self.balances)}个资产")
+            else:
+                self.logger.warning(f"账户信息格式不正确: {type(account_info)}")
+        except Exception as e:
+            self.logger.error(f"更新账户余额失败: {e}")
