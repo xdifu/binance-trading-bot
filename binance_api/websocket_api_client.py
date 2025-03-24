@@ -966,44 +966,55 @@ class BinanceWSClient:
             symbol: Trading pair symbol
             side: Order side (BUY/SELL)
             quantity: Order quantity
-            price: Limit order price
-            stopPrice: Stop price
-            stopLimitPrice: Stop limit price (optional)
-            stopLimitTimeInForce: Time in force for stop limit order (default: GTC)
-            aboveType: Above leg order type (optional)
-            belowType: Below leg order type (optional)
+            price: Limit order price (will be mapped to belowPrice in WebSocket API)
+            stopPrice: Stop price (will be mapped to aboveStopPrice in WebSocket API)
+            stopLimitPrice: Stop limit price (will be mapped to abovePrice in WebSocket API)
+            stopLimitTimeInForce: Time in force for stop limit order (will be mapped to aboveTimeInForce)
+            aboveType: Above leg order type (STOP_LOSS, STOP_LOSS_LIMIT, LIMIT_MAKER)
+            belowType: Below leg order type (STOP_LOSS, STOP_LOSS_LIMIT, LIMIT_MAKER)
             **kwargs: Additional parameters
         """
-        # 创建基本参数
+        # 创建WebSocket API所需的参数结构
         params = {
             "symbol": symbol,
             "side": side,
-            "quantity": quantity,
-            "price": price,
-            "stopPrice": stopPrice
+            "quantity": quantity
         }
         
-        # 添加可选参数
-        if stopLimitPrice:
-            params["stopLimitPrice"] = stopLimitPrice
-            params["stopLimitTimeInForce"] = stopLimitTimeInForce
-        
-        # 添加aboveType和belowType参数 - 这些在WebSocket API中实际是必需的
+        # 映射aboveType (上方订单类型), WebSocket API必需
         if aboveType is not None:
             params["aboveType"] = aboveType
         else:
-            params["aboveType"] = "LIMIT_MAKER"  # 默认值
-            
+            params["aboveType"] = "STOP_LOSS"  # 默认止损类型
+        
+        # 映射belowType (下方订单类型), WebSocket API必需
         if belowType is not None:
             params["belowType"] = belowType
         else:
-            params["belowType"] = "LIMIT_MAKER"  # 默认值
+            params["belowType"] = "LIMIT_MAKER"  # 默认限价类型
         
-        # 添加其他参数(不再排除aboveType和belowType)
+        # 映射REST API参数到WebSocket API参数
+        if price:
+            params["belowPrice"] = price  # 下方订单价格
+            
+        if stopPrice:
+            params["aboveStopPrice"] = stopPrice  # 上方订单触发价格
+        
+        # 如果提供了stopLimitPrice，则用作abovePrice
+        if stopLimitPrice:
+            params["abovePrice"] = stopLimitPrice  # 上方订单价格
+            
+        # 映射timeInForce
+        if stopLimitTimeInForce and (aboveType == "STOP_LOSS_LIMIT" or params["aboveType"] == "STOP_LOSS_LIMIT"):
+            params["aboveTimeInForce"] = stopLimitTimeInForce
+        
+        # 添加其他参数，但避免重名
         for k, v in kwargs.items():
             if k not in params:
                 params[k] = v
         
-        # 币安WebSocket API已弃用order.oco，改用orderList.place.oco
+        self.logger.debug(f"Sending WebSocket OCO order with params: {params}")
+        
+        # 使用orderList.place.oco端点 (这是币安最新的API端点)
         request_id = self.client._send_signed_request("orderList.place.oco", params)
         return self.client._wait_for_response(request_id)
