@@ -27,6 +27,11 @@ class GridTrader:
         self.recalculation_period = config.RECALCULATION_PERIOD
         self.atr_period = config.ATR_PERIOD
         
+        # Non-symmetric grid parameters (with safe defaults if not in config)
+        self.core_zone_percentage = getattr(config, 'CORE_ZONE_PERCENTAGE', 0.5)  # Core zone is 50% of total range
+        self.core_capital_ratio = getattr(config, 'CORE_CAPITAL_RATIO', 0.7)      # 70% of capital in core zone
+        self.core_grid_ratio = getattr(config, 'CORE_GRID_RATIO', 0.6)           # 60% of grid points in core zone
+        
         # Store previous ATR value for volatility change detection
         self.last_atr_value = None
         
