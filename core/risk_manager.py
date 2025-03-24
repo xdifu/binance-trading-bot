@@ -535,25 +535,11 @@ class RiskManager:
             
             self.logger.info(f"Cancelling OCO order {self.oco_order_id} via {api_type}")
             
-            if hasattr(self.binance_client, 'ws_client') and self.using_websocket:
-                # Using WebSocket API client
-                if hasattr(self.binance_client.ws_client.client, 'cancel_oco_order'):
-                    response = self.binance_client.ws_client.client.cancel_oco_order(
-                        symbol=self.symbol,
-                        orderListId=self.oco_order_id
-                    )
-                else:
-                    # Fallback to REST client
-                    response = self.binance_client.rest_client.cancel_oco_order(  # 修改此处：cancel_order_list -> cancel_oco_order
-                        symbol=self.symbol,
-                        orderListId=self.oco_order_id
-                    )
-            else:
-                # Using REST client directly
-                response = self.binance_client.rest_client.cancel_oco_order(  # 修改此处：cancel_order_list -> cancel_oco_order
-                    symbol=self.symbol,
-                    orderListId=self.oco_order_id
-                )
+            # 使用统一接口
+            response = self.binance_client.cancel_oco_order(
+                symbol=self.symbol,
+                orderListId=self.oco_order_id
+            )
             
             # Clear from pending orders tracking
             str_order_id = str(self.oco_order_id)
@@ -572,30 +558,6 @@ class RiskManager:
                 self.pending_oco_orders = {}
             else:
                 self.logger.warning(f"Failed to cancel OCO order: {e}")
-                
-                # If this was a WebSocket error, try once more with REST
-                if "connection" in str(e).lower() and self.using_websocket:
-                    try:
-                        # Force client to update connection status
-                        client_status = self.binance_client.get_client_status()
-                        self.using_websocket = client_status["websocket_available"]
-                        
-                        # Try again with REST client directly
-                        self.binance_client.rest_client.cancel_oco_order(  # 修改此处：cancel_order_list -> cancel_oco_order
-                            symbol=self.symbol,
-                            orderListId=self.oco_order_id
-                        )
-                        
-                        self.logger.info(f"Cancelled OCO order ID: {self.oco_order_id} via REST fallback")
-                        self.oco_order_id = None
-                        self.pending_oco_orders = {}
-                    except Exception as retry_error:
-                        if "not found" in str(retry_error).lower() or "unknown" in str(retry_error).lower():
-                            self.logger.warning(f"OCO order {self.oco_order_id} not found during fallback attempt")
-                            self.oco_order_id = None 
-                            self.pending_oco_orders = {}
-                        else:
-                            self.logger.error(f"Fallback OCO order cancellation also failed: {retry_error}")
 
     def execute_stop_loss(self):
         """Execute stop loss operation"""
