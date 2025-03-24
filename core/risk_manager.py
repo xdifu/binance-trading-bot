@@ -358,9 +358,9 @@ class RiskManager:
             self.using_websocket = client_status["websocket_available"]
             api_type = "WebSocket API" if self.using_websocket else "REST API"
             
-            # Get account balance
+            # Get account balance - Always use current symbol to determine the asset
             balance = self.binance_client.get_account_info()
-            asset = self.symbol.replace('USDT', '')
+            asset = self.symbol.replace('USDT', '')  # Ensure we get the correct asset for current symbol
             
             # Find corresponding asset balance - handle different response formats
             asset_balance = None
@@ -386,15 +386,45 @@ class RiskManager:
             # Set quantity (all available assets) and format
             quantity = self._adjust_quantity_precision(asset_balance)
             
-            # Get current price
+            # Get current price - IMPORTANT: Get fresh price for the current symbol
             current_price = float(self.binance_client.get_symbol_price(self.symbol))
+            self.logger.debug(f"Current price for {self.symbol}: {current_price}")
             
             # Get symbol info for price filter constraints
             symbol_info = self.binance_client.get_symbol_info(self.symbol)
+            self.logger.debug(f"Retrieved symbol info for {self.symbol}: {'Success' if symbol_info else 'Failed'}")
             
             # Original stop loss and take profit prices
             original_stop_price = self.stop_loss_price
             original_take_profit_price = self.take_profit_price
+            
+            # For TRUMPUSDT, use more conservative settings due to lower liquidity
+            if "TRUMP" in self.symbol:
+                # Adjust the percentages to be more conservative for TRUMP
+                max_deviation = 0.03  # 3% maximum deviation for TRUMPUSDT
+                self.logger.info(f"Using more conservative price limits for {self.symbol} (max {max_deviation*100}% deviation)")
+                
+                # Recalculate stop loss and take profit with tighter bounds
+                max_price = current_price * (1 + max_deviation)
+                min_price = current_price * (1 - max_deviation)
+                
+                # Adjust prices to stay within these conservative limits
+                if original_stop_price < min_price:
+                    self.logger.warning(
+                        f"Stop loss price {original_stop_price} is below conservative minimum {min_price}. "
+                        f"Adjusting to {min_price}."
+                    )
+                    self.stop_loss_price = min_price
+                
+                if original_take_profit_price > max_price:
+                    self.logger.warning(
+                        f"Take profit price {original_take_profit_price} is above conservative maximum {max_price}. "
+                        f"Adjusting to {max_price}."
+                    )
+                    self.take_profit_price = max_price
+                    
+                # Log that we're using special handling for TRUMP
+                self.logger.info(f"Using special price constraints for {self.symbol}")
             
             # Adjust prices based on price filters if available
             if symbol_info and 'filters' in symbol_info:
@@ -403,6 +433,7 @@ class RiskManager:
                 for filter_item in symbol_info['filters']:
                     if filter_item['filterType'] == 'PERCENT_PRICE':
                         percent_price_filter = filter_item
+                        self.logger.debug(f"Found PERCENT_PRICE filter for {self.symbol}: {percent_price_filter}")
                         break
                 
                 if percent_price_filter:
@@ -414,17 +445,19 @@ class RiskManager:
                     max_price = current_price * multiplier_up
                     min_price = current_price * multiplier_down
                     
+                    self.logger.debug(f"Price limits from filter - min: {min_price}, max: {max_price}")
+                    
                     # Adjust prices to stay within limits
-                    if original_stop_price < min_price:
+                    if self.stop_loss_price < min_price:
                         self.logger.warning(
-                            f"Stop loss price {original_stop_price} is below allowed minimum {min_price}. "
+                            f"Stop loss price {self.stop_loss_price} is below allowed minimum {min_price}. "
                             f"Adjusting to {min_price}."
                         )
                         self.stop_loss_price = min_price
                     
-                    if original_take_profit_price > max_price:
+                    if self.take_profit_price > max_price:
                         self.logger.warning(
-                            f"Take profit price {original_take_profit_price} is above allowed maximum {max_price}. "
+                            f"Take profit price {self.take_profit_price} is above allowed maximum {max_price}. "
                             f"Adjusting to {max_price}."
                         )
                         self.take_profit_price = max_price
