@@ -911,6 +911,20 @@ class BinanceWebSocketAPIClient:
                 "error": f"Key validation failed: {str(e)}"
             }
 
+    def new_oco_order(self, **params):
+        """
+        发送OCO订单请求到WebSocket API
+        
+        Args:
+            **params: OCO订单参数
+            
+        Returns:
+            dict: 服务器响应
+        """
+        # 使用最新的OCO订单API端点
+        request_id = self._send_signed_request("orderList.place.oco", params)
+        return self._wait_for_response(request_id)
+
 
 # Compatibility layer with client.py
 class BinanceWSClient:
