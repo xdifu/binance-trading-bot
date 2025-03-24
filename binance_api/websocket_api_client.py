@@ -988,15 +988,22 @@ class BinanceWSClient:
             params["stopLimitPrice"] = stopLimitPrice
             params["stopLimitTimeInForce"] = stopLimitTimeInForce
         
-        # 根据新的WebSocket API，使用正确的参数名称
-        # WebSocket API现在使用orderList.place.oco而不是order.oco
+        # 添加aboveType和belowType参数 - 这些在WebSocket API中实际是必需的
+        if aboveType is not None:
+            params["aboveType"] = aboveType
+        else:
+            params["aboveType"] = "LIMIT_MAKER"  # 默认值
+            
+        if belowType is not None:
+            params["belowType"] = belowType
+        else:
+            params["belowType"] = "LIMIT_MAKER"  # 默认值
         
-        # 添加其他参数，但排除WebSocket API不支持的特定参数
-        websocket_unsupported_params = ['aboveType', 'belowType']
+        # 添加其他参数(不再排除aboveType和belowType)
         for k, v in kwargs.items():
-            if k not in params and k not in websocket_unsupported_params:
+            if k not in params:
                 params[k] = v
         
-        # 使用最新的API端点，币安WebSocket API已弃用order.oco，改用orderList.place.oco
+        # 币安WebSocket API已弃用order.oco，改用orderList.place.oco
         request_id = self.client._send_signed_request("orderList.place.oco", params)
         return self.client._wait_for_response(request_id)
