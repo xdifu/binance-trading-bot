@@ -619,13 +619,13 @@ class RiskManager:
                     )
                 else:
                     # Fallback to REST client
-                    response = self.binance_client.rest_client.cancel_oco_order(  # 修改此处：cancel_order_list -> cancel_oco_order
+                    response = self.binance_client.rest_client.cancel_oco_order(  # 修改: cancel_order_list -> cancel_oco_order
                         symbol=self.symbol,
                         orderListId=self.oco_order_id
                     )
             else:
                 # Using REST client directly
-                response = self.binance_client.rest_client.cancel_oco_order(  # 修改此处：cancel_order_list -> cancel_oco_order
+                response = self.binance_client.rest_client.cancel_oco_order(  # 修改: cancel_order_list -> cancel_oco_order
                     symbol=self.symbol,
                     orderListId=self.oco_order_id
                 )
@@ -656,7 +656,7 @@ class RiskManager:
                         self.using_websocket = client_status["websocket_available"]
                         
                         # Try again with REST client directly
-                        self.binance_client.rest_client.cancel_oco_order(  # 修改此处：cancel_order_list -> cancel_oco_order
+                        self.binance_client.rest_client.cancel_oco_order(  # 修改: cancel_order_list -> cancel_oco_order
                             symbol=self.symbol,
                             orderListId=self.oco_order_id
                         )
