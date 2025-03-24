@@ -9,16 +9,18 @@ from utils.format_utils import format_price, format_quantity, get_precision_from
 import config
 
 class GridTrader:
-    def __init__(self, binance_client, telegram_bot=None):
+    def __init__(self, binance_client, telegram_bot=None, asset_manager=None):
         """
         Initialize grid trading strategy
         
         Args:
             binance_client: BinanceClient instance for API operations
             telegram_bot: Optional TelegramBot instance for notifications
+            asset_manager: Optional AssetManager instance for precision information
         """
         self.binance_client = binance_client
         self.telegram_bot = telegram_bot
+        self.asset_manager = asset_manager  # Store asset manager reference
         self.symbol = config.SYMBOL
         self.grid_levels = config.GRID_LEVELS
         self.grid_spacing = config.GRID_SPACING / 100  # Convert to decimal
@@ -44,8 +46,15 @@ class GridTrader:
         # Store tickSize and stepSize directly from filters
         self.tick_size = self._get_tick_size()
         self.step_size = self._get_step_size()
-        self.price_precision = self._get_price_precision()
-        self.quantity_precision = self._get_quantity_precision()
+        
+        # If asset manager is provided, use its precision information
+        if self.asset_manager:
+            self.price_precision = self.asset_manager.price_precision
+            self.quantity_precision = self.asset_manager.quantity_precision
+        else:
+            # Original precision retrieval code remains as fallback
+            self.price_precision = self._get_price_precision()
+            self.quantity_precision = self._get_quantity_precision()
         
         self.logger.info(f"Trading pair {self.symbol} price precision: {self.price_precision}, quantity precision: {self.quantity_precision}")
         self.logger.info(f"Trading pair {self.symbol} tick size: {self.tick_size}, step size: {self.step_size}")
