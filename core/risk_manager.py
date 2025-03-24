@@ -575,7 +575,7 @@ class RiskManager:
                 try:
                     # Force client to update connection status
                     client_status = self.binance_client.get_client_status()
-                    self.using_websocket = client_status["websocket_available"]
+                    self.using_websocket = self.using_websocket = False  # Force REST API usage
                     
                     # Try again with updated client status
                     self._retry_execute_stop_loss()
@@ -672,7 +672,7 @@ class RiskManager:
                 try:
                     # Force client to update connection status
                     client_status = self.binance_client.get_client_status()
-                    self.using_websocket = client_status["websocket_available"]
+                    self.using_websocket = self.using_websocket = False  # Force REST API usage
                     
                     # Try again with updated client status
                     self._retry_execute_take_profit()
