@@ -996,7 +996,8 @@ class GridTrader:
     # OPTIMIZED: New helper method for capital calculation
     def _calculate_dynamic_capital_for_level(self, price):
         """
-        Calculate appropriate capital allocation based on price zone
+        Calculate appropriate capital allocation based on price zone with optimized distribution
+        for small capital accounts ($64)
         
         Args:
             price: The price for the order
@@ -1010,15 +1011,34 @@ class GridTrader:
         core_upper = current_price + (core_range / 2)
         core_lower = current_price - (core_range / 2)
 
-        # Determine capital based on price zone
+        # Calculate minimum required capital for valid orders (usually 6 USDT for Binance)
+        min_required_capital = 6.0  # Minimum capital to ensure order meets exchange requirements
+        
+        # Determine capital based on price zone with enhanced concentration
         if core_lower <= price <= core_upper:
-            # This is a core zone order - gets more capital
-            distance_factor = 1 - min(1, abs(price - current_price) / core_range) if core_range > 0 else 0
-            capital_multiplier = 1 + (distance_factor * 0.3)
-            return self.capital_per_level * self.core_capital_ratio * capital_multiplier
+            # Core zone orders - higher concentration near current price
+            # Calculate distance factor (0 at current price, 1 at zone edge)
+            distance_factor = 1 - min(1, abs(price - current_price) / (core_range/2)) if core_range > 0 else 0
+            
+            # Enhanced multiplier: 1.0 to 1.5 (increased from 0.3)
+            capital_multiplier = 1 + (distance_factor * 0.5)
+            
+            # Ensure allocation is at least minimum required
+            allocation = max(
+                min_required_capital,
+                self.capital_per_level * self.core_capital_ratio * capital_multiplier
+            )
+            return allocation
         else:
-            # Edge zone order - gets less capital
-            return self.capital_per_level * (1 - self.core_capital_ratio)
+            # Edge zone orders - reduced capital but still meeting minimums
+            edge_discount = 0.7  # Use 70% of standard allocation for edge levels
+            
+            # Ensure allocation is at least minimum required
+            allocation = max(
+                min_required_capital,
+                self.capital_per_level * (1 - self.core_capital_ratio) * edge_discount
+            )
+            return allocation
     
     def _lock_funds(self, asset, amount):
         """
