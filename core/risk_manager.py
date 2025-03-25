@@ -17,6 +17,9 @@ class RiskManager:
         self.telegram_bot = telegram_bot
         self.symbol = config.SYMBOL
         
+        # Initialize logger first to enable logging
+        self.logger = logging.getLogger(__name__)
+        
         # Enhanced strategy for small capital accounts - more conservative stop loss and take profit
         base_stop_loss = config.TRAILING_STOP_LOSS_PERCENT / 100
         base_take_profit = config.TRAILING_TAKE_PROFIT_PERCENT / 100
@@ -34,9 +37,6 @@ class RiskManager:
         self.last_volatility_check = time.time()
         self.volatility_check_interval = 3600  # Check market volatility every hour
         self.volatility_adjustment_active = False  # Track if volatility-based adjustment is active
-        
-        # Initialize logger
-        self.logger = logging.getLogger(__name__)
         
         # Track connection type for logging
         self.using_websocket = self.binance_client.get_client_status()["websocket_available"]
