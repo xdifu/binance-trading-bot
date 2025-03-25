@@ -63,7 +63,14 @@ class BinanceClient:
             # Set correct base_url
             base_url = "https://testnet.binance.vision" if self.use_testnet else self.base_url
             
-            # Read private key file content
+            # Handle relative paths for private key
+            if private_key_path and not os.path.isabs(private_key_path):
+                # Convert relative path to absolute path based on project root
+                project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                private_key_path = os.path.join(project_root, private_key_path.lstrip('./'))
+                self.logger.debug(f"Resolved private key path: {private_key_path}")
+
+            # Check if the file exists
             if os.path.isfile(private_key_path):
                 with open(private_key_path, 'rb') as f:
                     private_key_data = f.read()
