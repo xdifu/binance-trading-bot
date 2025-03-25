@@ -227,30 +227,40 @@ class BinanceClient:
         # Fall back to REST API
         if self.rest_client:
             try:
-                # For timestamp errors, try to re-sync and retry once
-                try:
-                    rest_method = getattr(self.rest_client, rest_method_name)
-                    self.logger.debug(f"Using REST API fallback for {rest_method_name}")
-                    return rest_method(*args, **kwargs)
-                except ClientError as e:
-                    # Check for timestamp error and retry once with fresh sync
-                    if hasattr(e, 'error_code') and e.error_code == -1021:
-                        self.logger.warning("Timestamp error detected, re-syncing time and retrying...")
-                        self._sync_time()
-                        
-                        # Update timestamp in kwargs if it was a signed request
-                        if 'timestamp' in kwargs:
-                            kwargs['timestamp'] = self._get_timestamp()
-                            
-                        # Retry with updated timestamp
-                        rest_method = getattr(self.rest_client, rest_method_name)
-                        return rest_method(*args, **kwargs)
-                    else:
-                        # If not a timestamp error, re-raise
+                rest_method = getattr(self.rest_client, rest_method_name)
+                self.logger.debug(f"Using REST API fallback for {rest_method_name}")
+                return rest_method(*args, **kwargs)
+            except ClientError as e:
+                # Enhanced handling for timestamp errors
+                if hasattr(e, 'error_code') and e.error_code == -1021:
+                    self.logger.warning(f"Timestamp error detected ({e}), performing emergency time sync")
+                    
+                    # Force immediate time sync with multiple attempts
+                    sync_success = False
+                    for attempt in range(3):
+                        if self._sync_time():
+                            sync_success = True
+                            self.logger.info(f"Emergency time sync successful on attempt {attempt+1}")
+                            break
+                        time.sleep(1)
+                    
+                    if not sync_success:
+                        self.logger.error("All emergency time sync attempts failed")
                         raise
-            except Exception as e:
-                self.logger.error(f"REST API fallback call failed for {rest_method_name}: {e}")
-                raise
+                    
+                    # Retry the request with newly synced timestamp
+                    if 'timestamp' in kwargs:
+                        # Use a conservative (far behind) timestamp to ensure success
+                        kwargs['timestamp'] = self._get_timestamp() + min(-1000, self.time_offset - 1000)
+                        self.logger.info(f"Retrying with adjusted timestamp: {kwargs['timestamp']}")
+                    
+                    # Retry the request
+                    rest_method = getattr(self.rest_client, rest_method_name)
+                    return rest_method(*args, **kwargs)
+                else:
+                    # For other errors, just log and re-raise
+                    self.logger.error(f"REST API fallback call failed for {rest_method_name}: {e}")
+                    raise
         else:
             raise RuntimeError("Neither WebSocket nor REST API client is available")
     
