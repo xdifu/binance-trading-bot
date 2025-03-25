@@ -1,5 +1,3 @@
-# Updated requirements.txt for Binance Grid Trading Bot
-
 # Core dependencies
 python-binance>=1.0.16       # Official Binance Python client
 python-telegram-bot>=20.5.0  # Telegram bot integration with async support
@@ -18,11 +16,11 @@ asyncio>=3.4.3               # Async programming support
 
 # Networking and utilities
 requests>=2.31.0             # HTTP library for REST API fallback
-urllib3>=2.0.0               # HTTP client (requests dependency)
+urllib3>=2.0.7               # HTTP client (requests dependency) - updated for security fixes
 pyOpenSSL>=23.3.0            # SSL/TLS toolkit for secure connections
-certifi>=2023.11.17          # CA certificate bundle for certificate validation
+certifi>=2024.2.2            # CA certificate bundle for certificate validation - updated
 
 # Optional tools for development
-pytest>=7.4.0                # For writing tests
+pytest>=7.4.3                # For writing tests
 pytest-asyncio>=0.21.1       # Async pytest support
 black>=23.10.0               # Code formatter
