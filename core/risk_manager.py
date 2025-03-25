@@ -16,8 +16,24 @@ class RiskManager:
         self.binance_client = binance_client
         self.telegram_bot = telegram_bot
         self.symbol = config.SYMBOL
-        self.trailing_stop_loss_percent = config.TRAILING_STOP_LOSS_PERCENT / 100  # Convert to decimal
-        self.trailing_take_profit_percent = config.TRAILING_TAKE_PROFIT_PERCENT / 100  # Convert to decimal
+        
+        # Enhanced strategy for small capital accounts - more conservative stop loss and take profit
+        base_stop_loss = config.TRAILING_STOP_LOSS_PERCENT / 100
+        base_take_profit = config.TRAILING_TAKE_PROFIT_PERCENT / 100
+
+        # For small capital accounts ($64), use tighter stops to protect capital
+        capital_adjustment_factor = 0.8  # 20% tighter stops for small accounts
+
+        # Adjust base values but ensure minimum safety distance
+        self.trailing_stop_loss_percent = max(0.005, base_stop_loss * capital_adjustment_factor)  # At least 0.5% stop loss
+        self.trailing_take_profit_percent = max(0.008, base_take_profit * capital_adjustment_factor)  # At least 0.8% take profit
+
+        self.logger.info(f"Using optimized risk parameters for small capital: Stop loss at {self.trailing_stop_loss_percent*100:.2f}%, Take profit at {self.trailing_take_profit_percent*100:.2f}%")
+
+        # Dynamic volatility tracking for adaptive risk management
+        self.last_volatility_check = time.time()
+        self.volatility_check_interval = 3600  # Check market volatility every hour
+        self.volatility_adjustment_active = False  # Track if volatility-based adjustment is active
         
         # Initialize logger
         self.logger = logging.getLogger(__name__)
