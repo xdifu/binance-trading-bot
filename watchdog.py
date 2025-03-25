@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# filepath: /home/ubuntu/Binance/watchdog.py
 import subprocess
 import time
 import os
@@ -13,18 +14,18 @@ logging.basicConfig(
     format='%(asctime)s - WATCHDOG - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler('/home/god/Binance/watchdog.log')
+        logging.FileHandler('/home/ubuntu/Binance/watchdog.log')
     ]
 )
 logger = logging.getLogger()
 
 # Configuration
-PROJECT_ROOT = '/home/god/Binance/grid_trading_bot'
+PROJECT_ROOT = '/home/ubuntu/Binance/binance-trading-bot'
 BOT_PATH = f'{PROJECT_ROOT}/main.py'
 CHECK_INTERVAL = 60  # Check every 60 seconds
 
 # Virtual environment path - update this to your actual venv path if you're using one
-VENV_PATH = '/home/god/Binance/venv'  # 假设的虚拟环境路径，请替换为实际路径
+VENV_PATH = '/home/ubuntu/Binance/venv'  # Update this to your actual venv path
 USE_VENV = True  # Set to False if not using virtual environment
 
 def is_process_running(process):
@@ -37,7 +38,7 @@ def start_bot():
     """Start the trading bot as a subprocess"""
     try:
         # Start the process and redirect output to a log file
-        log_file = open('/home/god/Binance/bot_output.log', 'a')
+        log_file = open('/home/ubuntu/Binance/bot_output.log', 'a')
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         log_file.write(f"\n\n--- Bot started at {timestamp} ---\n\n")
         log_file.flush()
