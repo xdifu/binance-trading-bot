@@ -251,7 +251,7 @@ class BinanceClient:
                     # Retry the request with newly synced timestamp
                     if 'timestamp' in kwargs:
                         # Use a conservative (far behind) timestamp to ensure success
-                        kwargs['timestamp'] = self._get_timestamp() + min(-1000, self.time_offset - 1000)
+                        kwargs['timestamp'] = self._get_timestamp() + (self.time_offset - 1000)  # Full offset plus 1000ms safety
                         self.logger.info(f"Retrying with adjusted timestamp: {kwargs['timestamp']}")
                     
                     # Retry the request
