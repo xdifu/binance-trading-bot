@@ -493,27 +493,12 @@ class BinanceClient:
             raise
 
     def new_oco_order(self, symbol, side, quantity, price, stopPrice, stopLimitPrice=None, 
-                     stopLimitTimeInForce="GTC", aboveType=None, belowType=None, **kwargs):
+                     stopLimitTimeInForce="GTC", **kwargs):
         """
         Create OCO (One-Cancels-the-Other) order
-        
-        Note: aboveType and belowType parameters are included for backwards compatibility
-        but are no longer required by Binance API
-        
-        Args:
-            symbol: Trading pair symbol
-            side: Order side (BUY/SELL)
-            quantity: Order quantity
-            price: Limit order price
-            stopPrice: Stop price
-            stopLimitPrice: Stop limit price (optional)
-            stopLimitTimeInForce: Time in force for stop limit order (default: GTC)
-            aboveType: Above leg order type (optional)
-            belowType: Below leg order type (optional)
-            **kwargs: Additional parameters to pass to the API
         """
         try:
-            # Create params dictionary with all parameters
+            # 创建必要的核心参数
             all_params = {
                 "symbol": symbol,
                 "side": side,
@@ -522,47 +507,36 @@ class BinanceClient:
                 "stopPrice": stopPrice
             }
             
-            # Add optional parameters
+            # 添加可选的止损限价参数
             if stopLimitPrice:
                 all_params["stopLimitPrice"] = stopLimitPrice
                 all_params["stopLimitTimeInForce"] = stopLimitTimeInForce
             
-            # Handle aboveType and belowType parameters (for REST API only)
-            # These parameters are ignored by WebSocket API
-            if aboveType is not None:
-                all_params["aboveType"] = aboveType
-            elif "aboveType" not in kwargs:
-                all_params["aboveType"] = "LIMIT_MAKER"  # Default value
+            # 区分WebSocket API和REST API的参数处理
+            if self.websocket_available and self.ws_client:
+                # WebSocket API不需要添加aboveType和belowType，内部会处理
+                # 合并其他自定义参数
+                for k, v in kwargs.items():
+                    if k not in all_params:
+                        all_params[k] = v
+                        
+                response = self._execute_with_fallback("new_oco_order", "new_oco_order", **all_params)
+            else:
+                # REST API需要这些额外参数
+                rest_params = all_params.copy()
                 
-            if belowType is not None:
-                all_params["belowType"] = belowType
-            elif "belowType" not in kwargs:
-                all_params["belowType"] = "LIMIT_MAKER"  # Default value
-            
-            # Merge other parameters
-            for k, v in kwargs.items():
-                if k not in all_params:
-                    all_params[k] = v
-            
-            # Call WebSocket or REST API
-            response = self._execute_with_fallback("new_oco_order", "new_oco_order", **all_params)
+                # REST API需要aboveType和belowType
+                rest_params["aboveType"] = kwargs.get("aboveType", "LIMIT_MAKER")
+                rest_params["belowType"] = kwargs.get("belowType", "LIMIT_MAKER")
                 
-            # Check if response contains error information
-            if isinstance(response, dict) and 'error' in response:
-                error_code = response.get('error', {}).get('code')
-                error_msg = response.get('error', {}).get('msg', 'Unknown error')
-                self.logger.error(f"OCO order failed with error {error_code}: {error_msg}")
-                # Return response with error info so caller knows order failed
-                return {"result": None, "error": response.get('error'), "success": False}
+                # 合并其他自定义参数
+                for k, v in kwargs.items():
+                    if k not in rest_params:
+                        rest_params[k] = v
+                        
+                response = self.rest_client.new_oco_order(**rest_params)
             
-            # If using WebSocket API, also check status field
-            if isinstance(response, dict) and response.get('status', 200) != 200:
-                error_code = response.get('status')
-                error_msg = "Non-success status code"
-                self.logger.error(f"OCO order failed with status {error_code}")
-                return {"result": None, "error": {"code": error_code, "msg": error_msg}, "success": False}
-                
-            # Standardize response format and add success flag
+            # 标准化响应格式并添加success标志
             standardized_response = self._standardize_oco_response(response)
             if "result" in standardized_response and standardized_response["result"]:
                 standardized_response["success"] = True
