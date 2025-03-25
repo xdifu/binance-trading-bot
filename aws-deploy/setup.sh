@@ -17,7 +17,7 @@ chmod +x ~/Binance/scripts/*.sh
 # 创建Python虚拟环境
 python3 -m venv ~/Binance/venv
 source ~/Binance/venv/bin/activate
-pip install --no-cache-dir -r ~/Binance/grid_trading_bot/requirements.txt
+pip install --no-cache-dir -r ~/Binance/binance-trading-bot/requirements.txt
 
 # 设置systemd服务
 sudo cp grid_bot.service /etc/systemd/system/
