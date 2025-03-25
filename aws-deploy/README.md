@@ -9,7 +9,7 @@ This folder contains the essential scripts to deploy the grid trading bot as a s
 Deploy the trading bot to your AWS instance with a single command:
 
 ```bash
-cd ~/Binance/grid_trading_bot/aws-deploy
+cd ~/Binance/binance-trading-bot/aws-deploy
 chmod +x *.sh
 ./setup.sh
 ```
@@ -37,7 +37,7 @@ sudo systemctl status grid_bot.service
 sudo journalctl -u grid_bot.service -f
 
 # Application logs
-tail -f ~/Binance/grid_trading_bot/grid_bot.log
+tail -f ~/Binance/binance-trading-bot/grid_bot.log
 
 # Monitor logs
 tail -f ~/Binance/watchdog.log
@@ -69,7 +69,7 @@ sudo journalctl -u grid_bot.service -n 50
 Common issues:
 - API key permissions: Ensure API keys have correct trading permissions
 - Network connectivity: Run network_monitor.sh to test
-- Python dependencies: Try reinstalling with `pip install -r requirements.txt`
+- Python dependencies: Try reinstalling with `pip install -r ~/Binance/binance-trading-bot/requirements.txt`
 
 ### High Memory Usage
 
@@ -95,8 +95,10 @@ The deployment consists of:
 - grid_bot.service: Systemd service definition with auto-restart and resource limits
 - watchdog.sh: Process monitoring script (runs every 3 minutes via cron)
 - network_monitor.sh: Binance API connectivity checker (runs every 10 minutes)
-- `cleanup.sh`: Log rotation and disk space management (runs daily)
+- cleanup.sh: Log rotation and disk space management (runs daily)
 - setup.sh: One-click deployment script
+
+All scripts are deployed from ~/Binance/binance-trading-bot/aws-deploy to their respective locations.
 
 ## System Requirements
 
