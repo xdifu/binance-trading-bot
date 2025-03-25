@@ -382,6 +382,7 @@ class GridTrader:
     def _calculate_grid_levels(self):
         """
         Calculate asymmetric grid price levels with funds concentrated near current price
+        Optimized for small capital accounts ($64)
         
         Returns:
             list: List of grid levels with prices, sides and capital allocation
@@ -390,15 +391,20 @@ class GridTrader:
         current_price = self.binance_client.get_symbol_price(self.symbol)
         self.current_market_price = current_price
         
-        # Calculate grid range based on current price and grid_range_percent
-        grid_range = current_price * self.grid_range_percent
+        # Use a tighter grid range for small capital (reduced from original)
+        # This concentrates capital in a narrower price band for more frequent trading
+        adjusted_grid_range_percent = min(self.grid_range_percent, 0.01)  # Cap at 1% range
+        
+        # Calculate grid range based on current price and adjusted grid_range_percent
+        grid_range = current_price * adjusted_grid_range_percent
         
         # Calculate upper and lower bounds of the entire grid
         upper_bound = current_price + (grid_range / 2)
         lower_bound = current_price - (grid_range / 2)
         
-        # Define core zone (center area with higher probability of price movement)
-        core_range = grid_range * self.core_zone_percentage
+        # Define core zone with higher percentage (increased from original)
+        core_zone_percentage = max(self.core_zone_percentage, 0.7)  # At least 70% of range is core
+        core_range = grid_range * core_zone_percentage
         
         # Calculate core zone boundaries
         core_upper = current_price + (core_range / 2)
@@ -411,9 +417,13 @@ class GridTrader:
             volatility_factor = min(max(atr / current_price * 10, 0.8), 1.5)
             self.logger.info(f"Volatility factor: {volatility_factor:.4f}")
         
-        # Determine grid point distribution
-        core_grid_points = max(2, int(self.grid_levels * self.core_grid_ratio))  # At least 2 points in core
-        edge_grid_points = self.grid_levels - core_grid_points
+        # Increase grid levels for more granular trading
+        effective_grid_levels = min(max(self.grid_levels, 8), 10)  # Between 8 and 10 levels
+        
+        # Determine grid point distribution with more points in core
+        core_grid_ratio = max(self.core_grid_ratio, 0.7)  # At least 70% of points in core
+        core_grid_points = max(2, int(effective_grid_levels * core_grid_ratio))
+        edge_grid_points = effective_grid_levels - core_grid_points
         
         # Calculate upper and lower edge points
         upper_edge_points = edge_grid_points // 2
