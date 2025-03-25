@@ -512,6 +512,11 @@ class BinanceClient:
                 all_params["stopLimitPrice"] = stopLimitPrice
                 all_params["stopLimitTimeInForce"] = stopLimitTimeInForce
             
+            # 从kwargs获取aboveType和belowType，或设置默认值
+            # 这些参数是REST API必需的，但不会发送到WebSocket API
+            above_type = kwargs.get("aboveType", "LIMIT_MAKER")
+            below_type = kwargs.get("belowType", "STOP_LOSS")
+            
             # 区分WebSocket API和REST API的参数处理
             if self.websocket_available and self.ws_client:
                 # WebSocket API不需要添加aboveType和belowType，内部会处理
@@ -520,7 +525,17 @@ class BinanceClient:
                     if k not in all_params:
                         all_params[k] = v
                         
-                response = self._execute_with_fallback("new_oco_order", "new_oco_order", **all_params)
+                try:
+                    response = self._execute_with_fallback("new_oco_order", "new_oco_order", **all_params)
+                except Exception as e:
+                    # 确保任何WebSocket错误都会触发REST fallback
+                    self.logger.warning(f"WebSocket API call failed for new_oco_order: {e}")
+                    self.websocket_available = False
+                    # 继续执行REST fallback代码
+                    rest_params = all_params.copy()
+                    rest_params["aboveType"] = above_type
+                    rest_params["belowType"] = below_type
+                    response = self.rest_client.new_oco_order(**rest_params)
             else:
                 # REST API需要这些额外参数
                 rest_params = all_params.copy()
