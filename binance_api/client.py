@@ -104,49 +104,62 @@ class BinanceClient:
                 raise
     
     def _sync_time(self):
-        """Synchronize local time with Binance server time with RTT compensation"""
+        """Synchronize local time with Binance server time with enhanced accuracy"""
         try:
-            # Record request start time
-            request_start_ms = int(time.time() * 1000)
-            
-            # Get server time
-            server_time = self.rest_client.time()
-            
-            # Record response received time
-            request_end_ms = int(time.time() * 1000)
-            
-            if server_time and 'serverTime' in server_time:
-                server_time_ms = server_time['serverTime']
-                
-                # Calculate RTT (Round Trip Time)
-                rtt_ms = request_end_ms - request_start_ms
-                
-                # Estimate one-way network delay (assuming symmetric path)
-                one_way_delay_ms = rtt_ms / 2
-                
-                # Calculate time offset with one-way delay compensation
-                # server_time - (local_time_at_request + one_way_delay)
-                self.time_offset = server_time_ms - (request_start_ms + one_way_delay_ms)
-                
-                # Log detailed information
-                time_diff_sec = abs(self.time_offset) / 1000
-                self.logger.info(f"Time sync with {self.base_url}: offset={self.time_offset:.2f}ms, RTT={rtt_ms:.2f}ms ({time_diff_sec:.2f}s)")
-                
-                # Record last sync time
-                self.last_time_sync = int(time.time())
-                
-                # Check if time difference is significant
-                if time_diff_sec > 1:
-                    self.logger.warning(f"Local time is {'ahead of' if self.time_offset < 0 else 'behind'} server by {time_diff_sec:.2f}s")
+            # Take multiple samples to improve accuracy
+            samples = []
+            for i in range(3):  # Take 3 samples
+                try:
+                    # Record request start time
+                    request_start_ms = int(time.time() * 1000)
                     
-                    # Attempt system clock sync if running as root and time diff is large
-                    if time_diff_sec > 1 and os.geteuid() == 0:
-                        self.logger.info("Attempting to sync system clock with Binance server time")
-                        # System clock synchronization code would go here
-                
-                return True
-                
-            return False
+                    # Get server time
+                    server_time = self.rest_client.time()
+                    
+                    # Record response received time
+                    request_end_ms = int(time.time() * 1000)
+                    
+                    if server_time and 'serverTime' in server_time:
+                        server_time_ms = server_time['serverTime']
+                        
+                        # Calculate RTT (Round Trip Time)
+                        rtt_ms = request_end_ms - request_start_ms
+                        
+                        # Estimate one-way network delay (assuming symmetric path)
+                        one_way_delay_ms = rtt_ms / 2
+                        
+                        # Calculate time offset with one-way delay compensation
+                        offset = server_time_ms - (request_start_ms + one_way_delay_ms)
+                        
+                        # Store sample with its RTT
+                        samples.append((offset, rtt_ms))
+                    
+                    # Small delay between samples
+                    time.sleep(0.5)
+                except Exception as e:
+                    self.logger.warning(f"Time sync sample {i+1} failed: {e}")
+            
+            if not samples:
+                self.logger.error("All time synchronization samples failed")
+                return False
+            
+            # Use the sample with the lowest RTT for best accuracy
+            samples.sort(key=lambda x: x[1])  # Sort by RTT
+            self.time_offset = samples[0][0]  # Use offset from lowest RTT sample
+            
+            # Log detailed information
+            rtt_ms = samples[0][1]
+            time_diff_sec = abs(self.time_offset) / 1000
+            self.logger.info(f"Time sync with {self.base_url}: offset={self.time_offset:.2f}ms, RTT={rtt_ms:.2f}ms ({time_diff_sec:.2f}s)")
+            
+            # Record last sync time
+            self.last_time_sync = int(time.time())
+            
+            # Check if time difference is significant
+            if time_diff_sec > 1:
+                self.logger.warning(f"Local time is {'ahead of' if self.time_offset < 0 else 'behind'} server by {time_diff_sec:.2f}s")
+            
+            return True
         except Exception as e:
             self.logger.error(f"Time synchronization failed: {e}")
             return False
