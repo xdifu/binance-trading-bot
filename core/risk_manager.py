@@ -39,9 +39,10 @@ class RiskManager:
         self.oco_order_id = None
         self.is_active = False
         
-        # Update thresholds to reduce API calls - configurable if needed
-        self.min_update_threshold_percent = 0.01  # 1% minimum price movement
-        self.min_update_interval_seconds = 600    # 10 minutes minimum between updates
+        # Optimized thresholds for small capital accounts - more frequent updates and smaller movements
+        self.min_update_threshold_percent = 0.003  # 0.3% minimum price movement (reduced from 1%)
+        self.min_update_interval_seconds = 300    # 5 minutes minimum between updates (reduced from 10 minutes)
+        self.logger.info(f"Using optimized risk thresholds for small capital: {self.min_update_threshold_percent*100}% movement, {self.min_update_interval_seconds/60} minutes interval")
         
         # Track last update time
         self.last_update_time = 0
