@@ -361,6 +361,70 @@ class RiskManager:
                 self._cancel_oco_orders()
                 self._place_oco_orders()
                 
+            # Periodically check market volatility to adjust risk parameters
+            current_time = time.time()
+            if current_time - self.last_volatility_check > self.volatility_check_interval:
+                try:
+                    # Get symbol info with ATR if available
+                    from utils.indicators import calculate_atr
+                    
+                    # Get klines for volatility assessment
+                    klines = self.binance_client.get_historical_klines(
+                        symbol=self.symbol,
+                        interval="1h",
+                        limit=24  # Use 24 hours of data
+                    )
+                    
+                    if klines:
+                        # Calculate ATR as volatility indicator
+                        atr = calculate_atr(klines, period=14)
+                        if atr:
+                            # Calculate volatility as percentage of price
+                            volatility_percent = atr / current_price
+                            
+                            # High volatility: above 1.5% hourly movement
+                            high_volatility = volatility_percent > 0.015
+                            
+                            # Adjust risk parameters based on volatility
+                            if high_volatility and not self.volatility_adjustment_active:
+                                # In high volatility, increase protection
+                                original_stop_loss = self.trailing_stop_loss_percent
+                                original_take_profit = self.trailing_take_profit_percent
+                                
+                                # Tighten stops in high volatility
+                                self.trailing_stop_loss_percent *= 0.8  # 20% tighter
+                                self.trailing_take_profit_percent *= 0.8  # 20% tighter
+                                
+                                self.volatility_adjustment_active = True
+                                self.logger.info(
+                                    f"High volatility detected ({volatility_percent*100:.2f}%). "
+                                    f"Adjusted stop loss: {self.trailing_stop_loss_percent*100:.2f}% "
+                                    f"(from {original_stop_loss*100:.2f}%). "
+                                    f"Adjusted take profit: {self.trailing_take_profit_percent*100:.2f}% "
+                                    f"(from {original_take_profit*100:.2f}%)"
+                                )
+                            elif not high_volatility and self.volatility_adjustment_active:
+                                # Reset to standard values in normal volatility
+                                base_stop_loss = config.TRAILING_STOP_LOSS_PERCENT / 100
+                                base_take_profit = config.TRAILING_TAKE_PROFIT_PERCENT / 100
+                                capital_adjustment_factor = 0.8
+                                
+                                self.trailing_stop_loss_percent = max(0.005, base_stop_loss * capital_adjustment_factor)
+                                self.trailing_take_profit_percent = max(0.008, base_take_profit * capital_adjustment_factor)
+                                
+                                self.volatility_adjustment_active = False
+                                self.logger.info(
+                                    f"Normal volatility detected ({volatility_percent*100:.2f}%). "
+                                    f"Reset to standard risk parameters: "
+                                    f"Stop loss: {self.trailing_stop_loss_percent*100:.2f}%, "
+                                    f"Take profit: {self.trailing_take_profit_percent*100:.2f}%"
+                                )
+                
+                    # Update last check time
+                    self.last_volatility_check = current_time
+                except Exception as e:
+                    self.logger.error(f"Error in volatility adjustment: {e}")
+            
             return None  # No direct operation is returned, executed via OCO orders
             
         except Exception as e:
