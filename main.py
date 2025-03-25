@@ -346,6 +346,49 @@ class GridTradingBot:
                 logger.error(f"Grid maintenance failed: {e}")
                 time.sleep(MAINTENANCE_THREAD_SLEEP)
     
+    def _auto_start_grid_trading(self):
+        """
+        Automatically start grid trading without requiring Telegram command.
+        This ensures the bot can start trading immediately after system startup or restart.
+        """
+        try:
+            if not self.grid_trader:
+                logger.error("Cannot auto-start trading: Grid trader not initialized")
+                return
+            
+            # Check if grid trading is already running
+            if self.grid_trader.is_running:
+                logger.info("Grid trading already running, skipping auto-start")
+                return
+            
+            logger.info("Auto-starting grid trading")
+            
+            # Start grid trading (same process as when /startgrid is called)
+            result = self.grid_trader.start()
+            
+            # Log and notify about the auto-start
+            logger.info(f"Auto-start grid trading result: {result}")
+            if self.telegram_bot:
+                self.telegram_bot.send_message(f"🤖 Grid trading auto-started on system initialization: {result}")
+            
+            # If grid trader is running and risk manager exists, activate it
+            if self.grid_trader.is_running and self.risk_manager:
+                # Ensure grid has prices before activating risk manager
+                if hasattr(self.grid_trader, 'grid') and self.grid_trader.grid and len(self.grid_trader.grid) > 0:
+                    grid_prices = [level['price'] for level in self.grid_trader.grid]
+                    if grid_prices:  # Double-check that we have prices
+                        self.risk_manager.activate(min(grid_prices), max(grid_prices))
+                        logger.info("Risk manager activated with grid price range")
+                    else:
+                        logger.warning("Cannot activate risk manager: No grid prices available")
+                else:
+                    logger.warning("Cannot activate risk manager: Grid is empty")
+        except Exception as e:
+            # Log any errors but don't crash the bot
+            logger.error(f"Error during auto-start of grid trading: {e}")
+            if self.telegram_bot:
+                self.telegram_bot.send_message(f"⚠️ Error during auto-start of grid trading: {str(e)}")
+
     def start(self):
         """Start the bot with proper state management"""
         with self.state_lock:
@@ -364,6 +407,9 @@ class GridTradingBot:
         
         # Set up WebSocket connection
         self._setup_websocket()
+        
+        # Auto-start grid trading - this will automatically start trading without manual intervention
+        self._auto_start_grid_trading()
         
         # Start grid maintenance thread
         maintenance_thread = Thread(target=self._grid_maintenance_thread, daemon=True)
