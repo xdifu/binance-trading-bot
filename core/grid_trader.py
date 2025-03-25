@@ -20,23 +20,43 @@ class GridTrader:
         self.binance_client = binance_client
         self.telegram_bot = telegram_bot
         self.symbol = config.SYMBOL
-        self.grid_levels = config.GRID_LEVELS
-        self.grid_spacing = config.GRID_SPACING / 100  # Convert to decimal
+        
+        # Apply optimized settings for small capital accounts ($64)
+        # Increase grid levels for more frequent trading opportunities
+        self.grid_levels = max(config.GRID_LEVELS, 8)  # At least 8 grid levels
+        
+        # Reduce grid spacing for tighter price capture
+        self.grid_spacing = min(config.GRID_SPACING / 100, 0.003)  # Max 0.3% spacing
+        
+        # Preserve original capital per level setting
         self.capital_per_level = config.CAPITAL_PER_LEVEL
-        self.grid_range_percent = config.GRID_RANGE_PERCENT / 100  # Convert to decimal
+        
+        # Reduce grid range to concentrate capital in smaller price movements
+        self.grid_range_percent = min(config.GRID_RANGE_PERCENT / 100, 0.01)  # Max 1% range
+        
+        # Keep original timing parameters
         self.recalculation_period = config.RECALCULATION_PERIOD
         self.atr_period = config.ATR_PERIOD
         
-        # Non-symmetric grid parameters (with safe defaults if not in config)
-        self.core_zone_percentage = getattr(config, 'CORE_ZONE_PERCENTAGE', 0.5)  # Core zone is 50% of total range
-        self.core_capital_ratio = getattr(config, 'CORE_CAPITAL_RATIO', 0.7)      # 70% of capital in core zone
-        self.core_grid_ratio = getattr(config, 'CORE_GRID_RATIO', 0.6)           # 60% of grid points in core zone
+        # Enhanced non-symmetric grid parameters for better capital efficiency
+        # Concentrate more of the grid range in the core zone
+        self.core_zone_percentage = max(getattr(config, 'CORE_ZONE_PERCENTAGE', 0.5), 0.7)  # At least 70% of range in core
+        
+        # Allocate more capital to the core price zone
+        self.core_capital_ratio = max(getattr(config, 'CORE_CAPITAL_RATIO', 0.7), 0.8)  # At least 80% of capital in core
+        
+        # Place more grid points in the core zone for higher frequency trading
+        self.core_grid_ratio = max(getattr(config, 'CORE_GRID_RATIO', 0.6), 0.7)  # At least 70% of grid points in core
         
         # Store previous ATR value for volatility change detection
         self.last_atr_value = None
         
         # Initialize logger
         self.logger = logging.getLogger(__name__)
+        
+        # Log the optimized settings
+        self.logger.info(f"Using optimized grid settings for small capital: {self.grid_levels} levels, {self.grid_spacing*100:.2f}% spacing, {self.grid_range_percent*100:.2f}% range")
+        self.logger.info(f"Core zone optimized: {self.core_zone_percentage*100:.1f}% of range, {self.core_capital_ratio*100:.1f}% of capital, {self.core_grid_ratio*100:.1f}% of grid points")
         
         # Get symbol information and set precision
         self.symbol_info = self._get_symbol_info()
