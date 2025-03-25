@@ -198,11 +198,11 @@ class BinanceClient:
                 # If already behind (negative offset), use smaller safety margin
                 # If ahead (positive offset), use larger safety margin
                 if self.time_offset < 0:
-                    # Local time is ahead of server time, use a more aggressive offset
-                    # Ensure we're at least 500ms behind server time to avoid timestamp errors
-                    safety_offset = min(-500, self.time_offset - 500)  # At least 500ms additional safety margin
+                    # Local time is ahead of server time - use full offset plus safety margin
+                    # This ensures we compensate for the entire time difference plus extra
+                    safety_offset = self.time_offset - 500  # Full offset plus 500ms safety margin
                 else:
-                    # Local time is behind server time already, use moderate safety offset
+                    # Local time is behind server time, use standard safety offset
                     safety_offset = -500  # Standard 500ms behind
 
                 kwargs['timestamp'] = self._get_timestamp() + safety_offset
