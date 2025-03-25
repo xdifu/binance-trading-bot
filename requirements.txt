@@ -1,28 +1,47 @@
-# Updated requirements.txt for Binance Grid Trading Bot
-
-# Core dependencies
-python-binance>=1.0.16       # Official Binance Python client
-python-telegram-bot>=20.5.0  # Telegram bot integration with async support
-python-dotenv>=1.0.0         # Environment variable management
-msgspec>=0.18.5              # High-performance serialization/deserialization
-websocket-client>=1.7.0      # WebSocket client for market data
-cryptography>=42.0.0         # For ED25519/RSA private key handling
-
-# Data processing and analysis
-pandas>=2.1.0                # Data analysis library
-numpy>=1.26.0                # Numerical computing support
-
-# Async/concurrent utilities
-aiohttp>=3.9.0               # Async HTTP client/server
-asyncio>=3.4.3               # Async programming support
-
-# Networking and utilities
-requests>=2.31.0             # HTTP library for REST API fallback
-urllib3>=2.0.0               # HTTP client (requests dependency)
-pyOpenSSL>=23.3.0            # SSL/TLS toolkit for secure connections
-certifi>=2023.11.17          # CA certificate bundle for certificate validation
-
-# Optional tools for development
-pytest>=7.4.0                # For writing tests
-pytest-asyncio>=0.21.1       # Async pytest support
-black>=23.10.0               # Code formatter
+aiohappyeyeballs==2.6.1
+aiohttp==3.11.14
+aiosignal==1.3.2
+anyio==4.9.0
+attrs==25.3.0
+binance-connector==3.12.0
+certifi==2025.1.31
+cffi==1.17.1
+charset-normalizer==3.4.1
+contourpy==1.3.1
+cryptography==44.0.2
+cycler==0.12.1
+dateparser==1.2.1
+fonttools==4.56.0
+frozenlist==1.5.0
+h11==0.14.0
+httpcore==1.0.7
+httpx==0.28.1
+idna==3.10
+kiwisolver==1.4.8
+matplotlib==3.10.1
+msgspec==0.19.0
+multidict==6.2.0
+numpy==2.2.4
+packaging==24.2
+pandas==2.2.3
+pillow==11.1.0
+propcache==0.3.0
+pycparser==2.22
+pycryptodome==3.22.0
+pyparsing==3.2.1
+python-binance==1.0.28
+python-dateutil==2.9.0.post0
+python-dotenv==1.0.1
+python-telegram-bot==22.0
+pytz==2025.1
+regex==2024.11.6
+requests==2.32.3
+six==1.17.0
+sniffio==1.3.1
+typing_extensions==4.12.2
+tzdata==2025.1
+tzlocal==5.3.1
+urllib3==2.3.0
+websocket-client==1.8.0
+websockets==15.0.1
+yarl==1.18.3
