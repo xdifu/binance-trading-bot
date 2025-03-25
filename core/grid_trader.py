@@ -893,6 +893,36 @@ class GridTrader:
         # Adjust quantity precision
         formatted_quantity = self._adjust_quantity_precision(quantity)
         
+        # Set price with increased spread for new order using config parameter
+        buy_sell_spread = config.BUY_SELL_SPREAD / 100  # Convert percentage to decimal
+        if new_side == "SELL":
+            # For SELL orders after BUY executed
+            new_price = price * (1 + buy_sell_spread)
+            formatted_price = self._adjust_price_precision(new_price)
+        else:
+            # For BUY orders after SELL executed
+            new_price = price * (1 - buy_sell_spread)
+            formatted_price = self._adjust_price_precision(new_price)
+        
+        # Calculate expected profit and trading fees using config parameters
+        expected_profit = abs(float(new_price) - float(price)) / float(price) * 100
+        trading_fee = config.TRADING_FEE_RATE * 2  # Round-trip fee (buy + sell)
+        
+        # Only create reverse order if profit exceeds fees by configured margin
+        if expected_profit <= trading_fee * config.PROFIT_MARGIN_MULTIPLIER:
+            self.logger.info(f"Skipping reverse order - insufficient profit margin: {expected_profit:.4f}% vs required: {trading_fee * config.PROFIT_MARGIN_MULTIPLIER:.4f}%")
+            
+            # IMPORTANT: Place a new grid order to maintain grid density instead of skipping completely
+            self._place_replacement_grid_order(level_index, float(price))
+            return False
+        
+        # The rest of the method should remain unchanged
+        # Create opposite order
+        new_side = "SELL" if side == "BUY" else "BUY"
+        
+        # Adjust quantity precision
+        formatted_quantity = self._adjust_quantity_precision(quantity)
+        
         # Set price with increased spread for new order (1.5% instead of 1%)
         if new_side == "SELL":
             # For SELL orders after BUY executed, set higher price (+0.4%)
@@ -1250,3 +1280,41 @@ class GridTrader:
         
         # Return True to indicate success
         return True
+    
+    def _place_replacement_grid_order(self, level_index, last_price):
+        """
+        Place a replacement grid order when the profit margin check fails,
+        to ensure the grid density is maintained
+        
+        Args:
+            level_index: Index of the level in the grid
+            last_price: Price of the last filled order
+        """
+        # Get the current price to determine proper grid placement
+        current_price = self.binance_client.get_symbol_price(self.symbol)
+        
+        # Determine if we should add a buy or sell level based on position relative to current price
+        if last_price < current_price:
+            # If the filled order was below current price, add a buy order
+            side = "BUY"
+            # Calculate a price below current price based on grid spacing
+            price = current_price * (1 - self.grid_spacing)
+        else:
+            # If the filled order was above current price, add a sell order
+            side = "SELL"
+            # Calculate a price above current price based on grid spacing
+            price = current_price * (1 + self.grid_spacing)
+        
+        # Create a new grid level
+        new_level = {
+            "price": price,
+            "side": side,
+            "order_id": None,
+            "capital": self._calculate_dynamic_capital_for_level(price)
+        }
+        
+        # Update the grid level and place the order
+        self.grid[level_index] = new_level
+        self._place_grid_order(new_level)
+        
+        self.logger.info(f"Placed replacement grid order: {side} at price {price:.8f} to maintain grid density")
