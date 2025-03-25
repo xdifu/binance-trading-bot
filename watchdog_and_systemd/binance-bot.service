@@ -1,0 +1,17 @@
+[Unit]
+Description=Binance Grid Trading Bot Watchdog
+After=network.target
+
+[Service]
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/Binance
+ExecStart=/usr/bin/python3 /home/ubuntu/Binance/watchdog.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=binance-bot
+
+[Install]
+WantedBy=multi-user.target
