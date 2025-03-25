@@ -665,3 +665,32 @@ class BinanceClient:
         
         # If it's REST API response format, wrap it
         return {"result": response}
+    
+    def _adjust_sync_interval(self):
+        """Dynamically adjust time sync interval based on network conditions"""
+        try:
+            # Perform a quick RTT test to Binance
+            import socket
+            import time
+            
+            # Use TCP connection timing to measure network latency
+            host = "api.binance.com"
+            start = time.time()
+            s = socket.create_connection((host, 443), timeout=5)
+            s.close()
+            rtt_ms = (time.time() - start) * 1000
+            
+            # Adjust interval based on RTT
+            if rtt_ms > 300:  # High latency (Perth)
+                interval = 60 * 5  # Sync every 5 minutes
+                self.logger.info(f"High latency detected ({rtt_ms:.1f}ms), setting time sync interval to 5 minutes")
+            else:  # Low latency (Tokyo)
+                interval = 60 * 15  # Sync every 15 minutes
+                self.logger.info(f"Low latency detected ({rtt_ms:.1f}ms), setting time sync interval to 15 minutes")
+            
+            self.time_sync_interval = interval
+            return interval
+        except Exception as e:
+            # Default to 10 minutes if measurement fails
+            self.logger.warning(f"Failed to measure network latency: {e}, using default interval")
+            return 60 * 10  # Default 10 minute interval
