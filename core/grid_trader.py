@@ -1092,7 +1092,7 @@ class GridTrader:
             return 0
             
         current_time = int(time.time())
-        max_order_age = 24 * 3600  # 24 hours in seconds
+        max_order_age = 4 * 3600  # 4 hours in seconds (reduced from 24 hours)
         
         # Track orders to cancel
         orders_to_cancel = []
@@ -1104,16 +1104,23 @@ class GridTrader:
         for i, level in enumerate(self.grid):
             if level.get('order_id') and level.get('timestamp'):
                 # Check age
-                if current_time - level['timestamp'] > max_order_age:
-                    # Calculate distance from current price
-                    price_distance = abs(level['price'] - current_price) / current_price
-                    
-                    # If order is old and far from price, cancel it
-                    if price_distance > 0.03:  # More than 3% away from current price
-                        self.logger.info(f"Marking stale order ID {level['order_id']} for cancellation, " 
-                                        f"age: {(current_time - level['timestamp'])/3600:.1f} hours, "
-                                        f"distance from price: {price_distance*100:.1f}%")
-                        orders_to_cancel.append((i, level))
+                order_age = current_time - level['timestamp']
+                
+                # Dynamic price deviation threshold based on order age
+                # The longer an order exists, the smaller the price deviation needed to cancel
+                time_factor = min(1, order_age / max_order_age)
+                deviation_threshold = 0.015 + (0.015 * (1 - time_factor))  # Between 1.5% and 3%
+                
+                # Calculate distance from current price
+                price_distance = abs(level['price'] - current_price) / current_price
+                
+                # If order is old or far from price, cancel it
+                if (order_age > max_order_age) or (price_distance > deviation_threshold):
+                    self.logger.info(f"Marking stale order ID {level['order_id']} for cancellation, " 
+                                    f"age: {order_age/3600:.1f} hours, "
+                                    f"distance from price: {price_distance*100:.1f}%, "
+                                    f"threshold: {deviation_threshold*100:.1f}%")
+                    orders_to_cancel.append((i, level))
         
         # Cancel identified orders
         for i, level in orders_to_cancel:
