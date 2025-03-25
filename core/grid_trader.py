@@ -865,20 +865,23 @@ class GridTrader:
         
         # Set price with increased spread for new order (1.5% instead of 1%)
         if new_side == "SELL":
-            # For SELL orders after BUY executed, set higher price (+1.5%)
-            new_price = price * 1.015  # Increased from 1.01 to 1.015
+            # For SELL orders after BUY executed, set higher price (+0.4%)
+            # Reduced from 1.5% to 0.4% to increase trading frequency
+            new_price = price * 1.004
             formatted_price = self._adjust_price_precision(new_price)
         else:
-            # For BUY orders after SELL executed, set lower price (-1.5%)
-            new_price = price * 0.985  # Increased from 0.99 to 0.985
+            # For BUY orders after SELL executed, set lower price (-0.4%)
+            # Reduced from 1.5% to 0.4% to increase trading frequency
+            new_price = price * 0.996
             formatted_price = self._adjust_price_precision(new_price)
         
         # Calculate expected profit and trading fees
         expected_profit = abs(float(new_price) - float(price)) / float(price) * 100
-        trading_fee = 0.075 * 2  # 0.075% per trade, x2 for round-trip (BNB payment rate)
+        trading_fee = 0.06 * 2  # 0.06% per trade (updated from 0.075%), x2 for round-trip
         
-        # Only create reverse order if profit exceeds fees by a safe margin
-        if expected_profit <= trading_fee * 2:  # Profit should be at least 2x the fees
+        # Only create reverse order if profit exceeds fees by a reasonable margin
+        # Reduced from 2x to 1.5x to increase order placement frequency
+        if expected_profit <= trading_fee * 1.5:
             self.logger.info(f"Skipping reverse order - insufficient profit margin: {expected_profit:.4f}% vs fees: {trading_fee:.4f}%")
             return False
         
