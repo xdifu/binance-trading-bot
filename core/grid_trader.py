@@ -1025,6 +1025,13 @@ class GridTrader:
                     self._release_funds(asset, required)  # Make sure to release funds on retry failure
                     self.logger.error(f"Fallback order placement also failed: {retry_error}")
             return False
+        
+        # Notify risk manager to update OCO orders after SELL order fills (creates base asset)
+        if side == "SELL" and self.telegram_bot and hasattr(self.telegram_bot, 'risk_manager') and self.telegram_bot.risk_manager:
+            risk_manager = self.telegram_bot.risk_manager
+            if risk_manager.is_active:
+                self.logger.info(f"SELL order filled, triggering OCO order update")
+                risk_manager._check_for_missing_oco_orders()
 
     # OPTIMIZED: New helper method for capital calculation
     def _calculate_dynamic_capital_for_level(self, price):
