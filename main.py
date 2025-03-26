@@ -1,5 +1,6 @@
 import logging
 import time
+import threading
 from threading import Thread, RLock
 from datetime import datetime
 import sys
@@ -166,6 +167,66 @@ class GridTradingBot:
                         self.risk_manager.oco_order_id = None
         except Exception as e:
             logger.error(f"Failed to process OCO order update: {e}")
+
+    def _handle_account_position_update(self, message):
+        """
+        Handle account position updates from WebSocket stream.
+        Detects when balances exceed thresholds and triggers grid/OCO order checks.
+        
+        Args:
+            message: Account position update message from WebSocket
+        """
+        try:
+            # Extract trading pair assets
+            base_asset = self.grid_trader.symbol.replace('USDT', '')
+            quote_asset = 'USDT'
+            
+            # Extract balances from message (handling both object and dict formats)
+            balances = []
+            if hasattr(message, 'B'):
+                balances = message.B
+            elif isinstance(message, dict) and 'B' in message:
+                balances = message['B']
+            
+            # Track if relevant assets exceed threshold
+            check_grid = False
+            check_oco = False
+            
+            # Process each balance update
+            for balance_item in balances:
+                # Extract asset and free amount (with object/dict format handling)
+                asset = getattr(balance_item, 'a', None) if hasattr(balance_item, 'a') else balance_item.get('a')
+                free_amount = 0
+                if hasattr(balance_item, 'f'):
+                    free_amount = float(balance_item.f)
+                elif isinstance(balance_item, dict) and 'f' in balance_item:
+                    free_amount = float(balance_item['f'])
+                
+                # Check USDT for grid orders
+                if asset == quote_asset and free_amount >= config.CAPITAL_PER_LEVEL:
+                    self.logger.info(f"Balance update: Detected {free_amount} {quote_asset}, checking for unfilled grid slots")
+                    check_grid = True
+                
+                # Check base asset for OCO orders
+                elif asset == base_asset and free_amount > 0:
+                    self.logger.info(f"Balance update: Detected {free_amount} {base_asset}, checking for missing OCO orders")
+                    check_oco = True
+            
+            # Use separate threads to avoid blocking WebSocket processing
+            if check_grid and self.grid_trader and self.grid_trader.is_running:
+                threading.Thread(
+                    target=self.grid_trader._check_for_unfilled_grid_slots,
+                    daemon=True
+                ).start()
+                
+            if check_oco and self.risk_manager and self.risk_manager.is_active:
+                threading.Thread(
+                    target=self.risk_manager._check_for_missing_oco_orders,
+                    daemon=True
+                ).start()
+                
+        except Exception as e:
+            self.logger.error(f"Error processing account position update: {e}")
 
     def _websocket_error_handler(self, error):
         """Handle WebSocket errors"""
