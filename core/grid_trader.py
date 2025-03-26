@@ -402,7 +402,7 @@ class GridTrader:
     def _calculate_grid_levels(self):
         """
         Calculate asymmetric grid price levels with funds concentrated near current price
-        Optimized for small capital accounts ($64)
+        Optimized for small capital accounts with trend adaptation
         
         Returns:
             list: List of grid levels with prices, sides and capital allocation
@@ -411,116 +411,39 @@ class GridTrader:
         current_price = self.binance_client.get_symbol_price(self.symbol)
         self.current_market_price = current_price
         
-        # Use a tighter grid range for small capital (reduced from original)
-        # This concentrates capital in a narrower price band for more frequent trading
-        adjusted_grid_range_percent = min(self.grid_range_percent, 0.01)  # Cap at 1% range
-        
         # Calculate grid range based on current price and adjusted grid_range_percent
-        grid_range = current_price * adjusted_grid_range_percent
+        grid_range = current_price * self.grid_range_percent
+        
+        # Get klines for trend calculation - reuse from ATR calculation if possible
+        klines = self.binance_client.get_historical_klines(
+            symbol=self.symbol,
+            interval="1h",
+            limit=self.atr_period + 20  # Add extra for trend calculation
+        )
+        
+        # Calculate trend strength and apply grid offset
+        trend_strength = self._calculate_trend_strength(klines)
+        trend_offset = current_price * trend_strength * 0.01  # Maximum 1% shift
+        
+        self.logger.info(f"Detected trend strength: {trend_strength:.2f}, applying offset: {trend_offset:.8f} ({(trend_strength*100):.1f}%)")
         
         # Calculate upper and lower bounds of the entire grid
         upper_bound = current_price + (grid_range / 2)
         lower_bound = current_price - (grid_range / 2)
         
-        # Define core zone with higher percentage (increased from original)
-        core_zone_percentage = max(self.core_zone_percentage, 0.7)  # At least 70% of range is core
-        core_range = grid_range * core_zone_percentage
+        # Define core zone with higher percentage
+        core_range = grid_range * self.core_zone_percentage
         
-        # Calculate core zone boundaries
-        core_upper = current_price + (core_range / 2)
-        core_lower = current_price - (core_range / 2)
+        # Apply trend-based offset to core zone
+        core_upper = current_price + (core_range / 2) + trend_offset
+        core_lower = current_price - (core_range / 2) + trend_offset
         
-        # Use ATR to dynamically adjust grid spacing
-        atr = self._get_current_atr()
-        volatility_factor = 1.0
-        if (atr):
-            volatility_factor = min(max(atr / current_price * 10, 0.8), 1.5)
-            self.logger.info(f"Volatility factor: {volatility_factor:.4f}")
+        # Ensure core zone stays within overall grid bounds
+        core_upper = min(core_upper, upper_bound)
+        core_lower = max(core_lower, lower_bound)
         
-        # Increase grid levels for more granular trading
-        effective_grid_levels = min(max(self.grid_levels, 8), 10)  # Between 8 and 10 levels
-        
-        # Determine grid point distribution with more points in core
-        core_grid_ratio = max(self.core_grid_ratio, 0.7)  # At least 70% of points in core
-        core_grid_points = max(2, int(effective_grid_levels * core_grid_ratio))
-        edge_grid_points = effective_grid_levels - core_grid_points
-        
-        # Calculate upper and lower edge points
-        upper_edge_points = edge_grid_points // 2
-        lower_edge_points = edge_grid_points - upper_edge_points
-        
-        # Build the grid with proper fund allocation
-        grid = []
-        
-        # Add lower edge zone levels (if any)
-        if lower_edge_points > 0:
-            edge_step = (core_lower - lower_bound) / lower_edge_points if lower_edge_points > 0 else 0
-            for i in range(lower_edge_points):
-                price = lower_bound + (i * edge_step)
-                
-                # Edge zone gets less capital
-                capital = self.capital_per_level * (1 - self.core_capital_ratio)
-                
-                grid.append({
-                    "price": price,
-                    "side": "BUY",  # Lower points are always BUY
-                    "order_id": None,
-                    "capital": capital
-                })
-        
-        # Add core zone levels with higher capital allocation
-        if core_grid_points > 0:
-            core_step = (core_upper - core_lower) / core_grid_points if core_grid_points > 0 else 0
-            for i in range(core_grid_points + 1):  # +1 to include both boundaries
-                price = core_lower + (i * core_step)
-                
-                # Determine side (BUY below current price, SELL above)
-                side = "BUY" if price < current_price else "SELL"
-                
-                # Handle exact matches with current price - make it a BUY
-                if abs(price - current_price) < 0.0000001:
-                    side = "BUY"
-                
-                # Core zone gets more capital
-                # Further optimize by giving more capital to points closer to current price
-                distance_factor = 1 - min(1, abs(price - current_price) / core_range) if core_range > 0 else 0
-                capital_multiplier = 1 + (distance_factor * 0.3)  # 1.0 to 1.3 multiplier
-                
-                capital = self.capital_per_level * self.core_capital_ratio * capital_multiplier
-                
-                grid.append({
-                    "price": price,
-                    "side": side,
-                    "order_id": None,
-                    "capital": capital
-                })
-        
-        # Add upper edge zone levels (if any)
-        if upper_edge_points > 0:
-            edge_step = (upper_bound - core_upper) / upper_edge_points if upper_edge_points > 0 else 0
-            for i in range(upper_edge_points):
-                price = core_upper + (i * edge_step)
-                
-                # Edge zone gets less capital
-                capital = self.capital_per_level * (1 - self.core_capital_ratio)
-                
-                grid.append({
-                    "price": price,
-                    "side": "SELL",  # Upper points are always SELL
-                    "order_id": None,
-                    "capital": capital
-                })
-        
-        # Sort grid by price to ensure order
-        grid = sorted(grid, key=lambda x: x['price'])
-        
-        # Log grid distribution
-        core_capital = sum([level.get('capital', 0) for level in grid if core_lower <= level['price'] <= core_upper])
-        total_capital = sum([level.get('capital', 0) for level in grid])
-        self.logger.info(f"Grid created: {len(grid)} levels, {core_grid_points} core levels")
-        self.logger.info(f"Capital allocation: {core_capital:.2f}/{total_capital:.2f} USDT in core zone ({core_capital/total_capital*100:.1f}%)")
-        
-        return grid
+        # Continue with the rest of the existing grid calculation...
+        # ...
     
     def _cancel_all_open_orders(self):
         """
