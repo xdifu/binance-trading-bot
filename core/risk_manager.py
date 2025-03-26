@@ -28,7 +28,7 @@ class RiskManager:
         capital_adjustment_factor = 0.8  # 20% tighter stops for small accounts
 
         # Adjust base values but ensure minimum safety distance
-        self.trailing_stop_loss_percent = max(0.005, base_stop_loss * capital_adjustment_factor)  # At least 0.5% stop loss
+        self.trailing_stop_loss_percent = max(0.015, base_stop_loss * capital_adjustment_factor)  # At least 1.5% stop loss
         self.trailing_take_profit_percent = max(0.008, base_take_profit * capital_adjustment_factor)  # At least 0.8% take profit
 
         self.logger.info(f"Using optimized risk parameters for small capital: Stop loss at {self.trailing_stop_loss_percent*100:.2f}%, Take profit at {self.trailing_take_profit_percent*100:.2f}%")
@@ -409,7 +409,7 @@ class RiskManager:
                                 base_take_profit = config.TRAILING_TAKE_PROFIT_PERCENT / 100
                                 capital_adjustment_factor = 0.8
                                 
-                                self.trailing_stop_loss_percent = max(0.005, base_stop_loss * capital_adjustment_factor)
+                                self.trailing_stop_loss_percent = max(0.015, base_stop_loss * capital_adjustment_factor)
                                 self.trailing_take_profit_percent = max(0.008, base_take_profit * capital_adjustment_factor)
                                 
                                 self.volatility_adjustment_active = False

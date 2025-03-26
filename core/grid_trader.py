@@ -23,7 +23,7 @@ class GridTrader:
         
         # Apply optimized settings for small capital accounts ($64)
         # Increase grid levels for more frequent trading opportunities
-        self.grid_levels = max(config.GRID_LEVELS, 8)  # At least 8 grid levels
+        self.grid_levels = max(min(config.GRID_LEVELS, 5), 4)  # Enforce range of 4-5 grid levels for optimal capital distribution
         
         # Reduce grid spacing for tighter price capture
         self.grid_spacing = min(config.GRID_SPACING / 100, 0.003)  # Max 0.3% spacing
@@ -32,7 +32,7 @@ class GridTrader:
         self.capital_per_level = config.CAPITAL_PER_LEVEL
         
         # Reduce grid range to concentrate capital in smaller price movements
-        self.grid_range_percent = min(config.GRID_RANGE_PERCENT / 100, 0.01)  # Max 1% range
+        self.grid_range_percent = min(config.GRID_RANGE_PERCENT / 100, 0.03)  # Max 3% range
         
         # Keep original timing parameters
         self.recalculation_period = config.RECALCULATION_PERIOD
@@ -423,7 +423,7 @@ class GridTrader:
         
         # Calculate trend strength and apply grid offset
         trend_strength = self._calculate_trend_strength(klines)
-        trend_offset = current_price * trend_strength * 0.01  # Maximum 1% shift
+        trend_offset = current_price * trend_strength * 0.05  # Maximum 5% shift
         
         self.logger.info(f"Detected trend strength: {trend_strength:.2f}, applying offset: {trend_offset:.8f} ({(trend_strength*100):.1f}%)")
         
@@ -1110,7 +1110,7 @@ class GridTrader:
             return 0
             
         current_time = int(time.time())
-        max_order_age = 4 * 3600  # 4 hours in seconds (reduced from 24 hours)
+        max_order_age = 2 * 3600  # 2 hours in seconds
         
         # Track orders to cancel
         orders_to_cancel = []
@@ -1127,7 +1127,7 @@ class GridTrader:
                 # Dynamic price deviation threshold based on order age
                 # The longer an order exists, the smaller the price deviation needed to cancel
                 time_factor = min(1, order_age / max_order_age)
-                deviation_threshold = 0.015 + (0.015 * (1 - time_factor))  # Between 1.5% and 3%
+                deviation_threshold = 0.01 + (0.01 * (1 - time_factor))  
                 
                 # Calculate distance from current price
                 price_distance = abs(level['price'] - current_price) / current_price
