@@ -442,8 +442,108 @@ class GridTrader:
         core_upper = min(core_upper, upper_bound)
         core_lower = max(core_lower, lower_bound)
         
-        # Continue with the rest of the existing grid calculation...
-        # ...
+        # Define number of grid levels in each zone
+        core_levels = int(self.grid_levels * self.core_grid_ratio)
+        edge_levels = self.grid_levels - core_levels
+        
+        # Ensure minimum number of levels in each zone
+        if core_levels < 2:
+            core_levels = 2
+        if edge_levels < 1:
+            edge_levels = 1
+            
+        grid_levels = []
+        
+        # Calculate price step within core zone
+        if core_levels > 1:
+            core_step = (core_upper - core_lower) / (core_levels - 1) if core_levels > 1 else 0
+            
+            # Create grid levels in core zone
+            for i in range(core_levels):
+                level_price = core_lower + (i * core_step)
+                
+                # Determine buy/sell based on position relative to current price
+                side = "SELL" if level_price >= current_price else "BUY"
+                
+                # Calculate capital for this level
+                capital = self._calculate_dynamic_capital_for_level(level_price)
+                
+                grid_levels.append({
+                    "price": level_price,
+                    "side": side,
+                    "order_id": None,
+                    "capital": capital,
+                    "timestamp": None
+                })
+        
+        # Calculate upper edge levels if any
+        if edge_levels > 0:
+            # Split remaining levels between upper and lower edges
+            upper_edge_levels = edge_levels // 2
+            lower_edge_levels = edge_levels - upper_edge_levels
+            
+            if upper_edge_levels > 0:
+                upper_edge_step = (upper_bound - core_upper) / upper_edge_levels if upper_edge_levels > 0 else 0
+                
+                # Create upper edge levels
+                for i in range(upper_edge_levels):
+                    level_price = core_upper + ((i + 1) * upper_edge_step)  # Start from beyond core zone
+                    
+                    # Upper levels are always SELL
+                    side = "SELL"
+                    
+                    # Calculate edge zone capital
+                    capital = self._calculate_dynamic_capital_for_level(level_price)
+                    
+                    grid_levels.append({
+                        "price": level_price,
+                        "side": side,
+                        "order_id": None,
+                        "capital": capital,
+                        "timestamp": None
+                    })
+            
+            # Calculate lower edge levels
+            if lower_edge_levels > 0:
+                lower_edge_step = (core_lower - lower_bound) / lower_edge_levels if lower_edge_levels > 0 else 0
+                
+                # Create lower edge levels
+                for i in range(lower_edge_levels):
+                    level_price = core_lower - ((i + 1) * lower_edge_step)  # Start from beyond core zone
+                    
+                    # Lower levels are always BUY
+                    side = "BUY"
+                    
+                    # Calculate edge zone capital
+                    capital = self._calculate_dynamic_capital_for_level(level_price)
+                    
+                    grid_levels.append({
+                        "price": level_price,
+                        "side": side,
+                        "order_id": None,
+                        "capital": capital,
+                        "timestamp": None
+                    })
+        
+        # Sort grid levels by price
+        grid_levels.sort(key=lambda x: x["price"])
+        
+        # Validate grid has at least one BUY and one SELL level
+        has_buy = any(level["side"] == "BUY" for level in grid_levels)
+        has_sell = any(level["side"] == "SELL" for level in grid_levels)
+        
+        if not has_buy or not has_sell:
+            self.logger.warning(f"Grid calculation produced imbalanced grid: buy={has_buy}, sell={has_sell}")
+            
+            # Force at least one level of each if current grid is invalid
+            if not has_buy and len(grid_levels) > 1:
+                grid_levels[0]["side"] = "BUY"
+            if not has_sell and len(grid_levels) > 1:
+                grid_levels[-1]["side"] = "SELL"
+        
+        self.logger.info(f"Calculated {len(grid_levels)} grid levels: {core_levels} core, {edge_levels} edge")
+        
+        return grid_levels
     
     def _cancel_all_open_orders(self):
         """
