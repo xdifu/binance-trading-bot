@@ -1032,3 +1032,31 @@ class RiskManager:
         self.quantity_precision = self._get_quantity_precision()
         
         self.logger.info(f"Risk manager symbol updated from {old_symbol} to {new_symbol}")
+
+    def _check_for_missing_oco_orders(self):
+        """
+        Check if OCO orders should be placed but are missing,
+        and attempt to place them if funds are now available.
+        
+        This ensures continuous risk protection as soon as funds become available,
+        rather than waiting for the next scheduled check.
+        
+        Returns:
+            bool: True if OCO orders were placed, False otherwise
+        """
+        if not self.is_active:
+            return False
+            
+        # Skip if we already have active OCO orders
+        if self.oco_order_id:
+            return False
+            
+        # Check if we have sufficient funds now
+        asset = self.symbol.replace('USDT', '')
+        balance = self.binance_client.check_balance(asset)
+        
+        if balance > 0:
+            self.logger.info(f"Detected {balance} {asset} available for risk management, placing OCO orders")
+            return self._place_oco_orders()
+            
+        return False
