@@ -26,7 +26,7 @@ GRID_LEVELS = int(os.getenv("GRID_LEVELS", "8"))  # 网格数量，增加数值�
 GRID_SPACING = float(os.getenv("GRID_SPACING", "0.15"))  # 网格间距(%)，增大可捕获更大波动，减小可提高交易频次
 CAPITAL_PER_LEVEL = float(os.getenv("CAPITAL_PER_LEVEL", "6"))  # 每个网格的资金(USDT)，增加可提高利润但需要更多总资金
 GRID_RANGE_PERCENT = float(os.getenv("GRID_RANGE_PERCENT", "1.0"))  # 总网格价格范围(%)，增大可覆盖更大波动，减小则集中在小范围
-RECALCULATION_PERIOD = int(os.getenv("RECALCULATION_PERIOD", "2"))  # 网格重新计算周期(天)，减小可更频繁更新网格位置
+RECALCULATION_PERIOD = int(os.getenv("RECALCULATION_PERIOD", "1"))  # 网格重新计算周期(天)，减小可更频繁更新网格位置
 ATR_PERIOD = int(os.getenv("ATR_PERIOD", "14"))  # ATR指标周期，增大可减少敏感度，减小可对短期波动更敏感
 
 # 非对称网格参数（核心区域优化）
@@ -43,7 +43,7 @@ BUY_SELL_SPREAD = float(os.getenv("BUY_SELL_SPREAD", "0.25"))  # 买卖差价百
 # 风险管理设置
 TRAILING_STOP_LOSS_PERCENT = float(os.getenv("TRAILING_STOP_LOSS_PERCENT", "0.5"))  # 追踪止损百分比，减小可更早触发止损保护资金
 TRAILING_TAKE_PROFIT_PERCENT = float(os.getenv("TRAILING_TAKE_PROFIT_PERCENT", "0.8"))  # 追踪止盈百分比，减小可更早锁定利润
-RISK_UPDATE_THRESHOLD_PERCENT = float(os.getenv("RISK_UPDATE_THRESHOLD_PERCENT", "0.003"))  # 风险阈值更新百分比，减小可更灵敏地调整止损位
+RISK_UPDATE_THRESHOLD_PERCENT = float(os.getenv("RISK_UPDATE_THRESHOLD_PERCENT", "0.0025"))  # 风险阈值更新百分比，减小可更灵敏地调整止损位
 RISK_UPDATE_INTERVAL_MINUTES = float(os.getenv("RISK_UPDATE_INTERVAL_MINUTES", "5"))  # 风险更新间隔(分钟)，减小可更频繁更新止损止盈
 
 # 高级交易设置
