@@ -5,16 +5,18 @@ from datetime import datetime
 from utils.format_utils import format_price, format_quantity, get_precision_from_filters
 
 class RiskManager:
-    def __init__(self, binance_client, telegram_bot=None):
+    def __init__(self, binance_client, telegram_bot=None, grid_trader=None):
         """
         Initialize risk management system
         
         Args:
             binance_client: BinanceClient instance for API operations
             telegram_bot: Optional TelegramBot instance for notifications
+            grid_trader: Optional GridTrader instance for fund coordination
         """
         self.binance_client = binance_client
         self.telegram_bot = telegram_bot
+        self.grid_trader = grid_trader  # Store reference to grid trader for fund coordination
         self.symbol = config.SYMBOL
         
         # Initialize logger first to enable logging
@@ -478,7 +480,24 @@ class RiskManager:
                 self.logger.info(f"No available {asset} for risk management")
                 return
             
-            # Set quantity (all available assets) and format
+            # Reserve portion of assets for grid trading
+            if self.grid_trader and hasattr(self.grid_trader, 'locked_balances'):
+                # Check if asset is locked by grid trader
+                locked_by_grid = self.grid_trader.locked_balances.get(asset, 0)
+                
+                # Also reserve a portion for future grid orders
+                reserve_for_grid = 0.3  # Reserve 30% of available assets for grid trading
+                reserved_amount = max(locked_by_grid, asset_balance * reserve_for_grid)
+                
+                if asset_balance > reserved_amount:
+                    original_balance = asset_balance
+                    asset_balance -= reserved_amount
+                    self.logger.info(f"Reserved {reserved_amount} {asset} for grid trading. Using {asset_balance}/{original_balance} for OCO orders")
+                else:
+                    self.logger.info(f"Insufficient {asset} balance for OCO orders after grid reservation")
+                    return False
+
+            # Set quantity with remaining available assets and format
             quantity = self._adjust_quantity_precision(asset_balance)
             
             # Get symbol info for price filter constraints

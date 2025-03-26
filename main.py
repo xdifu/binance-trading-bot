@@ -78,7 +78,8 @@ class GridTradingBot:
         # Initialize risk management
         self.risk_manager = RiskManager(
             binance_client=self.binance_client,
-            telegram_bot=self.telegram_bot
+            telegram_bot=self.telegram_bot,
+            grid_trader=self.grid_trader  # Add reference to grid_trader
         )
         logger.info("Risk management module initialized successfully")
         
