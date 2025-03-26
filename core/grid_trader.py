@@ -712,7 +712,7 @@ class GridTrader:
         Check if grid needs recalculation based on time or volatility change
         
         Returns:
-            bool: True if grid was recalculated, False otherwise
+            bool: True if grid was recalculated or adjusted, False otherwise
         """
         # Skip if not running
         if not self.is_running:
@@ -730,15 +730,21 @@ class GridTrader:
         
         # Check for volatility-based recalculation
         volatility_based_recalc = False
+        partial_adjustment = False
         current_atr = self._get_current_atr()
         
         if current_atr and self.last_atr_value:
             atr_change = abs(current_atr - self.last_atr_value) / self.last_atr_value
-            if atr_change > 0.2:  # 20% change in volatility
-                self.logger.info(f"Volatility-based grid recalculation triggered: ATR changed by {atr_change*100:.2f}%")
+            
+            # Multi-level volatility response with different actions
+            if atr_change > 0.2:  # Major volatility change (>20%)
+                self.logger.info(f"Major volatility change detected: ATR changed by {atr_change*100:.2f}%, performing full grid recalculation")
                 volatility_based_recalc = True
+            elif atr_change > 0.1:  # Moderate volatility change (10-20%)
+                self.logger.info(f"Moderate volatility change detected: ATR changed by {atr_change*100:.2f}%, performing partial grid adjustment")
+                partial_adjustment = True
         
-        # If either condition is met, recalculate grid
+        # Handle full grid recalculation
         if time_based_recalc or volatility_based_recalc:
             try:
                 # Cancel all orders
@@ -751,7 +757,7 @@ class GridTrader:
                 self.last_recalculation = now
                 
                 message = "Grid trading levels recalculated due to "
-                message += "scheduled recalculation" if time_based_recalc else "volatility change"
+                message += "scheduled recalculation" if time_based_recalc else "significant volatility change"
                 
                 self.logger.info(message)
                 if self.telegram_bot:
@@ -760,6 +766,35 @@ class GridTrader:
                 return True
             except Exception as e:
                 self.logger.error(f"Failed to recalculate grid: {e}")
+        
+        # Handle partial grid adjustment (without full cancellation)
+        elif partial_adjustment:
+            try:
+                # Get current price
+                current_price = self.binance_client.get_symbol_price(self.symbol)
+                
+                # Adjust grid spacing based on new volatility
+                old_spacing = self.grid_spacing
+                volatility_ratio = current_atr / self.last_atr_value if self.last_atr_value else 1
+                new_spacing = self.grid_spacing * volatility_ratio
+                
+                # Cap spacing adjustment to reasonable bounds (±30%)
+                new_spacing = max(min(new_spacing, self.grid_spacing * 1.3), self.grid_spacing * 0.7)
+                
+                self.grid_spacing = new_spacing
+                self.last_atr_value = current_atr  # Update ATR reference value
+                
+                # Only adjust stale orders to preserve good positions
+                stale_orders_count = self._check_for_stale_orders()
+                
+                message = f"Partial grid adjustment: spacing changed from {old_spacing*100:.3f}% to {new_spacing*100:.3f}%, {stale_orders_count} stale orders rebalanced"
+                self.logger.info(message)
+                if self.telegram_bot:
+                    self.telegram_bot.send_message(message)
+                
+                return stale_orders_count > 0
+            except Exception as e:
+                self.logger.error(f"Failed to perform partial grid adjustment: {e}")
         
         # Additionally check for stale orders
         stale_orders_count = self._check_for_stale_orders()
