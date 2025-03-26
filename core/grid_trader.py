@@ -912,44 +912,17 @@ class GridTrader:
         if expected_profit <= trading_fee * config.PROFIT_MARGIN_MULTIPLIER:
             self.logger.info(f"Skipping reverse order - insufficient profit margin: {expected_profit:.4f}% vs required: {trading_fee * config.PROFIT_MARGIN_MULTIPLIER:.4f}%")
             
-            # IMPORTANT: Place a new grid order to maintain grid density instead of skipping completely
+            # IMPORTANT: Place a replacement grid order to maintain grid density
             self._place_replacement_grid_order(level_index, float(price))
             return False
         
-        # The rest of the method should remain unchanged
-        # Create opposite order
-        new_side = "SELL" if side == "BUY" else "BUY"
-        
-        # Adjust quantity precision
-        formatted_quantity = self._adjust_quantity_precision(quantity)
-        
-        # Set price with increased spread for new order (1.5% instead of 1%)
-        if new_side == "SELL":
-            # For SELL orders after BUY executed, set higher price (+0.4%)
-            # Reduced from 1.5% to 0.4% to increase trading frequency
-            new_price = price * 1.004
-            formatted_price = self._adjust_price_precision(new_price)
-        else:
-            # For BUY orders after SELL executed, set lower price (-0.4%)
-            # Reduced from 1.5% to 0.4% to increase trading frequency
-            new_price = price * 0.996
-            formatted_price = self._adjust_price_precision(new_price)
-        
-        # Calculate expected profit and trading fees
-        expected_profit = abs(float(new_price) - float(price)) / float(price) * 100
-        trading_fee = 0.06 * 2  # 0.06% per trade (updated from 0.075%), x2 for round-trip
-        
-        # Only create reverse order if profit exceeds fees by a reasonable margin
-        # Reduced from 2x to 1.5x to increase order placement frequency
-        if expected_profit <= trading_fee * 1.5:
-            self.logger.info(f"Skipping reverse order - insufficient profit margin: {expected_profit:.4f}% vs fees: {trading_fee:.4f}%")
-            return False
-        
-        # Use config value for minimum order check instead of hardcoded value
-        min_order_value = config.CAPITAL_PER_LEVEL  # Use grid capital setting as minimum order threshold
+        # Use config value for minimum order check
+        min_order_value = config.MIN_NOTIONAL_VALUE  # Use configured minimum notional value
         order_value = float(formatted_quantity) * float(formatted_price)
         if order_value < min_order_value:
             self.logger.info(f"Skipping small order - value too low: {order_value:.2f} USDT < {min_order_value} USDT")
+            # Place replacement grid order to maintain grid density
+            self._place_replacement_grid_order(level_index, float(price))
             return False
         
         # Double-check price formatting
