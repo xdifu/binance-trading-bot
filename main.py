@@ -326,6 +326,7 @@ class GridTradingBot:
         """Grid maintenance thread with improved timing precision and unfilled slot checking"""
         last_grid_check = datetime.now()
         last_unfilled_check = datetime.now()
+        last_oco_check = datetime.now()  # Add new timestamp for OCO checks
         
         while True:
             try:
@@ -345,6 +346,12 @@ class GridTradingBot:
                 if (now - last_unfilled_check).total_seconds() > 15 * 60:  # 15 minutes
                     self.grid_trader._check_for_unfilled_grid_slots()
                     last_unfilled_check = now
+                
+                # Check for missing OCO orders every 5 minutes
+                if (now - last_oco_check).total_seconds() > 5 * 60:  # 5 minutes
+                    if self.risk_manager and self.risk_manager.is_active:
+                        self.risk_manager._check_for_missing_oco_orders()
+                    last_oco_check = now
                 
                 # Short sleep to allow for timely shutdown
                 time.sleep(MAINTENANCE_THREAD_SLEEP)
