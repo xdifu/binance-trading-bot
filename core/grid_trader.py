@@ -1291,3 +1291,59 @@ class GridTrader:
         self._place_grid_order(new_level)
         
         self.logger.info(f"Placed replacement grid order: {side} at price {price:.8f} to maintain grid density")
+    
+    def _check_for_unfilled_grid_slots(self):
+        """
+        Check for grid slots without orders and attempt to fill them if funds are available.
+        This allows dynamically utilizing funds as they become available without full grid recalculation.
+        
+        Returns:
+            int: Number of new orders placed
+        """
+        if not self.is_running or self.simulation_mode:
+            return 0
+            
+        # Track new orders placed
+        orders_placed = 0
+        
+        # Get current balances
+        base_asset = self.symbol.replace('USDT', '')
+        quote_asset = 'USDT'
+        base_balance = self.binance_client.check_balance(base_asset)
+        quote_balance = self.binance_client.check_balance(quote_asset)
+        
+        # Account for locked balances
+        with self.balance_lock:
+            available_base = base_balance - self.locked_balances.get(base_asset, 0)
+            available_quote = quote_balance - self.locked_balances.get(quote_asset, 0)
+        
+        # Go through grid and find slots without orders
+        for i, level in enumerate(self.grid):
+            if not level.get('order_id'):
+                price = level['price']
+                side = level['side']
+                
+                # Check if we have funds for this order
+                if side == 'BUY':
+                    capital_needed = level.get('capital', self.capital_per_level)
+                    if available_quote >= capital_needed:
+                        # We have funds, try to place the order
+                        if self._place_grid_order(level):
+                            orders_placed += 1
+                            available_quote -= capital_needed
+                            self.logger.info(f"Filled previously unfunded BUY grid slot at price {price} with {capital_needed} USDT")
+                else:  # SELL
+                    quantity_needed = level.get('capital', self.capital_per_level) / price
+                    if available_base >= quantity_needed:
+                        # We have funds, try to place the order
+                        if self._place_grid_order(level):
+                            orders_placed += 1
+                            available_base -= quantity_needed
+                            self.logger.info(f"Filled previously unfunded SELL grid slot at price {price} with {quantity_needed} {base_asset}")
+        
+        if orders_placed > 0:
+            self.logger.info(f"Filled {orders_placed} previously unfunded grid slots with newly available funds")
+            if self.telegram_bot:
+                self.telegram_bot.send_message(f"✅ Placed {orders_placed} new grid orders using newly available funds")
+                
+        return orders_placed

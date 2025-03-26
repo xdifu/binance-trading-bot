@@ -323,8 +323,9 @@ class GridTradingBot:
                     time.sleep(60)  # Wait longer before next attempt
     
     def _grid_maintenance_thread(self):
-        """Grid maintenance thread with improved timing precision"""
-        last_check = datetime.now()
+        """Grid maintenance thread with improved timing precision and unfilled slot checking"""
+        last_grid_check = datetime.now()
+        last_unfilled_check = datetime.now()
         
         while True:
             try:
@@ -336,9 +337,14 @@ class GridTradingBot:
                 now = datetime.now()
                 
                 # Check grid recalculation using configuration constant
-                if (now - last_check).total_seconds() > GRID_RECALCULATION_INTERVAL:
+                if (now - last_grid_check).total_seconds() > GRID_RECALCULATION_INTERVAL:
                     self.grid_trader.check_grid_recalculation()
-                    last_check = now
+                    last_grid_check = now
+                
+                # Check for unfilled grid slots every 15 minutes
+                if (now - last_unfilled_check).total_seconds() > 15 * 60:  # 15 minutes
+                    self.grid_trader._check_for_unfilled_grid_slots()
+                    last_unfilled_check = now
                 
                 # Short sleep to allow for timely shutdown
                 time.sleep(MAINTENANCE_THREAD_SLEEP)
