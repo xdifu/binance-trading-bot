@@ -1354,3 +1354,64 @@ class GridTrader:
                 self.telegram_bot.send_message(f"✅ Placed {orders_placed} new grid orders using newly available funds")
                 
         return orders_placed
+    
+    def _calculate_trend_strength(self, klines, lookback=20):
+        """
+        Calculate market trend strength on a scale from -1 to 1
+        -1: Strong downtrend
+         0: No trend
+        +1: Strong uptrend
+        
+        Args:
+            klines: List of kline/candlestick data
+            lookback: Number of periods to consider
+            
+        Returns:
+            float: Trend strength value between -1 and 1
+        """
+        try:
+            # Ensure we have enough data
+            if not klines or len(klines) < lookback + 1:
+                return 0
+            
+            # Extract close prices
+            closes = []
+            for k in klines[-lookback-1:]:
+                # Handle both array format and dict format
+                if isinstance(k, list):
+                    closes.append(float(k[4]))  # Close price is at index 4
+                elif isinstance(k, dict) and 'close' in k:
+                    closes.append(float(k['close']))
+                    
+            if not closes or len(closes) < lookback + 1:
+                return 0
+                
+            # Calculate price change momentum and direction
+            changes = []
+            for i in range(1, len(closes)):
+                change_pct = (closes[i] - closes[i-1]) / closes[i-1]
+                changes.append(change_pct)
+                
+            # Get recent trend direction
+            short_trend = sum(changes[-5:]) if len(changes) >= 5 else 0
+            
+            # Get overall trend momentum considering more weight on recent changes
+            weights = [0.5 + (i/lookback/2) for i in range(lookback)]  # Increasing weights
+            if len(changes) < len(weights):
+                weights = weights[-len(changes):]
+                
+            weighted_changes = [changes[i] * weights[i] for i in range(len(changes))]
+            overall_trend = sum(weighted_changes)
+            
+            # Combine short and overall trend with more weight on recent
+            combined_trend = (short_trend * 0.7) + (overall_trend * 0.3)
+            
+            # Normalize between -1 and 1 with proper scaling
+            normalized_trend = max(min(combined_trend * 50, 1.0), -1.0)
+            
+            self.logger.debug(f"Calculated trend strength: {normalized_trend:.2f}")
+            return normalized_trend
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating trend strength: {e}")
+            return 0  # Default to no trend on error
