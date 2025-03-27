@@ -211,6 +211,7 @@ class HFTMarketMaker:
             self.loop.call_soon_threadsafe(self._monitoring_task)
             # Schedule our main coroutine
             future = asyncio.run_coroutine_threadsafe(self._strategy_coroutine(), self.loop)
+            # Add callback to handle exceptions
             future.add_done_callback(self._handle_coroutine_exception)
         
         self.is_active = True
@@ -349,9 +350,10 @@ class HFTMarketMaker:
             
             # Schedule reconnection counter reset after stable period
             if self.loop and self.is_active:
-                self.loop.call_soon_threadsafe(
-                    lambda: asyncio.ensure_future(self._schedule_reconnect_counter_reset())
-                )
+                def schedule_coro():
+                    asyncio.ensure_future(self._schedule_reconnect_counter_reset(), loop=self.loop)
+                    
+                self.loop.call_soon_threadsafe(schedule_coro)
             
             # Track connection latency for quality monitoring
             connection_latency = time.time() - attempt_start
