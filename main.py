@@ -92,12 +92,6 @@ class GridTradingBot:
             self.risk_manager = None
             logger.info("Risk management disabled via configuration")
         
-        # Update Telegram bot references if needed
-        if self.telegram_bot:
-            self.telegram_bot.grid_trader = self.grid_trader
-            self.telegram_bot.risk_manager = self.risk_manager
-            self.telegram_bot.hft_market_maker = self.hft_market_maker  # 添加这一行
-        
         # Initialize high-frequency market making strategy if enabled
         if hasattr(config, 'ENABLE_HFT_MARKET_MAKING') and config.ENABLE_HFT_MARKET_MAKING:
             try:
@@ -107,6 +101,12 @@ class GridTradingBot:
             except Exception as e:
                 logger.error(f"Failed to initialize HFT market maker: {e}")
                 self.hft_market_maker = None
+        
+        # Update Telegram bot references if needed
+        if self.telegram_bot:
+            self.telegram_bot.grid_trader = self.grid_trader
+            self.telegram_bot.risk_manager = self.risk_manager
+            self.telegram_bot.hft_market_maker = self.hft_market_maker
     
     def _handle_websocket_message(self, message):
         """Process WebSocket messages with focus on business logic only"""
