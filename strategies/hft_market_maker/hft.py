@@ -257,7 +257,9 @@ class HFTMarketMaker:
             self._market_making_cycle(),
             self._risk_management_cycle(),
             self._order_timeout_checker(),
-            self._dynamic_threshold_updater()
+            self._dynamic_threshold_updater(),
+            self._hedging_manager(),
+            self._heartbeat_monitor()
         ]
         
         # Wait for shutdown event or task completion
@@ -705,6 +707,98 @@ class HFTMarketMaker:
                 
             except Exception as e:
                 self.logger.error(f"Error updating dynamic threshold: {e}")
+                await asyncio.sleep(5)
+    
+    async def _hedging_manager(self):
+        """
+        Manage hedging positions and maintain balanced exposure
+        Monitors unhedged positions and ensures risk is properly managed
+        """
+        while not self.shutdown_event.is_set():
+            try:
+                # Check for unhedged positions from filled orders
+                with self.order_lock:
+                    active_orders_copy = self.active_orders.copy()
+                
+                # Balance exposure if needed
+                if hasattr(self, 'pending_hedges') and self.pending_hedges:
+                    pending_hedges_copy = self.pending_hedges.copy()
+                    for order_id, hedge_info in pending_hedges_copy.items():
+                        # Check if hedge is still pending after timeout
+                        if time.time() - hedge_info.get('timestamp', 0) > 5:  # 5 second timeout
+                            self.logger.warning(f"Hedge for {order_id} has been pending for >5s, forcing market hedge")
+                            
+                            # Force market hedge
+                            side = hedge_info.get('side')
+                            quantity = hedge_info.get('quantity')
+                            
+                            if side and quantity:
+                                # Execute market hedge with event loop
+                                self.loop.call_soon_threadsafe(
+                                    lambda: asyncio.ensure_future(self._place_market_hedge(
+                                        'BUY' if side == 'SELL' else 'SELL', 
+                                        quantity
+                                    ))
+                                )
+                                
+                                # Remove from pending hedges
+                                if hasattr(self, 'hedge_lock'):
+                                    with self.hedge_lock:
+                                        if order_id in self.pending_hedges:
+                                            del self.pending_hedges[order_id]
+                
+                # Check position balance between buys and sells
+                # This is a simple implementation - could be enhanced with actual position tracking
+                
+                await asyncio.sleep(1)  # Check every second
+            except Exception as e:
+                self.logger.error(f"Error in hedging manager: {e}")
+                await asyncio.sleep(5)  # Wait longer on error
+    
+    async def _heartbeat_monitor(self):
+        """
+        Monitor WebSocket connection health and reconnect if needed
+        Tracks time since last received message to detect connection issues
+        """
+        self.last_heartbeat = time.time()
+        self.heartbeat_interval = 5  # 5 seconds
+        
+        while not self.shutdown_event.is_set():
+            try:
+                current_time = time.time()
+                
+                # Check if we haven't received a heartbeat for too long
+                if current_time - self.last_heartbeat > self.heartbeat_interval * 3:
+                    self.logger.warning(f"No heartbeat for {current_time - self.last_heartbeat:.2f}s")
+                    
+                    # Attempt to reconnect WebSocket if not in circuit breaker mode
+                    if not self.circuit_breaker_triggered:
+                        self.logger.info("Reconnecting WebSocket due to heartbeat timeout")
+                        
+                        # Close existing connection
+                        self._close_websocket()
+                        
+                        # Reinitialize WebSocket
+                        success = self._initialize_websocket()
+                        if success:
+                            self.logger.info("WebSocket reconnected successfully")
+                            self.last_heartbeat = time.time()  # Reset heartbeat timer
+                        else:
+                            self.logger.error("Failed to reconnect WebSocket")
+                            
+                            # Increment reconnect counter
+                            self.ws_reconnect_count += 1
+                            
+                            # If too many reconnect attempts, trigger circuit breaker
+                            if self.ws_reconnect_count > self.max_reconnect_attempts:
+                                self.logger.error(f"Exceeded max reconnect attempts ({self.max_reconnect_attempts})")
+                                self.circuit_breaker_triggered = True
+                
+                # Check again after a short interval
+                await asyncio.sleep(1)
+                
+            except Exception as e:
+                self.logger.error(f"Error in heartbeat monitor: {e}")
                 await asyncio.sleep(5)
     
     def _round_quantity(self, quantity):
