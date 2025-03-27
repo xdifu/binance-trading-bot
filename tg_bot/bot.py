@@ -5,12 +5,14 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 import config
 
 class TelegramBot:
-    def __init__(self, token, allowed_users, grid_trader=None, risk_manager=None):
+    def __init__(self, token, allowed_users, grid_trader=None, risk_manager=None, hft_market_maker=None):
         """Initialize the Telegram bot with the given token and allowed users"""
         self.application = Application.builder().token(token).build()
         self.allowed_users = allowed_users
         self.grid_trader = grid_trader
         self.risk_manager = risk_manager
+        # Add HFT market maker reference
+        self.hft_market_maker = hft_market_maker
         self.logger = logging.getLogger(__name__)
         self.is_running = False
         self.loop = None
@@ -25,7 +27,12 @@ class TelegramBot:
             "startgrid": self._handle_start_grid,
             "stopgrid": self._handle_stop_grid,
             "risk": self._handle_risk_status,
-            "setsymbol": self._handle_set_symbol,  # New command for updating trading pair
+            "setsymbol": self._handle_set_symbol,
+            # Add HFT command handlers
+            "starthft": self._handle_start_hft,
+            "stophft": self._handle_stop_hft,
+            "hftstatus": self._handle_hft_status,
+            "hftconfig": self._handle_hft_config,
         }
         
         for cmd, handler in commands.items():
@@ -124,12 +131,14 @@ class TelegramBot:
         """Handle /start command"""
         async def handler(update):
             await update.message.reply_text(
-                "Welcome to Grid Trading Bot!\n"
+                "Welcome to Trading Bot!\n"
                 "Available commands:\n"
                 "/help - Show help information\n"
                 "/status - Show current status\n"
                 "/startgrid - Start grid trading\n"
-                "/stopgrid - Stop grid trading"
+                "/stopgrid - Stop grid trading\n"
+                "/starthft - Start HFT market making\n"
+                "/stophft - Stop HFT market making"
             )
         await self._handle_authorized_command(update, handler)
     
@@ -140,23 +149,44 @@ class TelegramBot:
                 "Available commands:\n"
                 "/start - Welcome message\n"
                 "/help - Show this help message\n"
-                "/status - Get current grid trading status\n"
+                "/status - Get current grid and HFT trading status\n"
                 "/startgrid - Start grid trading\n"
                 "/stopgrid - Stop grid trading\n"
                 "/risk - View risk management status\n"
-                "/setsymbol [SYMBOL] - Change trading pair (e.g., /setsymbol BTCUSDT)"
+                "/setsymbol [SYMBOL] - Change trading pair (e.g., /setsymbol BTCUSDT)\n"
+                # Add HFT command descriptions
+                "/starthft - Start HFT market making\n"
+                "/stophft - Stop HFT market making\n"
+                "/hftstatus - Get detailed HFT status\n"
+                "/hftconfig - View HFT configuration"
             )
             await update.message.reply_text(help_text)
         await self._handle_authorized_command(update, handler)
     
     async def _handle_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /status command"""
+        """Handle /status command - now shows both grid and HFT status"""
         async def handler(update):
+            status_text = ""
+            
+            # Grid trader status
             if self.grid_trader:
-                status = self.grid_trader.get_status()
-                await update.message.reply_text(status)
+                grid_status = self.grid_trader.get_status()
+                status_text += f"Grid Trading:\n{grid_status}\n\n"
             else:
-                await update.message.reply_text("Grid trading system not initialized")
+                status_text += "Grid trading system not initialized\n\n"
+            
+            # HFT market maker status
+            if self.hft_market_maker:
+                hft_status = "Active" if self.hft_market_maker.is_active else "Inactive"
+                status_text += f"HFT Market Making: {hft_status}"
+                if self.hft_market_maker.is_active:
+                    status_text += f"\nTrading on: {self.hft_market_maker.symbol}"
+                    status_text += f"\nSuccessful trades: {self.hft_market_maker.successful_trades}"
+                    status_text += f"\nFailed trades: {self.hft_market_maker.failed_trades}"
+            else:
+                status_text += "HFT market making system not initialized"
+                
+            await update.message.reply_text(status_text)
         await self._handle_authorized_command(update, handler)
     
     async def _handle_start_grid(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -335,6 +365,134 @@ class TelegramBot:
             return
         
         await update.message.reply_text("Please use /help to see available commands")
+    
+    async def _handle_start_hft(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /starthft command - Start HFT market making"""
+        async def handler(update):
+            # Check if HFT market making is enabled
+            if not config.ENABLE_HFT_MARKET_MAKING:
+                await update.message.reply_text("HFT market making is disabled in configuration")
+                return
+                
+            if self.hft_market_maker:
+                # Check if HFT is already running
+                if self.hft_market_maker.is_active:
+                    await update.message.reply_text("HFT market making is already running")
+                    return
+                    
+                # Try to start HFT
+                try:
+                    result = self.hft_market_maker.start()
+                    if result:
+                        await update.message.reply_text("✅ HFT market making started successfully")
+                    else:
+                        await update.message.reply_text("❌ Failed to start HFT market making")
+                except Exception as e:
+                    await update.message.reply_text(f"❌ Error starting HFT market making: {str(e)}")
+            else:
+                await update.message.reply_text("HFT market making system not initialized")
+        
+        await self._handle_authorized_command(update, handler)
+    
+    async def _handle_stop_hft(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /stophft command - Stop HFT market making"""
+        async def handler(update):
+            # Check if HFT market making is enabled
+            if not config.ENABLE_HFT_MARKET_MAKING:
+                await update.message.reply_text("HFT market making is disabled in configuration")
+                return
+                
+            if self.hft_market_maker:
+                # Check if HFT is running
+                if not self.hft_market_maker.is_active:
+                    await update.message.reply_text("HFT market making is not currently running")
+                    return
+                    
+                # Try to stop HFT
+                try:
+                    result = self.hft_market_maker.stop()
+                    if result:
+                        await update.message.reply_text("✅ HFT market making stopped successfully")
+                    else:
+                        await update.message.reply_text("❌ Failed to stop HFT market making")
+                except Exception as e:
+                    await update.message.reply_text(f"❌ Error stopping HFT market making: {str(e)}")
+            else:
+                await update.message.reply_text("HFT market making system not initialized")
+        
+        await self._handle_authorized_command(update, handler)
+    
+    async def _handle_hft_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /hftstatus command - Get detailed HFT market making status"""
+        async def handler(update):
+            if not self.hft_market_maker:
+                await update.message.reply_text("HFT market making system not initialized")
+                return
+                
+            # Build detailed status message
+            status = "HFT Market Making Status:\n"
+            status += f"- Active: {self.hft_market_maker.is_active}\n"
+            status += f"- Symbol: {self.hft_market_maker.symbol}\n"
+            
+            # Include performance metrics if available
+            if hasattr(self.hft_market_maker, 'successful_trades'):
+                status += f"- Successful trades: {self.hft_market_maker.successful_trades}\n"
+                status += f"- Failed trades: {self.hft_market_maker.failed_trades}\n"
+                
+                # Calculate success rate
+                total_trades = self.hft_market_maker.successful_trades + self.hft_market_maker.failed_trades
+                success_rate = 0
+                if total_trades > 0:
+                    success_rate = (self.hft_market_maker.successful_trades / total_trades) * 100
+                status += f"- Success rate: {success_rate:.2f}%\n"
+            
+            # Include latency information if available
+            if hasattr(self.hft_market_maker, 'latency_samples') and len(self.hft_market_maker.latency_samples) > 0:
+                avg_latency = sum(self.hft_market_maker.latency_samples) / len(self.hft_market_maker.latency_samples)
+                max_latency = max(self.hft_market_maker.latency_samples)
+                status += f"- Average latency: {avg_latency:.2f}ms\n"
+                status += f"- Maximum latency: {max_latency:.2f}ms\n"
+            
+            # Include risk parameters
+            if hasattr(self.hft_market_maker, 'single_loss_limit'):
+                status += "\nRisk Parameters:\n"
+                status += f"- Single loss limit: {self.hft_market_maker.single_loss_limit * 100:.2f}%\n"
+                status += f"- Daily meltdown level: {self.hft_market_maker.daily_meltdown_level * 100:.2f}%\n"
+                status += f"- Circuit breaker triggered: {self.hft_market_maker.circuit_breaker_triggered}\n"
+            
+            # Include daily PnL if available
+            if hasattr(self.hft_market_maker, 'daily_pnl'):
+                status += f"\nDaily PnL: {self.hft_market_maker.daily_pnl:.4f} USDT\n"
+                
+                if hasattr(self.hft_market_maker, 'initial_balance') and self.hft_market_maker.initial_balance > 0:
+                    pnl_percent = (self.hft_market_maker.daily_pnl / self.hft_market_maker.initial_balance) * 100
+                    status += f"Daily PnL %: {pnl_percent:.2f}%\n"
+            
+            await update.message.reply_text(status)
+        
+        await self._handle_authorized_command(update, handler)
+    
+    async def _handle_hft_config(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /hftconfig command - View HFT market making configuration"""
+        async def handler(update):
+            if not self.hft_market_maker:
+                await update.message.reply_text("HFT market making system not initialized")
+                return
+            
+            # Build configuration details
+            config_text = "HFT Market Making Configuration:\n"
+            config_text += f"- Symbol: {self.hft_market_maker.symbol}\n"
+            config_text += f"- Spread threshold: {self.hft_market_maker.spread_threshold * 100:.4f}%\n"
+            config_text += f"- Dynamic spread threshold: {self.hft_market_maker.dynamic_spread_threshold * 100:.4f}%\n"
+            config_text += f"- Price offset ratio: {self.hft_market_maker.price_offset_ratio * 100:.4f}%\n"
+            config_text += f"- Order timeout phase 1: {self.hft_market_maker.order_timeout_phase1 * 1000:.0f}ms\n"
+            config_text += f"- Order timeout phase 2: {self.hft_market_maker.order_timeout_phase2 * 1000:.0f}ms\n"
+            config_text += f"- Single loss limit: {self.hft_market_maker.single_loss_limit * 100:.4f}%\n"
+            config_text += f"- Daily meltdown level: {self.hft_market_maker.daily_meltdown_level * 100:.2f}%\n"
+            
+            await update.message.reply_text(config_text)
+        
+        await self._handle_authorized_command(update, handler)
     
     def handle_start_grid(self, update, context):
         """Handle /startgrid command"""
