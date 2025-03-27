@@ -280,7 +280,6 @@ class HFTMarketMaker:
         - Tracks connection quality metrics
         - Optimized for t2.micro instance constraints
         """
-        import asyncio  # 添加这行导入
         try:
             # Track connection attempt start time
             attempt_start = time.time()
