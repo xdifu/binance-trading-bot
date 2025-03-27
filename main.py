@@ -43,6 +43,7 @@ class GridTradingBot:
         self.grid_trader = None
         self.risk_manager = None
         self.ws_manager = None
+        self.hft_market_maker = None  # Add HFT market maker instance
         self.listen_key = None
         self.keep_alive_thread = None
         self.logger = logging.getLogger(__name__)
@@ -95,6 +96,16 @@ class GridTradingBot:
         if self.telegram_bot:
             self.telegram_bot.grid_trader = self.grid_trader
             self.telegram_bot.risk_manager = self.risk_manager
+        
+        # Initialize high-frequency market making strategy if enabled
+        if hasattr(config, 'ENABLE_HFT_MARKET_MAKING') and config.ENABLE_HFT_MARKET_MAKING:
+            try:
+                from strategies.hft_market_maker.hft import HFTMarketMaker
+                self.hft_market_maker = HFTMarketMaker()
+                logger.info("HFT market making strategy initialized successfully")
+            except Exception as e:
+                logger.error(f"Failed to initialize HFT market maker: {e}")
+                self.hft_market_maker = None
     
     def _handle_websocket_message(self, message):
         """Process WebSocket messages with focus on business logic only"""
@@ -145,6 +156,11 @@ class GridTradingBot:
         except Exception as e:
             self.logger.error(f"Failed to process WebSocket message: {e}")
         
+        # Forward message to HFT market maker if enabled
+        if hasattr(config, 'ENABLE_HFT_MARKET_MAKING') and config.ENABLE_HFT_MARKET_MAKING:
+            if self.hft_market_maker and self.hft_market_maker.is_active:
+                self.hft_market_maker.handle_websocket_message(message)
+    
     def _handle_oco_update(self, message):
         """Handle OCO order updates with standardized access pattern"""
         try:
@@ -501,6 +517,14 @@ class GridTradingBot:
         # Set up WebSocket connection
         self._setup_websocket()
         
+        # Start HFT market making if enabled
+        if hasattr(config, 'ENABLE_HFT_MARKET_MAKING') and config.ENABLE_HFT_MARKET_MAKING and self.hft_market_maker:
+            try:
+                self.hft_market_maker.start()
+                logger.info("HFT market making strategy started")
+            except Exception as e:
+                logger.error(f"Failed to start HFT market making: {e}")
+        
         # Auto-start grid trading - this will automatically start trading without manual intervention
         self._auto_start_grid_trading()
         
@@ -536,6 +560,14 @@ class GridTradingBot:
         # Stop risk management
         if self.risk_manager and self.risk_manager.is_active:
             self.risk_manager.deactivate()
+        
+        # Stop HFT market making if running
+        if self.hft_market_maker and self.hft_market_maker.is_active:
+            try:
+                self.hft_market_maker.stop()
+                logger.info("HFT market making strategy stopped")
+            except Exception as e:
+                logger.error(f"Error stopping HFT market maker: {e}")
         
         # Clean up user data stream if needed
         listen_key_to_close = None
