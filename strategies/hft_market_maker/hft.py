@@ -185,43 +185,110 @@ class HFTMarketMaker:
             self.logger.error(f"Error fetching initial balance: {e}")
     
     def _initialize_websocket(self):
-        """Initialize WebSocket connection for order book data"""
+        """
+        Initialize WebSocket connection for order book data with enhanced stability
+        - Implements exponential backoff for reconnection
+        - Tracks connection quality metrics
+        - Optimized for t2.micro instance constraints
+        """
         try:
+            # Track connection attempt start time
+            attempt_start = time.time()
+            
+            # Apply exponential backoff on reconnection attempts
+            if self.ws_reconnect_count > 0:
+                backoff_seconds = min(60, 2 ** (self.ws_reconnect_count - 1))
+                self.logger.info(f"Applying reconnection backoff: waiting {backoff_seconds}s before attempt {self.ws_reconnect_count + 1}")
+                time.sleep(backoff_seconds)
+            
             # Create direct connection to WebSocket API using our client
             api_key = os.getenv("API_KEY", config.API_KEY)
             private_key_path = os.getenv("PRIVATE_KEY", config.PRIVATE_KEY)
             private_key_pass = None if os.getenv("PRIVATE_KEY_PASS") == "None" else os.getenv("PRIVATE_KEY_PASS",
                                     getattr(config, 'PRIVATE_KEY_PASS', None))
             
+            # Clear old client if exists
+            if self.ws_client:
+                try:
+                    self.ws_client.close()
+                except:
+                    pass
+                self.ws_client = None
+                
+            # Connection setup with connection quality optimizations
+            ping_interval = 10  # More frequent pings for reliable connection
+            if self.ws_reconnect_count > 3:
+                ping_interval = 15  # Save bandwidth on repeated failures
+                
+            # Create new client
             self.ws_client = BinanceWebSocketAPIClient(
                 api_key=api_key,
                 private_key_path=private_key_path,
                 private_key_pass=private_key_pass,
                 use_testnet=config.USE_TESTNET,
-                ping_interval=10,  # More frequent pings for reliable connection
-                timeout=5  # Faster timeout detection
+                ping_interval=ping_interval,
+                timeout=5  # Faster timeout detection for unstable networks
             )
             
-            # Verify connection
-            response = self.ws_client.ping_server()
-            if not response or response.get('status') != 200:
-                self.logger.error(f"Failed to connect to WebSocket API: {response}")
-                return False
-                
+            # Verify connection with retry logic
+            max_verify_attempts = 2
+            for verify_attempt in range(1, max_verify_attempts + 1):
+                try:
+                    response = self.ws_client.ping_server()
+                    if response and response.get('status') == 200:
+                        # Successful connection
+                        break
+                    else:
+                        if verify_attempt < max_verify_attempts:
+                            self.logger.warning(f"Connection verification attempt {verify_attempt} failed: {response}")
+                            time.sleep(1)  # Brief pause between verification attempts
+                        else:
+                            self.logger.error(f"Failed to connect to WebSocket API: {response}")
+                            self.ws_reconnect_count += 1
+                            return False
+                except Exception as e:
+                    if verify_attempt < max_verify_attempts:
+                        self.logger.warning(f"Connection verification attempt {verify_attempt} error: {e}")
+                        time.sleep(1)
+                    else:
+                        self.logger.error(f"Failed to verify WebSocket connection: {e}")
+                        self.ws_reconnect_count += 1
+                        return False
+            
+            # Successful connection established
             self.logger.info("WebSocket API connected successfully")
+            
+            # Schedule reconnection counter reset after stable period
+            self._schedule_reconnect_counter_reset()
+            
+            # Track connection latency for quality monitoring
+            connection_latency = time.time() - attempt_start
+            self.logger.debug(f"WebSocket connection established in {connection_latency:.2f}s")
             
             # Start WebSocket market data stream using the main client's websocket manager
             if hasattr(self.binance_client, 'ws_manager'):
-                self.binance_client.ws_manager.start_bookticker_stream(self.symbol)
-                self.binance_client.ws_manager.start_kline_stream(self.symbol, interval='1m')
-                self.logger.info(f"Subscribed to {self.symbol} book ticker and kline streams")
+                try:
+                    self.binance_client.ws_manager.start_bookticker_stream(self.symbol)
+                    self.binance_client.ws_manager.start_kline_stream(self.symbol, interval='1m')
+                    self.logger.info(f"Subscribed to {self.symbol} book ticker and kline streams")
+                    
+                    # Update heartbeat timestamp to reset monitoring cycle
+                    self.last_heartbeat = time.time()
+                except Exception as e:
+                    self.logger.error(f"Failed to subscribe to market data streams: {e}")
+                    # Don't count this as connection failure, socket API still usable
             else:
                 self.logger.warning("WebSocket manager not available, using REST API for fallback")
+            
+            # Synchronize state after reconnection
+            if self.ws_reconnect_count > 0:
+                self._synchronize_state_after_reconnect()
             
             return True
             
         except Exception as e:
             self.logger.error(f"Error initializing WebSocket: {e}")
+            self.ws_reconnect_count += 1
             return False
     
     def _close_websocket(self):
@@ -759,26 +826,47 @@ class HFTMarketMaker:
         """
         Monitor WebSocket connection health and reconnect if needed
         Tracks time since last received message to detect connection issues
+        Features enhanced stability monitoring and adaptive timeouts
         """
         self.last_heartbeat = time.time()
-        self.heartbeat_interval = 5  # 5 seconds
+        self.heartbeat_interval = 5  # 5 seconds base interval
+        
+        # Track heartbeat history for connection quality analysis
+        heartbeat_gaps = deque(maxlen=10)  # Store last 10 times between heartbeats
         
         while not self.shutdown_event.is_set():
             try:
                 current_time = time.time()
+                time_since_heartbeat = current_time - self.last_heartbeat
+                
+                # Adapt heartbeat interval based on connection history
+                adaptive_interval = self.heartbeat_interval
+                if len(heartbeat_gaps) > 5:
+                    # If we have enough history, calculate mean and standard deviation
+                    mean_gap = sum(heartbeat_gaps) / len(heartbeat_gaps)
+                    # Use a more forgiving threshold on unstable connections
+                    adaptive_interval = max(self.heartbeat_interval, min(20, mean_gap * 2))
                 
                 # Check if we haven't received a heartbeat for too long
-                if current_time - self.last_heartbeat > self.heartbeat_interval * 3:
-                    self.logger.warning(f"No heartbeat for {current_time - self.last_heartbeat:.2f}s")
+                if time_since_heartbeat > adaptive_interval * 3:
+                    self.logger.warning(f"No heartbeat for {time_since_heartbeat:.2f}s (threshold: {adaptive_interval * 3:.1f}s)")
+                    
+                    # Track this gap for future adaptations
+                    heartbeat_gaps.append(time_since_heartbeat)
                     
                     # Attempt to reconnect WebSocket if not in circuit breaker mode
                     if not self.circuit_breaker_triggered:
                         self.logger.info("Reconnecting WebSocket due to heartbeat timeout")
                         
+                        # Avoid resource spikes on t2.micro instances
+                        if self.ws_reconnect_count > 2:
+                            # Throttle CPU usage during reconnect storms
+                            await asyncio.sleep(1)
+                        
                         # Close existing connection
                         self._close_websocket()
                         
-                        # Reinitialize WebSocket
+                        # Reinitialize WebSocket with backoff handled inside method
                         success = self._initialize_websocket()
                         if success:
                             self.logger.info("WebSocket reconnected successfully")
@@ -786,17 +874,20 @@ class HFTMarketMaker:
                         else:
                             self.logger.error("Failed to reconnect WebSocket")
                             
-                            # Increment reconnect counter
-                            self.ws_reconnect_count += 1
-                            
                             # If too many reconnect attempts, trigger circuit breaker
                             if self.ws_reconnect_count > self.max_reconnect_attempts:
-                                self.logger.error(f"Exceeded max reconnect attempts ({self.max_reconnect_attempts})")
+                                self.logger.error(f"Exceeded max reconnect attempts ({self.max_reconnect_attempts}), activating circuit breaker")
                                 self.circuit_breaker_triggered = True
-                
+                else:
+                    # Normal heartbeat gap, record for adaptive calculations
+                    if time_since_heartbeat > 0.5:  # Only record meaningful gaps
+                        heartbeat_gaps.append(time_since_heartbeat)
+                        
                 # Check again after a short interval
-                await asyncio.sleep(1)
-                
+                # Use shorter check interval when issues detected
+                check_interval = 1.0 if time_since_heartbeat < adaptive_interval else 0.5
+                await asyncio.sleep(check_interval)
+                    
             except Exception as e:
                 self.logger.error(f"Error in heartbeat monitor: {e}")
                 await asyncio.sleep(5)
@@ -1259,3 +1350,103 @@ class HFTMarketMaker:
             
         except Exception as e:
             self.logger.error(f"Error generating metrics report: {e}")
+    
+    def _schedule_reconnect_counter_reset(self):
+        """
+        Schedule a reset of the reconnection counter after a stable period
+        This prevents connection quality degradation from accumulating indefinitely
+        """
+        def _delayed_reset():
+            # Wait for stable period (2 minutes) before resetting
+            time.sleep(120)
+            if self.ws_client and self.is_active and not self.circuit_breaker_triggered:
+                # Only reset if we're still connected after the wait period
+                old_count = self.ws_reconnect_count
+                if old_count > 0:
+                    self.ws_reconnect_count = 0
+                    self.logger.info(f"Connection stable for 2 minutes, reconnection counter reset from {old_count} to 0")
+        
+        # Start counter reset thread
+        threading.Thread(target=_delayed_reset, daemon=True).start()
+
+    def _synchronize_state_after_reconnect(self):
+        """
+        Synchronize critical state data after a successful reconnection
+        - Refreshes order book data
+        - Validates active orders are still valid
+        - Updates cached price data
+        """
+        try:
+            self.logger.info("Synchronizing state after reconnection")
+            
+            # Schedule a check of all active orders to ensure they're still valid
+            # Use the main thread's event loop to schedule this
+            if self.loop and self.is_active:
+                self.loop.call_soon_threadsafe(
+                    lambda: asyncio.ensure_future(self._validate_active_orders_after_reconnect())
+                )
+                
+            # Refresh current market price
+            current_price = self.binance_client.get_symbol_price(self.symbol)
+            with self.price_lock:
+                self.last_trade_price = float(current_price)
+                # Avoid corrupting price history with a potentially stale value
+                if len(self.last_prices) > 0:
+                    self.last_prices.append(float(current_price))
+                    
+            self.logger.info("State synchronization after reconnection completed")
+        except Exception as e:
+            self.logger.error(f"Error synchronizing state after reconnection: {e}")
+
+    async def _validate_active_orders_after_reconnect(self):
+        """
+        Validate all active orders are still valid after a reconnection
+        Identifies and resolves any inconsistencies between local state and exchange state
+        """
+        try:
+            self.logger.info("Validating active orders after reconnection")
+            
+            # Get open orders from exchange
+            open_orders = self.binance_client.get_open_orders(symbol=self.symbol)
+            
+            # Extract order IDs from exchange response
+            exchange_order_ids = []
+            if isinstance(open_orders, list):
+                exchange_order_ids = [order.get('clientOrderId') for order in open_orders if 'clientOrderId' in order]
+            elif isinstance(open_orders, dict) and 'result' in open_orders:
+                exchange_order_ids = [order.get('clientOrderId') for order in open_orders['result'] if 'clientOrderId' in order]
+                
+            # Filter to only our HFT orders
+            exchange_order_ids = [order_id for order_id in exchange_order_ids if order_id and order_id.startswith("hft_")]
+            
+            # Get local order IDs with thread safety
+            with self.order_lock:
+                local_order_ids = list(self.active_orders.keys())
+            
+            # Find discrepancies
+            missing_from_exchange = [order_id for order_id in local_order_ids if order_id not in exchange_order_ids]
+            missing_locally = [order_id for order_id in exchange_order_ids if order_id not in local_order_ids]
+            
+            # Handle orders we think are active but exchange doesn't have
+            for order_id in missing_from_exchange:
+                self.logger.warning(f"Order {order_id} missing from exchange after reconnection, removing from local state")
+                with self.order_lock:
+                    if order_id in self.active_orders:
+                        del self.active_orders[order_id]
+            
+            # Handle orders exchange has but we don't track locally
+            for order_id in missing_locally:
+                self.logger.warning(f"Order {order_id} found on exchange but missing locally, cancelling for safety")
+                # Cancel order since we've lost track of its context
+                params = {
+                    'symbol': self.symbol,
+                    'origClientOrderId': order_id
+                }
+                try:
+                    request_id = self.ws_client._send_signed_request("order.cancel", params)
+                except Exception as e:
+                    self.logger.error(f"Failed to cancel orphaned order {order_id}: {e}")
+                    
+            self.logger.info(f"Active orders validated after reconnection: {len(local_order_ids)} local, {len(exchange_order_ids)} on exchange")
+        except Exception as e:
+            self.logger.error(f"Error validating active orders after reconnection: {e}")
