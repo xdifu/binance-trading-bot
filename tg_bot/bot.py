@@ -335,3 +335,27 @@ class TelegramBot:
             return
         
         await update.message.reply_text("Please use /help to see available commands")
+    
+    def handle_start_grid(self, update, context):
+        """Handle /startgrid command"""
+        # Check if grid trading is enabled
+        if not config.ENABLE_GRID_TRADING:
+            self.send_message("Grid trading is disabled in configuration")
+            return
+            
+        # Original code follows...
+        chat_id = update.effective_chat.id
+        if not self.grid_trader:
+            self.send_message("Grid trader not available")
+            return
+        
+        # ...rest of the method...
+
+    def handle_stop_grid(self, update, context):
+        """Handle /stopgrid command"""
+        # Check if grid trading is enabled
+        if not config.ENABLE_GRID_TRADING:
+            self.send_message("Grid trading is disabled in configuration")
+            return
+        
+        # Original code follows...
