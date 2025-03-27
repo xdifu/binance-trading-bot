@@ -359,3 +359,17 @@ class TelegramBot:
             return
         
         # Original code follows...
+
+    def handle_grid_status(self, update, context):
+        """Handle /gridstatus command"""
+        if not config.ENABLE_GRID_TRADING:
+            self.send_message("Grid trading is disabled in configuration")
+            return
+        # ...original code...
+
+    def handle_recalculate_grid(self, update, context):
+        """Handle /recalculate command"""
+        if not config.ENABLE_GRID_TRADING:
+            self.send_message("Grid trading is disabled in configuration")
+            return
+        # ...original code...
