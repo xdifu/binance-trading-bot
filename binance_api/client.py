@@ -1,5 +1,6 @@
 import os
 import logging
+import asyncio
 import time
 from datetime import datetime, timedelta
 from binance.spot import Spot
