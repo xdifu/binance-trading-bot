@@ -9,6 +9,36 @@ from collections import deque
 import json
 import sys
 from pathlib import Path
+import redis
+import pickle
+from functools import lru_cache
+from numba import jit
+import gc
+import psutil
+import resource
+
+# Add this function here, outside any class definition
+# Move the function from inside the class to the top level
+@jit(nopython=True)
+def calculate_std_dev(returns):
+    """Calculate standard deviation with JIT compilation for performance"""
+    if len(returns) < 2:
+        return 0.0
+    
+    # Calculate mean
+    mean = 0.0
+    for r in returns:
+        mean += r
+    mean /= len(returns)
+    
+    # Calculate variance
+    variance = 0.0
+    for r in returns:
+        variance += (r - mean) ** 2
+    variance /= (len(returns) - 1)
+    
+    # Return standard deviation
+    return variance ** 0.5
 
 # Add parent directory to path for imports
 sys.path.append(str(Path(__file__).parent.parent))
@@ -93,16 +123,61 @@ class HFTMarketMaker:
         self.price_lock = threading.RLock()
         
         # Event loop for async operations
-        self.loop = None
+        self.loop = asyncio.get_event_loop()
         self.shutdown_event = asyncio.Event()
         
         # WebSocket connection management
         self.ws_reconnect_count = 0
         self.max_reconnect_attempts = 10
         
+        # Initialize Redis client for order book caching
+        try:
+            self.redis_client = redis.Redis(
+                host='localhost', 
+                port=6379, 
+                db=0,
+                socket_timeout=0.1,  # Fast timeout for low latency
+                health_check_interval=30
+            )
+            # Test connection
+            self.redis_client.ping()
+            self.use_redis_cache = True
+            self.logger.info("Redis cache initialized successfully")
+        except Exception as e:
+            self.logger.warning(f"Redis initialization failed, using in-memory only: {e}")
+            self.use_redis_cache = False
+        
+        # Add trade tracking for stop loss
+        self.trade_entries = {}  # Dict of order_id -> entry info for stop loss tracking
+        self.trade_lock = threading.RLock()
+        
     def start(self):
-        """Start the HFT market making strategy"""
+        """Start the HFT market making strategy with optimizations for t2.micro"""
         self.logger.info(f"Starting HFT market maker for {self.symbol}")
+        
+        # Optimize process priority
+        try:
+            os.nice(-10)  # Higher priority (lower nice value)
+            self.logger.info("Adjusted process priority for low latency")
+        except Exception as e:
+            self.logger.warning(f"Could not adjust process priority: {e}")
+        
+        # Optimize memory management
+        try:
+            # Set soft memory limit to 700MB (leave room for OS)
+            soft, hard = resource.getrlimit(resource.RLIMIT_AS)
+            resource.setrlimit(resource.RLIMIT_AS, (700 * 1024 * 1024, hard))
+            
+            # Disable automatic garbage collection
+            gc.disable()
+            
+            # Schedule periodic manual GC
+            self.gc_thread = threading.Thread(target=self._scheduled_gc, daemon=True)
+            self.gc_thread.start()
+            
+            self.logger.info("Memory optimization configured")
+        except Exception as e:
+            self.logger.warning(f"Could not optimize memory settings: {e}")
         
         # Get initial account balance
         self._fetch_initial_balance()
@@ -270,7 +345,9 @@ class HFTMarketMaker:
                 try:
                     self.binance_client.ws_manager.start_bookticker_stream(self.symbol)
                     self.binance_client.ws_manager.start_kline_stream(self.symbol, interval='1m')
-                    self.logger.info(f"Subscribed to {self.symbol} book ticker and kline streams")
+                    # Add depth stream subscription with 100ms updates
+                    self.binance_client.ws_manager.start_depth_stream(self.symbol, speed=100)
+                    self.logger.info(f"Subscribed to {self.symbol} book ticker, kline, and depth streams")
                     
                     # Update heartbeat timestamp to reset monitoring cycle
                     self.last_heartbeat = time.time()
@@ -683,6 +760,40 @@ class HFTMarketMaker:
                     self.cooldown_until['BUY'] = cooldown_until
                     self.cooldown_until['SELL'] = cooldown_until
                 
+                # Add single-trade stop loss check
+                try:
+                    # Get current price
+                    with self.price_lock:
+                        current_price = self.last_trade_price
+                    
+                    if current_price > 0:
+                        # Get copy of trade entries to avoid modification during iteration
+                        with self.trade_lock:
+                            entries = self.trade_entries.copy()
+                        
+                        # Check each entry against stop loss
+                        for order_id, entry_data in entries.items():
+                            if current_price <= entry_data['stop_loss_price']:
+                                self.logger.warning(f"SINGLE-TRADE STOP LOSS TRIGGERED for {order_id}: "
+                                                   f"Entry: {entry_data['entry_price']}, Current: {current_price}, "
+                                                   f"Stop: {entry_data['stop_loss_price']}")
+                                
+                                # Execute market order to close position
+                                if self.is_active and not self.circuit_breaker_triggered:
+                                    # Place market sell order
+                                    self.loop.call_soon_threadsafe(
+                                        lambda: asyncio.ensure_future(
+                                            self._place_market_hedge('SELL', entry_data['quantity'])
+                                        )
+                                    )
+                                    
+                                    # Remove from tracking
+                                    with self.trade_lock:
+                                        if order_id in self.trade_entries:
+                                            del self.trade_entries[order_id]
+                except Exception as e:
+                    self.logger.error(f"Error in stop loss check: {e}")
+                
                 await asyncio.sleep(1)  # Check every second
                 
             except Exception as e:
@@ -745,7 +856,7 @@ class HFTMarketMaker:
                     await asyncio.sleep(0.1)
                     continue
                 
-                # Calculate standard deviation of price changes
+                # Calculate returns with copy to avoid race conditions
                 with self.price_lock:
                     prices = list(self.last_prices)
                     
@@ -756,8 +867,8 @@ class HFTMarketMaker:
                 # Calculate returns
                 returns = [prices[i]/prices[i-1] - 1 for i in range(1, len(prices))]
                 
-                # Calculate 2 standard deviations of returns
-                std_dev = np.std(returns) if returns else 0
+                # Use JIT-compiled function for standard deviation calculation
+                std_dev = calculate_std_dev(returns)
                 two_sigma = 2 * std_dev
                 
                 # Set dynamic threshold to max of base threshold and 2-sigma
@@ -1025,7 +1136,23 @@ class HFTMarketMaker:
                 else:
                     order_data = {'side': side, 'price': price, 'quantity': quantity}
             
-            # Place immediate hedge order if needed
+            # Track entry for stop loss if this is a buy
+            if side == 'BUY':
+                # Calculate stop loss price
+                stop_loss_price = price * (1 - self.single_loss_limit)
+                
+                # Store entry information with thread safety
+                with self.trade_lock:
+                    self.trade_entries[client_order_id] = {
+                        'entry_price': price,
+                        'stop_loss_price': stop_loss_price,
+                        'quantity': quantity,
+                        'timestamp': time.time()
+                    }
+                
+                self.logger.debug(f"Set stop loss for {client_order_id} at {stop_loss_price}")
+            
+            # Place immediate hedge order
             if side == 'BUY':
                 # Place sell order at a small profit
                 hedge_price = price * (1 + self.price_offset_ratio)
@@ -1061,8 +1188,8 @@ class HFTMarketMaker:
             client_order_id = await self._place_order(side, quantity, price)
             
             if not client_order_id:
-                # If limit order placement fails, try market order
-                await self._place_market_hedge(side, quantity)
+                # If limit order placement fails, try market order with fallback
+                await self._place_market_hedge_fallback(side, quantity)
                 return
                 
             # Start a timeout check for the hedge order
@@ -1079,8 +1206,8 @@ class HFTMarketMaker:
                     # Cancel the limit order
                     cancel_success = await self._cancel_order(client_order_id)
                     
-                    # Place market order
-                    await self._place_market_hedge(side, quantity)
+                    # Place market order with fallback
+                    await self._place_market_hedge_with_fallback(side, quantity)
                     
                     # Remove from active orders
                     with self.order_lock:
@@ -1116,6 +1243,33 @@ class HFTMarketMaker:
             else:
                 self.logger.warning(f"Failed to place market hedge order: {response}")
                 return False
+                
+        except Exception as e:
+            self.logger.error(f"Error placing market hedge order: {e}")
+            return False
+    
+    async def _place_market_hedge_fallback(self, side, quantity):
+        """Place a market order for hedging with fallback to REST API"""
+        try:
+            # Try WebSocket API first
+            ws_success = await self._place_market_hedge(side, quantity)
+            
+            # Fall back to REST API if WebSocket fails
+            if not ws_success:
+                self.logger.warning("WebSocket API market order failed, falling back to REST API")
+                try:
+                    loop = self.loop
+                    await loop.run_in_executor(
+                        None, 
+                        lambda: self.binance_client.place_market_order(self.symbol, side, quantity)
+                    )
+                    self.logger.info(f"Market hedge order placed via REST API: {side} {quantity}")
+                    return True
+                except Exception as rest_error:
+                    self.logger.error(f"REST API fallback also failed: {rest_error}")
+                    return False
+            
+            return ws_success
                 
         except Exception as e:
             self.logger.error(f"Error placing market hedge order: {e}")
@@ -1450,3 +1604,49 @@ class HFTMarketMaker:
             self.logger.info(f"Active orders validated after reconnection: {len(local_order_ids)} local, {len(exchange_order_ids)} on exchange")
         except Exception as e:
             self.logger.error(f"Error validating active orders after reconnection: {e}")
+
+    def _cache_order_book(self, book_data):
+        """Cache order book data in Redis to reduce memory pressure"""
+        if not self.use_redis_cache:
+            return
+            
+        try:
+            # Use pickle for efficient serialization
+            serialized = pickle.dumps(book_data)
+            self.redis_client.set(f"order_book:{self.symbol}", serialized, ex=60)  # 1 minute TTL
+        except Exception as e:
+            self.logger.debug(f"Redis cache write failed: {e}")
+            
+    def _get_cached_order_book(self):
+        """Retrieve order book from Redis cache"""
+        if not self.use_redis_cache:
+            return None
+            
+        try:
+            cached_data = self.redis_client.get(f"order_book:{self.symbol}")
+            if cached_data:
+                return pickle.loads(cached_data)
+        except Exception as e:
+            self.logger.debug(f"Redis cache read failed: {e}")
+        
+        return None
+    
+    def _scheduled_gc(self):
+        """Run garbage collection periodically to control memory usage"""
+        while self.is_active:
+            try:
+                # Sleep first to avoid GC at startup
+                time.sleep(30)  # Run every 30 seconds
+                
+                # Only run GC if memory usage is high
+                process = psutil.Process(os.getpid())
+                memory_info = process.memory_info()
+                memory_usage_mb = memory_info.rss / 1024 / 1024
+                
+                if memory_usage_mb > 300:  # 300MB threshold
+                    self.logger.debug(f"Running manual GC (memory: {memory_usage_mb:.1f}MB)")
+                    gc.collect()
+                
+            except Exception as e:
+                self.logger.error(f"Error in GC thread: {e}")
+                time.sleep(60)  # Longer sleep on error
