@@ -96,6 +96,7 @@ class GridTradingBot:
         if self.telegram_bot:
             self.telegram_bot.grid_trader = self.grid_trader
             self.telegram_bot.risk_manager = self.risk_manager
+            self.telegram_bot.hft_market_maker = self.hft_market_maker  # 添加这一行
         
         # Initialize high-frequency market making strategy if enabled
         if hasattr(config, 'ENABLE_HFT_MARKET_MAKING') and config.ENABLE_HFT_MARKET_MAKING:
