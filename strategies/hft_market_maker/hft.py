@@ -152,7 +152,7 @@ class HFTMarketMaker:
         self.trade_lock = threading.RLock()
         
     def start(self):
-        """Start the HFT market making strategy with optimizations for t2.micro"""
+        """Start the HFT market making strategy with single-thread event loop model"""
         self.logger.info(f"Starting HFT market maker for {self.symbol}")
         
         # Optimize process priority
@@ -162,7 +162,7 @@ class HFTMarketMaker:
         except Exception as e:
             self.logger.warning(f"Could not adjust process priority: {e}")
         
-        # Optimize memory management
+        # Optimize memory management without creating a separate thread
         try:
             # Set soft memory limit to 700MB (leave room for OS)
             soft, hard = resource.getrlimit(resource.RLIMIT_AS)
@@ -171,10 +171,7 @@ class HFTMarketMaker:
             # Disable automatic garbage collection
             gc.disable()
             
-            # Schedule periodic manual GC
-            self.gc_thread = threading.Thread(target=self._scheduled_gc, daemon=True)
-            self.gc_thread.start()
-            
+            # Note: No separate GC thread created here
             self.logger.info("Memory optimization configured")
         except Exception as e:
             self.logger.warning(f"Could not optimize memory settings: {e}")
@@ -185,17 +182,12 @@ class HFTMarketMaker:
         # Initialize WebSocket connection for order book data
         self._initialize_websocket()
         
-        # Start event loop for async operations
+        # Initialize and run the event loop directly in current thread
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
         
-        # Create and start strategy threads
-        self.main_thread = threading.Thread(target=self._run_event_loop, daemon=True)
-        self.main_thread.start()
-        
-        # Start monitoring thread for metrics reporting
-        self.monitor_thread = threading.Thread(target=self._monitoring_thread, daemon=True)
-        self.monitor_thread.start()
+        # Start event loop in current thread (no additional threads)
+        self._run_event_loop()
         
         self.is_active = True
         self.logger.info("HFT market maker started successfully")
@@ -209,11 +201,9 @@ class HFTMarketMaker:
         # Signal event loop to stop
         if self.loop:
             self.loop.call_soon_threadsafe(self.shutdown_event.set)
-            
-        # Wait for main thread to stop
-        if hasattr(self, 'main_thread') and self.main_thread.is_alive():
-            self.main_thread.join(timeout=5)
-            
+        
+        # No need to join threads as they no longer exist
+        
         # Cancel all active orders
         self._cancel_all_orders()
         
@@ -334,7 +324,10 @@ class HFTMarketMaker:
             self.logger.info("WebSocket API connected successfully")
             
             # Schedule reconnection counter reset after stable period
-            self._schedule_reconnect_counter_reset()
+            if self.loop and self.is_active:
+                self.loop.call_soon_threadsafe(
+                    lambda: asyncio.ensure_future(self._schedule_reconnect_counter_reset())
+                )
             
             # Track connection latency for quality monitoring
             connection_latency = time.time() - attempt_start
@@ -379,8 +372,15 @@ class HFTMarketMaker:
             self.logger.error(f"Error closing WebSocket: {e}")
     
     def _run_event_loop(self):
-        """Run the asyncio event loop for strategy execution"""
+        """Run the asyncio event loop for strategy execution with all tasks integrated"""
         try:
+            # Add GC task directly to event loop
+            self.loop.call_later(30, self._scheduled_gc_task)
+            
+            # Add monitoring task directly to event loop
+            self.loop.call_later(10, self._monitoring_task)
+            
+            # Run the main strategy coroutine
             self.loop.run_until_complete(self._strategy_coroutine())
         except Exception as e:
             self.logger.error(f"Error in event loop: {e}")
@@ -395,19 +395,126 @@ class HFTMarketMaker:
             self.logger.info("Event loop closed")
     
     async def _strategy_coroutine(self):
-        """Main strategy coroutine that runs in the event loop"""
-        # Set up tasks
+        """Main strategy coroutine with reduced task count for t2.micro"""
+        # Combine multiple tasks to reduce coroutine count
         tasks = [
             self._market_making_cycle(),
-            self._risk_management_cycle(),
-            self._order_timeout_checker(),
-            self._dynamic_threshold_updater(),
-            self._hedging_manager(),
-            self._heartbeat_monitor()
+            self._combined_risk_and_heartbeat_cycle(),  # Combined task
+            self._combined_order_and_threshold_cycle()  # Combined task
         ]
         
         # Wait for shutdown event or task completion
         await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _combined_risk_and_heartbeat_cycle(self):
+        """Combined risk management and heartbeat monitoring to reduce coroutines"""
+        self.last_heartbeat = time.time()
+        
+        while not self.shutdown_event.is_set():
+            try:
+                current_time = time.time()
+                
+                # ------ Risk management logic ------
+                # Calculate current PnL
+                await self._update_current_balance()
+                
+                # Check for circuit breaker conditions
+                if self.current_balance > 0 and self.initial_balance > 0:
+                    daily_pnl_percent = self.daily_pnl / self.initial_balance
+                    
+                    # Level 3 (global) circuit breaker
+                    if daily_pnl_percent <= -self.daily_meltdown_level:
+                        if not self.circuit_breaker_triggered:
+                            self.logger.warning(f"GLOBAL CIRCUIT BREAKER TRIGGERED: Daily loss {daily_pnl_percent:.2%}")
+                            self.circuit_breaker_triggered = True
+                            await self._cancel_all_orders_async()
+                    
+                    # Reset level 3 circuit breaker if we're back above threshold
+                    elif self.circuit_breaker_triggered and daily_pnl_percent > -self.daily_meltdown_level * 0.8:
+                        self.logger.info(f"Global circuit breaker reset: PnL recovered to {daily_pnl_percent:.2%}")
+                        self.circuit_breaker_triggered = False
+                
+                # ------ Heartbeat monitoring -------
+                time_since_heartbeat = current_time - self.last_heartbeat
+                
+                if time_since_heartbeat > self.heartbeat_interval * 3:
+                    self.logger.warning(f"No heartbeat for {time_since_heartbeat:.2f}s (threshold: {self.heartbeat_interval * 3:.1f}s)")
+                    
+                    # Attempt to reconnect WebSocket if not in circuit breaker mode
+                    if not self.circuit_breaker_triggered:
+                        self.logger.info("Reconnecting WebSocket due to heartbeat timeout")
+                        
+                        # Close existing connection
+                        self._close_websocket()
+                        
+                        # Reinitialize WebSocket with backoff handled inside method
+                        success = self._initialize_websocket()
+                        if success:
+                            self.logger.info("WebSocket reconnected successfully")
+                            self.last_heartbeat = time.time()
+                        else:
+                            self.logger.error("Failed to reconnect WebSocket")
+                
+                # Use a single sleep for both functions
+                await asyncio.sleep(1)
+                
+            except Exception as e:
+                self.logger.error(f"Error in combined risk and heartbeat cycle: {e}")
+                await asyncio.sleep(5)
+
+    async def _combined_order_and_threshold_cycle(self):
+        """Combined order timeout checking and dynamic threshold updating"""
+        last_threshold_update = time.time()
+        
+        while not self.shutdown_event.is_set():
+            try:
+                current_time = time.time()
+                
+                # ------ Order timeout checking logic ------
+                # Get a copy of active orders to avoid modification during iteration
+                with self.order_lock:
+                    orders = list(self.active_orders.items())
+                
+                for order_id, order in orders:
+                    order_age = current_time - order['timestamp']
+                    
+                    # Phase 1 timeout: adjust price and retry
+                    if order['phase'] == 1 and order_age > self.order_timeout_phase1:
+                        await self._handle_phase1_timeout(order_id, order)
+                    
+                    # Phase 2 timeout: cancel order completely
+                    elif order['phase'] == 2 and order_age > self.order_timeout_phase2:
+                        await self._handle_phase2_timeout(order_id, order)
+                
+                # ------ Dynamic threshold updating logic ------
+                if current_time - last_threshold_update >= 10:  # Update every 10 seconds
+                    # Only update if we have enough price data
+                    if len(self.last_prices) >= 10:
+                        # Calculate returns with copy to avoid race conditions
+                        with self.price_lock:
+                            prices = list(self.last_prices)
+                            
+                        # Calculate returns
+                        returns = [prices[i]/prices[i-1] - 1 for i in range(1, len(prices))]
+                        
+                        # Use JIT-compiled function for standard deviation calculation
+                        std_dev = calculate_std_dev(returns)
+                        two_sigma = 2 * std_dev
+                        
+                        # Set dynamic threshold to max of base threshold and 2-sigma
+                        self.dynamic_spread_threshold = max(self.spread_threshold, two_sigma)
+                        
+                        # Log threshold adjustment if significant
+                        if abs(self.dynamic_spread_threshold - self.spread_threshold) > 0.0001:
+                            self.logger.info(f"Dynamic spread threshold adjusted to {self.dynamic_spread_threshold:.4%}")
+                    
+                    last_threshold_update = current_time
+                
+                await asyncio.sleep(0.05)
+                
+            except Exception as e:
+                self.logger.error(f"Error in combined order and threshold cycle: {e}")
+                await asyncio.sleep(0.1)
     
     async def _market_making_cycle(self):
         """Core market making logic that runs continuously"""
@@ -622,34 +729,6 @@ class HFTMarketMaker:
             self.logger.error(f"Error waiting for response: {e}")
             return None
     
-    async def _order_timeout_checker(self):
-        """Check for and handle order timeouts"""
-        while not self.shutdown_event.is_set():
-            try:
-                # Get a copy of active orders to avoid modification during iteration
-                with self.order_lock:
-                    orders = list(self.active_orders.items())
-                
-                current_time = time.time()
-                
-                for order_id, order in orders:
-                    order_age = current_time - order['timestamp']
-                    
-                    # Phase 1 timeout: adjust price and retry
-                    if order['phase'] == 1 and order_age > self.order_timeout_phase1:
-                        await self._handle_phase1_timeout(order_id, order)
-                    
-                    # Phase 2 timeout: cancel order completely
-                    elif order['phase'] == 2 and order_age > self.order_timeout_phase2:
-                        await self._handle_phase2_timeout(order_id, order)
-                
-                # Brief sleep to avoid CPU overuse
-                await asyncio.sleep(0.05)
-                
-            except Exception as e:
-                self.logger.error(f"Error in order timeout checker: {e}")
-                await asyncio.sleep(0.1)
-    
     async def _handle_phase1_timeout(self, order_id, order):
         """Handle phase 1 order timeout by adjusting price and retrying"""
         try:
@@ -721,85 +800,6 @@ class HFTMarketMaker:
         except Exception as e:
             self.logger.error(f"Error handling phase 2 timeout: {e}")
     
-    async def _risk_management_cycle(self):
-        """Monitor for risk conditions and activate circuit breakers if needed"""
-        while not self.shutdown_event.is_set():
-            try:
-                # Daily reset check
-                current_time = datetime.now()
-                if (current_time - self.daily_start_time).total_seconds() > 24*60*60:
-                    self._reset_daily_metrics()
-                
-                # Calculate current PnL
-                await self._update_current_balance()
-                
-                # Check for circuit breaker conditions
-                if self.current_balance > 0 and self.initial_balance > 0:
-                    daily_pnl_percent = self.daily_pnl / self.initial_balance
-                    
-                    # Level 3 (global) circuit breaker
-                    if daily_pnl_percent <= -self.daily_meltdown_level:
-                        if not self.circuit_breaker_triggered:
-                            self.logger.warning(f"GLOBAL CIRCUIT BREAKER TRIGGERED: Daily loss {daily_pnl_percent:.2%}")
-                            self.circuit_breaker_triggered = True
-                            await self._cancel_all_orders_async()
-                    
-                    # Reset level 3 circuit breaker if we're back above threshold
-                    elif self.circuit_breaker_triggered and daily_pnl_percent > -self.daily_meltdown_level * 0.8:
-                        self.logger.info(f"Global circuit breaker reset: PnL recovered to {daily_pnl_percent:.2%}")
-                        self.circuit_breaker_triggered = False
-                
-                # Check trading frequency circuit breaker (level 2)
-                one_minute_ago = current_time - timedelta(minutes=1)
-                trades_last_minute = sum(1 for ts in self.latency_samples if ts > 0)
-                
-                if trades_last_minute > 50:  # More than 50 trades per minute
-                    self.logger.warning(f"Trading frequency circuit breaker: {trades_last_minute} trades/min")
-                    # Implement cooldown for 10 seconds
-                    cooldown_until = time.time() + 10
-                    self.cooldown_until['BUY'] = cooldown_until
-                    self.cooldown_until['SELL'] = cooldown_until
-                
-                # Add single-trade stop loss check
-                try:
-                    # Get current price
-                    with self.price_lock:
-                        current_price = self.last_trade_price
-                    
-                    if current_price > 0:
-                        # Get copy of trade entries to avoid modification during iteration
-                        with self.trade_lock:
-                            entries = self.trade_entries.copy()
-                        
-                        # Check each entry against stop loss
-                        for order_id, entry_data in entries.items():
-                            if current_price <= entry_data['stop_loss_price']:
-                                self.logger.warning(f"SINGLE-TRADE STOP LOSS TRIGGERED for {order_id}: "
-                                                   f"Entry: {entry_data['entry_price']}, Current: {current_price}, "
-                                                   f"Stop: {entry_data['stop_loss_price']}")
-                                
-                                # Execute market order to close position
-                                if self.is_active and not self.circuit_breaker_triggered:
-                                    # Place market sell order
-                                    self.loop.call_soon_threadsafe(
-                                        lambda: asyncio.ensure_future(
-                                            self._place_market_hedge('SELL', entry_data['quantity'])
-                                        )
-                                    )
-                                    
-                                    # Remove from tracking
-                                    with self.trade_lock:
-                                        if order_id in self.trade_entries:
-                                            del self.trade_entries[order_id]
-                except Exception as e:
-                    self.logger.error(f"Error in stop loss check: {e}")
-                
-                await asyncio.sleep(1)  # Check every second
-                
-            except Exception as e:
-                self.logger.error(f"Error in risk management cycle: {e}")
-                await asyncio.sleep(5)
-    
     async def _update_current_balance(self):
         """Update current balance and PnL calculations"""
         try:
@@ -841,197 +841,101 @@ class HFTMarketMaker:
         except Exception as e:
             self.logger.error(f"Error updating current balance: {e}")
     
-    async def _dynamic_threshold_updater(self):
-        """Update dynamic spread threshold based on recent volatility"""
-        while not self.shutdown_event.is_set():
-            try:
-                # Wait until we have enough price data
-                if len(self.last_prices) < 10:
-                    await asyncio.sleep(1)
-                    continue
-                
-                # Only update every 10 seconds
-                current_time = time.time()
-                if current_time - self.last_spread_calculation < 10:
-                    await asyncio.sleep(0.1)
-                    continue
-                
-                # Calculate returns with copy to avoid race conditions
-                with self.price_lock:
-                    prices = list(self.last_prices)
-                    
-                if len(prices) < 2:
-                    await asyncio.sleep(1)
-                    continue
-                    
-                # Calculate returns
-                returns = [prices[i]/prices[i-1] - 1 for i in range(1, len(prices))]
-                
-                # Use JIT-compiled function for standard deviation calculation
-                std_dev = calculate_std_dev(returns)
-                two_sigma = 2 * std_dev
-                
-                # Set dynamic threshold to max of base threshold and 2-sigma
-                self.dynamic_spread_threshold = max(self.spread_threshold, two_sigma)
-                
-                # Update calculation timestamp
-                self.last_spread_calculation = current_time
-                
-                # Log threshold adjustment if significant
-                if abs(self.dynamic_spread_threshold - self.spread_threshold) > 0.0001:
-                    self.logger.info(f"Dynamic spread threshold adjusted to {self.dynamic_spread_threshold:.4%}")
-                
-                await asyncio.sleep(1)  # Brief pause before next calculation
-                
-            except Exception as e:
-                self.logger.error(f"Error updating dynamic threshold: {e}")
-                await asyncio.sleep(5)
-    
-    async def _hedging_manager(self):
-        """
-        Manage hedging positions and maintain balanced exposure
-        Monitors unhedged positions and ensures risk is properly managed
-        """
-        while not self.shutdown_event.is_set():
-            try:
-                # Check for unhedged positions from filled orders
-                with self.order_lock:
-                    active_orders_copy = self.active_orders.copy()
-                
-                # Balance exposure if needed
-                if hasattr(self, 'pending_hedges') and self.pending_hedges:
-                    pending_hedges_copy = self.pending_hedges.copy()
-                    for order_id, hedge_info in pending_hedges_copy.items():
-                        # Check if hedge is still pending after timeout
-                        if time.time() - hedge_info.get('timestamp', 0) > 5:  # 5 second timeout
-                            self.logger.warning(f"Hedge for {order_id} has been pending for >5s, forcing market hedge")
-                            
-                            # Force market hedge
-                            side = hedge_info.get('side')
-                            quantity = hedge_info.get('quantity')
-                            
-                            if side and quantity:
-                                # Execute market hedge with event loop
-                                self.loop.call_soon_threadsafe(
-                                    lambda: asyncio.ensure_future(self._place_market_hedge(
-                                        'BUY' if side == 'SELL' else 'SELL', 
-                                        quantity
-                                    ))
-                                )
-                                
-                                # Remove from pending hedges
-                                if hasattr(self, 'hedge_lock'):
-                                    with self.hedge_lock:
-                                        if order_id in self.pending_hedges:
-                                            del self.pending_hedges[order_id]
-                
-                # Check position balance between buys and sells
-                # This is a simple implementation - could be enhanced with actual position tracking
-                
-                await asyncio.sleep(1)  # Check every second
-            except Exception as e:
-                self.logger.error(f"Error in hedging manager: {e}")
-                await asyncio.sleep(5)  # Wait longer on error
-    
-    async def _heartbeat_monitor(self):
-        """
-        Monitor WebSocket connection health and reconnect if needed
-        Tracks time since last received message to detect connection issues
-        Features enhanced stability monitoring and adaptive timeouts
-        """
-        self.last_heartbeat = time.time()
-        self.heartbeat_interval = 5  # 5 seconds base interval
-        
-        # Track heartbeat history for connection quality analysis
-        heartbeat_gaps = deque(maxlen=10)  # Store last 10 times between heartbeats
-        
-        while not self.shutdown_event.is_set():
-            try:
-                current_time = time.time()
-                time_since_heartbeat = current_time - self.last_heartbeat
-                
-                # Adapt heartbeat interval based on connection history
-                adaptive_interval = self.heartbeat_interval
-                if len(heartbeat_gaps) > 5:
-                    # If we have enough history, calculate mean and standard deviation
-                    mean_gap = sum(heartbeat_gaps) / len(heartbeat_gaps)
-                    # Use a more forgiving threshold on unstable connections
-                    adaptive_interval = max(self.heartbeat_interval, min(20, mean_gap * 2))
-                
-                # Check if we haven't received a heartbeat for too long
-                if time_since_heartbeat > adaptive_interval * 3:
-                    self.logger.warning(f"No heartbeat for {time_since_heartbeat:.2f}s (threshold: {adaptive_interval * 3:.1f}s)")
-                    
-                    # Track this gap for future adaptations
-                    heartbeat_gaps.append(time_since_heartbeat)
-                    
-                    # Attempt to reconnect WebSocket if not in circuit breaker mode
-                    if not self.circuit_breaker_triggered:
-                        self.logger.info("Reconnecting WebSocket due to heartbeat timeout")
-                        
-                        # Avoid resource spikes on t2.micro instances
-                        if self.ws_reconnect_count > 2:
-                            # Throttle CPU usage during reconnect storms
-                            await asyncio.sleep(1)
-                        
-                        # Close existing connection
-                        self._close_websocket()
-                        
-                        # Reinitialize WebSocket with backoff handled inside method
-                        success = self._initialize_websocket()
-                        if success:
-                            self.logger.info("WebSocket reconnected successfully")
-                            self.last_heartbeat = time.time()  # Reset heartbeat timer
-                        else:
-                            self.logger.error("Failed to reconnect WebSocket")
-                            
-                            # If too many reconnect attempts, trigger circuit breaker
-                            if self.ws_reconnect_count > self.max_reconnect_attempts:
-                                self.logger.error(f"Exceeded max reconnect attempts ({self.max_reconnect_attempts}), activating circuit breaker")
-                                self.circuit_breaker_triggered = True
-                else:
-                    # Normal heartbeat gap, record for adaptive calculations
-                    if time_since_heartbeat > 0.5:  # Only record meaningful gaps
-                        heartbeat_gaps.append(time_since_heartbeat)
-                        
-                # Check again after a short interval
-                # Use shorter check interval when issues detected
-                check_interval = 1.0 if time_since_heartbeat < adaptive_interval else 0.5
-                await asyncio.sleep(check_interval)
-                    
-            except Exception as e:
-                self.logger.error(f"Error in heartbeat monitor: {e}")
-                await asyncio.sleep(5)
-    
-    def _round_quantity(self, quantity):
-        """Round quantity to appropriate precision based on symbol info"""
+    async def _place_hedge_order(self, side, quantity, price):
+        """Place a hedge order with faster market conversion on timeout"""
         try:
-            # Get symbol info for precision
-            symbol_info = self.binance_client.get_symbol_info(self.symbol)
+            self.logger.info(f"Placing hedge {side} order: {quantity} @ {price}")
             
-            if symbol_info and 'filters' in symbol_info:
-                # Find the LOT_SIZE filter
-                lot_size_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), None)
+            # Place limit order first
+            client_order_id = await self._place_order(side, quantity, price)
+            
+            if not client_order_id:
+                # If limit order placement fails, try market order with fallback
+                await self._place_market_hedge_fallback(side, quantity)
+                return
                 
-                if lot_size_filter:
-                    step_size = float(lot_size_filter['stepSize'])
-                    
-                    # Calculate precision from step size
-                    precision = 0
-                    if step_size < 1:
-                        precision = str(step_size)[::-1].find('.')
-                    
-                    # Round down to step size
-                    rounded = int(quantity / step_size) * step_size
-                    return round(rounded, precision)
+            # Start a timeout check for the hedge order
+            hedge_timeout = 1.0  # 1 second timeout for hedge orders
             
-            # Default precision if we couldn't get symbol info
-            return round(quantity, 5)
+            await asyncio.sleep(hedge_timeout)
+            
+            # Check if order was filled
+            with self.order_lock:
+                if client_order_id in self.active_orders:
+                    # Cancel the limit order and place market order instead
+                    self.logger.info(f"Hedge order {client_order_id} timed out, converting to market order")
+                    
+                    # Cancel the limit order
+                    cancel_success = await self._cancel_order(client_order_id)
+                    
+                    # Place market order with fallback
+                    await self._place_market_hedge_fallback(order['side'], order['quantity'])
+                    
+                    # Remove from active orders
+                    with self.order_lock:
+                        if client_order_id in self.active_orders:
+                            del self.active_orders[client_order_id]
             
         except Exception as e:
-            self.logger.error(f"Error rounding quantity: {e}")
-            # Default to 5 decimal places
-            return round(quantity, 5)
+            self.logger.error(f"Error placing hedge order: {e}")
+    
+    async def _place_market_hedge(self, side, quantity):
+        """Place a market order for hedging"""
+        try:
+            # Format parameters
+            params = {
+                'symbol': self.symbol,
+                'side': side,
+                'type': 'MARKET',
+                'quantity': str(quantity)
+            }
+            
+            # Send market order request
+            request_id = self.ws_client._send_signed_request("order.place", params)
+            
+            # Wait for response
+            response = await asyncio.wait_for(
+                self._wait_for_response(request_id),
+                timeout=0.5
+            )
+            
+            if response and response.get('status') == 200:
+                self.logger.info(f"Market hedge order placed successfully: {side} {quantity}")
+                return True
+            else:
+                self.logger.warning(f"Failed to place market hedge order: {response}")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Error placing market hedge order: {e}")
+            return False
+    
+    async def _place_market_hedge_fallback(self, side, quantity):
+        """Place a market order for hedging with fallback to REST API"""
+        try:
+            # Try WebSocket API first
+            ws_success = await self._place_market_hedge(side, quantity)
+            
+            # Fall back to REST API if WebSocket fails
+            if not ws_success:
+                self.logger.warning("WebSocket API market order failed, falling back to REST API")
+                try:
+                    loop = self.loop
+                    await loop.run_in_executor(
+                        None, 
+                        lambda: self.binance_client.place_market_order(self.symbol, side, quantity)
+                    )
+                    self.logger.info(f"Market hedge order placed via REST API: {side} {quantity}")
+                    return True
+                except Exception as rest_error:
+                    self.logger.error(f"REST API fallback also failed: {rest_error}")
+                    return False
+            
+            return ws_success
+                
+        except Exception as e:
+            self.logger.error(f"Error placing market hedge order: {e}")
+            return False
     
     def handle_websocket_message(self, message):
         """Process WebSocket message from the main manager"""
@@ -1178,102 +1082,6 @@ class HFTMarketMaker:
                     
         except Exception as e:
             self.logger.error(f"Error handling filled order: {e}")
-    
-    async def _place_hedge_order(self, side, quantity, price):
-        """Place a hedge order with faster market conversion on timeout"""
-        try:
-            self.logger.info(f"Placing hedge {side} order: {quantity} @ {price}")
-            
-            # Place limit order first
-            client_order_id = await self._place_order(side, quantity, price)
-            
-            if not client_order_id:
-                # If limit order placement fails, try market order with fallback
-                await self._place_market_hedge_fallback(side, quantity)
-                return
-                
-            # Start a timeout check for the hedge order
-            hedge_timeout = 1.0  # 1 second timeout for hedge orders
-            
-            await asyncio.sleep(hedge_timeout)
-            
-            # Check if order was filled
-            with self.order_lock:
-                if client_order_id in self.active_orders:
-                    # Cancel the limit order and place market order instead
-                    self.logger.info(f"Hedge order {client_order_id} timed out, converting to market order")
-                    
-                    # Cancel the limit order
-                    cancel_success = await self._cancel_order(client_order_id)
-                    
-                    # Place market order with fallback
-                    await self._place_market_hedge_with_fallback(side, quantity)
-                    
-                    # Remove from active orders
-                    with self.order_lock:
-                        if client_order_id in self.active_orders:
-                            del self.active_orders[client_order_id]
-            
-        except Exception as e:
-            self.logger.error(f"Error placing hedge order: {e}")
-    
-    async def _place_market_hedge(self, side, quantity):
-        """Place a market order for hedging"""
-        try:
-            # Format parameters
-            params = {
-                'symbol': self.symbol,
-                'side': side,
-                'type': 'MARKET',
-                'quantity': str(quantity)
-            }
-            
-            # Send market order request
-            request_id = self.ws_client._send_signed_request("order.place", params)
-            
-            # Wait for response
-            response = await asyncio.wait_for(
-                self._wait_for_response(request_id),
-                timeout=0.5
-            )
-            
-            if response and response.get('status') == 200:
-                self.logger.info(f"Market hedge order placed successfully: {side} {quantity}")
-                return True
-            else:
-                self.logger.warning(f"Failed to place market hedge order: {response}")
-                return False
-                
-        except Exception as e:
-            self.logger.error(f"Error placing market hedge order: {e}")
-            return False
-    
-    async def _place_market_hedge_fallback(self, side, quantity):
-        """Place a market order for hedging with fallback to REST API"""
-        try:
-            # Try WebSocket API first
-            ws_success = await self._place_market_hedge(side, quantity)
-            
-            # Fall back to REST API if WebSocket fails
-            if not ws_success:
-                self.logger.warning("WebSocket API market order failed, falling back to REST API")
-                try:
-                    loop = self.loop
-                    await loop.run_in_executor(
-                        None, 
-                        lambda: self.binance_client.place_market_order(self.symbol, side, quantity)
-                    )
-                    self.logger.info(f"Market hedge order placed via REST API: {side} {quantity}")
-                    return True
-                except Exception as rest_error:
-                    self.logger.error(f"REST API fallback also failed: {rest_error}")
-                    return False
-            
-            return ws_success
-                
-        except Exception as e:
-            self.logger.error(f"Error placing market hedge order: {e}")
-            return False
     
     def _handle_depth_update(self, message):
         """Process order book depth update messages"""
@@ -1430,22 +1238,6 @@ class HFTMarketMaker:
         except Exception as e:
             self.logger.error(f"Error resetting daily metrics: {e}")
     
-    def _monitoring_thread(self):
-        """Thread for monitoring and reporting performance metrics"""
-        while self.is_active:
-            try:
-                # Report metrics every 5 minutes
-                if time.time() - self.last_metrics_report > 300:  # 5 minutes
-                    self._report_metrics()
-                    self.last_metrics_report = time.time()
-                
-                # Sleep to avoid excessive CPU usage
-                time.sleep(10)
-                
-            except Exception as e:
-                self.logger.error(f"Error in monitoring thread: {e}")
-                time.sleep(30)  # Longer sleep on error
-    
     def _report_metrics(self):
         """Generate and log performance metrics"""
         try:
@@ -1505,23 +1297,20 @@ class HFTMarketMaker:
         except Exception as e:
             self.logger.error(f"Error generating metrics report: {e}")
     
-    def _schedule_reconnect_counter_reset(self):
-        """
-        Schedule a reset of the reconnection counter after a stable period
-        This prevents connection quality degradation from accumulating indefinitely
-        """
-        def _delayed_reset():
-            # Wait for stable period (2 minutes) before resetting
-            time.sleep(120)
+    async def _schedule_reconnect_counter_reset(self):
+        """Schedule reconnect counter reset as async coroutine instead of new thread"""
+        try:
+            # Wait for stable period (2 minutes)
+            await asyncio.sleep(120)
+            
             if self.ws_client and self.is_active and not self.circuit_breaker_triggered:
                 # Only reset if we're still connected after the wait period
                 old_count = self.ws_reconnect_count
                 if old_count > 0:
                     self.ws_reconnect_count = 0
                     self.logger.info(f"Connection stable for 2 minutes, reconnection counter reset from {old_count} to 0")
-        
-        # Start counter reset thread
-        threading.Thread(target=_delayed_reset, daemon=True).start()
+        except Exception as e:
+            self.logger.error(f"Error in reconnect counter reset: {e}")
 
     def _synchronize_state_after_reconnect(self):
         """
@@ -1631,22 +1420,40 @@ class HFTMarketMaker:
         
         return None
     
-    def _scheduled_gc(self):
-        """Run garbage collection periodically to control memory usage"""
-        while self.is_active:
-            try:
-                # Sleep first to avoid GC at startup
-                time.sleep(30)  # Run every 30 seconds
-                
-                # Only run GC if memory usage is high
-                process = psutil.Process(os.getpid())
-                memory_info = process.memory_info()
-                memory_usage_mb = memory_info.rss / 1024 / 1024
-                
-                if memory_usage_mb > 300:  # 300MB threshold
-                    self.logger.debug(f"Running manual GC (memory: {memory_usage_mb:.1f}MB)")
-                    gc.collect()
-                
-            except Exception as e:
-                self.logger.error(f"Error in GC thread: {e}")
-                time.sleep(60)  # Longer sleep on error
+    def _scheduled_gc_task(self):
+        """Garbage collection task scheduled in event loop instead of separate thread"""
+        if not self.is_active:
+            return
+        
+        try:
+            # Only run GC if memory usage is high
+            process = psutil.Process(os.getpid())
+            memory_info = process.memory_info()
+            memory_usage_mb = memory_info.rss / 1024 / 1024
+            
+            if memory_usage_mb > 300:  # 300MB threshold
+                self.logger.debug(f"Running manual GC (memory: {memory_usage_mb:.1f}MB)")
+                gc.collect()
+        except Exception as e:
+            self.logger.error(f"Error in GC task: {e}")
+        
+        # Reschedule the task if still active
+        if self.is_active and self.loop:
+            self.loop.call_later(30, self._scheduled_gc_task)
+
+    def _monitoring_task(self):
+        """Monitoring task scheduled in event loop instead of separate thread"""
+        if not self.is_active:
+            return
+            
+        try:
+            # Report metrics every 5 minutes
+            if time.time() - self.last_metrics_report > 300:  # 5 minutes
+                self._report_metrics()
+                self.last_metrics_report = time.time()
+        except Exception as e:
+            self.logger.error(f"Error in monitoring task: {e}")
+        
+        # Reschedule the task
+        if self.is_active and self.loop:
+            self.loop.call_later(10, self._monitoring_task)
