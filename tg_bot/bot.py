@@ -162,6 +162,11 @@ class TelegramBot:
     async def _handle_start_grid(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /startgrid command"""
         async def handler(update):
+            # Check if grid trading is enabled
+            if not config.ENABLE_GRID_TRADING:
+                await update.message.reply_text("Grid trading is disabled in configuration")
+                return
+                
             if self.grid_trader:
                 result = self.grid_trader.start()
                 await update.message.reply_text(result)
@@ -176,6 +181,11 @@ class TelegramBot:
     async def _handle_stop_grid(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /stopgrid command"""
         async def handler(update):
+            # Check if grid trading is enabled
+            if not config.ENABLE_GRID_TRADING:
+                await update.message.reply_text("Grid trading is disabled in configuration")
+                return
+                
             if self.grid_trader:
                 result = self.grid_trader.stop()
                 await update.message.reply_text(result)

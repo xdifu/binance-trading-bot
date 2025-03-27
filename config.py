@@ -59,6 +59,11 @@ TELEGRAM_NOTIFICATION_LEVEL = os.getenv("TELEGRAM_NOTIFICATION_LEVEL", "normal")
 # 应用设置
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()  # 日志级别，可改为"DEBUG"、"WARNING"、"ERROR"以调整日志详细程度
 DATA_DIR = os.getenv("DATA_DIR", "./data")  # 数据存储目录，修改为其他路径可更改数据保存位置
+ENABLE_GRID_TRADING = os.getenv("ENABLE_GRID_TRADING", "false").lower() == "true"  # 是否启用网格交易功能
+ENABLE_RISK_MANAGER = os.getenv("ENABLE_RISK_MANAGER", "false").lower() == "true"  # 是否启用网格交易风险管理
+
+# 高频交易配置
+HFT_ENABLED = os.getenv("HFT_ENABLED", "true").lower() == "true"  # 是否启用高频交易模式
 
 # 参数验证函数
 def validate_config():

@@ -68,69 +68,80 @@ class GridTradingBot:
         except Exception as e:
             logger.error(f"Failed to initialize Telegram bot: {e}")
         
-        # Initialize grid trading strategy
-        self.grid_trader = GridTrader(
-            binance_client=self.binance_client,
-            telegram_bot=self.telegram_bot
-        )
-        logger.info("Grid trading strategy initialized successfully")
+        # Initialize grid trading strategy only if enabled
+        if config.ENABLE_GRID_TRADING:
+            self.grid_trader = GridTrader(
+                binance_client=self.binance_client,
+                telegram_bot=self.telegram_bot
+            )
+            logger.info("Grid trading strategy initialized successfully")
+        else:
+            self.grid_trader = None
+            logger.info("Grid trading disabled via configuration")
         
-        # Initialize risk management
-        self.risk_manager = RiskManager(
-            binance_client=self.binance_client,
-            telegram_bot=self.telegram_bot,
-            grid_trader=self.grid_trader  # Add reference to grid_trader
-        )
-        logger.info("Risk management module initialized successfully")
+        # Initialize risk management only if both enabled and grid trading is active
+        if config.ENABLE_RISK_MANAGER and config.ENABLE_GRID_TRADING:
+            self.risk_manager = RiskManager(
+                binance_client=self.binance_client,
+                telegram_bot=self.telegram_bot,
+                grid_trader=self.grid_trader
+            )
+            logger.info("Risk management module initialized successfully")
+        else:
+            self.risk_manager = None
+            logger.info("Risk management disabled via configuration")
         
-        # Update Telegram bot references
+        # Update Telegram bot references if needed
         if self.telegram_bot:
             self.telegram_bot.grid_trader = self.grid_trader
             self.telegram_bot.risk_manager = self.risk_manager
-
+    
     def _handle_websocket_message(self, message):
         """Process WebSocket messages with focus on business logic only"""
         try:
-            # Handle kline events for price updates
-            if (hasattr(message, 'e') and message.e == 'kline' and 
-                hasattr(message, 'k') and hasattr(message.k, 'c') and 
-                hasattr(message, 's')):  # Added check for 's' attribute
-                
-                symbol = message.s
-                price = float(message.k.c)
-                
-                if symbol == config.SYMBOL:
-                    # Check risk management conditions if active
-                    if self.risk_manager and self.risk_manager.is_active:
-                        self.risk_manager.check_price(price)
-            
-            # Handle execution reports for order updates
-            elif hasattr(message, 'e') and message.e == 'executionReport':
-                self.grid_trader.handle_order_update(message)
-                
-            # Handle order list status updates (OCO orders)
-            elif hasattr(message, 'e') and message.e == 'listStatus':
-                self._handle_oco_update(message)
-                
-        except AttributeError:
-            # Handle dict-format messages as fallback
-            if isinstance(message, dict):
-                if ('e' in message and message['e'] == 'kline' and 
-                    'k' in message and 'c' in message.get('k', {}) and
-                    's' in message):  # Added check for 's' key
+            # Only process messages for grid trading if enabled
+            if config.ENABLE_GRID_TRADING and self.grid_trader:
+                # Handle kline events for price updates
+                if (hasattr(message, 'e') and message.e == 'kline' and 
+                    hasattr(message, 'k') and hasattr(message.k, 'c') and 
+                    hasattr(message, 's')):
                     
-                    symbol = message['s']
-                    price = float(message['k']['c'])
+                    symbol = message.s
+                    price = float(message.k.c)
                     
                     if symbol == config.SYMBOL:
+                        # Check risk management conditions if active
                         if self.risk_manager and self.risk_manager.is_active:
                             self.risk_manager.check_price(price)
                 
-                elif 'e' in message and message['e'] == 'executionReport':
+                # Handle execution reports for order updates
+                elif hasattr(message, 'e') and message.e == 'executionReport':
                     self.grid_trader.handle_order_update(message)
                     
-                elif 'e' in message and message['e'] == 'listStatus':
+                # Handle order list status updates (OCO orders)
+                elif hasattr(message, 'e') and message.e == 'listStatus':
                     self._handle_oco_update(message)
+                    
+        except AttributeError:
+            # Handle dict-format messages as fallback
+            if isinstance(message, dict) and config.ENABLE_GRID_TRADING and self.grid_trader:
+                # Same processing with dict format, only if grid trading enabled
+                # Handle dict-format WebSocket messages
+                if 'e' in message:
+                    event_type = message['e']
+                    if event_type == 'kline' and 'k' in message and 'c' in message['k'] and 's' in message:
+                        symbol = message['s']
+                        price = float(message['k']['c'])
+                        if symbol == config.SYMBOL:
+                            if self.risk_manager and self.risk_manager.is_active:
+                                self.risk_manager.check_price(price)
+                    elif event_type == 'executionReport':
+                        self.grid_trader.handle_order_update(message)
+                    elif event_type == 'listStatus':
+                        self._handle_oco_update(message)
+                else:
+                    self.logger.error("Unsupported dict-format WebSocket message received")
+                
         except Exception as e:
             self.logger.error(f"Failed to process WebSocket message: {e}")
         
@@ -388,7 +399,7 @@ class GridTradingBot:
         """Grid maintenance thread with improved timing precision and unfilled slot checking"""
         last_grid_check = datetime.now()
         last_unfilled_check = datetime.now()
-        last_oco_check = datetime.now()  # Add new timestamp for OCO checks
+        last_oco_check = datetime.now()
         
         while True:
             try:
@@ -396,6 +407,11 @@ class GridTradingBot:
                 with self.state_lock:
                     if not self.is_running:
                         break
+                    
+                # Skip processing if grid trading is disabled
+                if not config.ENABLE_GRID_TRADING or not self.grid_trader:
+                    time.sleep(MAINTENANCE_THREAD_SLEEP)
+                    continue
                 
                 now = datetime.now()
                 
@@ -410,7 +426,7 @@ class GridTradingBot:
                     last_unfilled_check = now
                 
                 # Check for missing OCO orders every 5 minutes
-                if (now - last_oco_check).total_seconds() > 5 * 60:  # 5 minutes
+                if (now - last_oco_check).total_seconds() > 5 * 60 and config.ENABLE_RISK_MANAGER:  # 5 minutes
                     if self.risk_manager and self.risk_manager.is_active:
                         self.risk_manager._check_for_missing_oco_orders()
                     last_oco_check = now
@@ -422,11 +438,13 @@ class GridTradingBot:
                 time.sleep(MAINTENANCE_THREAD_SLEEP)
     
     def _auto_start_grid_trading(self):
-        """
-        Automatically start grid trading without requiring Telegram command.
-        This ensures the bot can start trading immediately after system startup or restart.
-        """
+        """Automatically start grid trading without requiring Telegram command."""
         try:
+            # Skip if grid trading is disabled in config
+            if not config.ENABLE_GRID_TRADING:
+                logger.info("Grid trading disabled in configuration, skipping auto-start")
+                return
+                
             if not self.grid_trader:
                 logger.error("Cannot auto-start trading: Grid trader not initialized")
                 return
