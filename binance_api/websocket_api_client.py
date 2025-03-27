@@ -6,6 +6,7 @@ import base64
 import logging
 import threading
 import ssl
+import asyncio
 from queue import Queue, Empty
 from typing import Optional, Dict, Any, Callable
 import websocket
@@ -30,7 +31,8 @@ class BinanceWebSocketAPIClient:
         use_testnet: bool = False,
         auto_reconnect: bool = True,
         ping_interval: int = 20,
-        timeout: int = 20  # Increased default timeout to 20 seconds
+        timeout: int = 20,
+        loop = None  # Add event loop parameter
     ):
         """
         Initialize the WebSocket API client
@@ -44,6 +46,7 @@ class BinanceWebSocketAPIClient:
             auto_reconnect: Whether to automatically reconnect on disconnection
             ping_interval: How often to send ping frames (seconds)
             timeout: Request timeout (seconds)
+            loop: Event loop for asyncio tasks
         """
         self.logger = logging.getLogger(__name__)
         
@@ -116,6 +119,23 @@ class BinanceWebSocketAPIClient:
         self.sync_max_retries = 5
         self.time_sync_lock = threading.Lock()
         
+        # Store reference to event loop
+        self.loop = loop
+        if not self.loop:
+            try:
+                self.loop = asyncio.get_event_loop()
+            except RuntimeError:
+                import asyncio
+                self.loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(self.loop)
+        
+        # Use common task list
+        self._tasks = []
+        
+        # Add flags to control task execution
+        self._listen_running = False
+        self._ping_running = False
+        
         # Connect to WebSocket and synchronize time
         self.connect()
         
@@ -125,9 +145,6 @@ class BinanceWebSocketAPIClient:
     def connect(self) -> bool:
         """
         Establish connection to WebSocket API and authenticate session
-        
-        Returns:
-            bool: True if connection was successful, False otherwise
         """
         if self.ws_connected:
             return True
@@ -139,15 +156,12 @@ class BinanceWebSocketAPIClient:
         try:
             self.logger.info(f"Connecting to {self.ws_base_url}...")
             
-            # Enable trace for debugging if needed
-            # websocket.enableTrace(True)
-            
             # Create WebSocket connection with proper settings
             self.ws = websocket.create_connection(
                 self.ws_base_url,
-                timeout=30,  # Increased timeout for initial connection
-                sslopt={"cert_reqs": ssl.CERT_REQUIRED},  # Enable certificate verification
-                enable_multithread=True,
+                timeout=30,
+                sslopt={"cert_reqs": ssl.CERT_REQUIRED},
+                enable_multithread=False,  # Disable multi-threading
                 skip_utf8_validation=True  # For performance
             )
             
@@ -157,15 +171,18 @@ class BinanceWebSocketAPIClient:
             
             self._running = True
             
-            # Start listener thread
-            self.listen_thread = threading.Thread(target=self._listen_forever)
-            self.listen_thread.daemon = True
-            self.listen_thread.start()
+            # Start listener and ping as coroutines in event loop
+            self._listen_running = True
+            self._ping_running = True
             
-            # Start ping thread
-            self.ping_thread = threading.Thread(target=self._ping_forever)
-            self.ping_thread.daemon = True
-            self.ping_thread.start()
+            # Schedule coroutines instead of creating threads
+            if self.loop:
+                self._tasks.append(
+                    asyncio.ensure_future(self._listen_async(), loop=self.loop)
+                )
+                self._tasks.append(
+                    asyncio.ensure_future(self._ping_async(), loop=self.loop)
+                )
             
             # Test connection with ping (with retry)
             ping_success = False
@@ -173,17 +190,17 @@ class BinanceWebSocketAPIClient:
                 try:
                     self.logger.debug(f"Ping server attempt {attempt}/{self.max_request_attempts}")
                     ping_response = self.ping_server()
-                    if ping_response and ping_response.get("status") == 200:
+                    if (ping_response and ping_response.get("status") == 200):
                         ping_success = True
                         self.logger.info("Connectivity check successful")
                         break
                     else:
                         self.logger.warning(f"Ping response not successful: {ping_response}")
-                        time.sleep(1)  # Short delay between attempts
+                        time.sleep(1)
                 except Exception as e:
                     self.logger.warning(f"Ping server attempt {attempt} failed: {e}")
                     if attempt < self.max_request_attempts:
-                        time.sleep(2)  # Longer delay before retry
+                        time.sleep(2)
             
             if not ping_success:
                 self.logger.error("All ping attempts failed")
@@ -207,12 +224,7 @@ class BinanceWebSocketAPIClient:
             return False
     
     def sync_server_time(self) -> bool:
-        """
-        Synchronize local time with Binance server time
-        
-        Returns:
-            bool: True if synchronization was successful, False otherwise
-        """
+        """Synchronize local time with Binance server time"""
         with self.time_sync_lock:
             try:
                 # Get server time
@@ -235,7 +247,7 @@ class BinanceWebSocketAPIClient:
                     if abs(new_offset) > 1000:
                         # If offset is > 1 second, log as warning
                         self.logger.warning(f"Local time is {'ahead of' if new_offset < 0 else 'behind'} server by "
-                                           f"{abs(new_offset)/1000:.2f} seconds. Offset applied: {new_offset}ms")
+                                          f"{abs(new_offset)/1000:.2f} seconds. Offset applied: {new_offset}ms")
                     else:
                         # Normal offset within threshold
                         self.logger.debug(f"Time synchronized with server. Offset: {new_offset}ms")
@@ -246,24 +258,25 @@ class BinanceWebSocketAPIClient:
                 else:
                     self.logger.error(f"Failed to get server time: {response}")
                     return False
+                    
             except Exception as e:
                 self.logger.error(f"Error synchronizing time: {e}")
                 
-                # Increment retry count
-                self.sync_retry_count += 1
-                
-                # If we've reached max retries, stop retrying
-                if self.sync_retry_count > self.sync_max_retries:
-                    self.logger.error(f"Failed to sync time after {self.sync_retry_count} attempts, giving up")
-                    return False
+                # Schedule retry instead of creating new thread
+                if self.loop and self._running:
+                    self.sync_retry_count += 1
                     
-                # Try again after a delay (exponential backoff)
-                retry_delay = min(30, 2 ** self.sync_retry_count)
-                self.logger.warning(f"Retrying time sync in {retry_delay} seconds...")
-                time.sleep(retry_delay)
-                
-                # Recursive retry
-                return self.sync_server_time()
+                    # If we've reached max retries, stop retrying
+                    if self.sync_retry_count <= self.sync_max_retries:
+                        # Try again after a delay (exponential backoff)
+                        retry_delay = min(30, 2 ** self.sync_retry_count)
+                        self.logger.warning(f"Scheduling time sync retry in {retry_delay} seconds...")
+                        
+                        self.loop.call_later(
+                            retry_delay,
+                            self.sync_server_time
+                        )
+                return False
     
     def get_adjusted_timestamp(self) -> int:
         """
@@ -335,50 +348,114 @@ class BinanceWebSocketAPIClient:
             self.logger.error(f"Error authenticating session: {e}")
             return False
     
-    def _listen_forever(self):
-        """Background thread that listens for incoming messages"""
-        while self._running and self.ws_connected:
+    async def _listen_async(self):
+        """Asynchronous replacement for _listen_forever thread"""
+        self.logger.debug("Starting async listener")
+        
+        while self._running and self._listen_running and self.ws_connected:
             try:
-                # Set a specific receive timeout to prevent blocking indefinitely
-                self.ws.settimeout(5.0)
+                # Non-blocking check with small timeout
+                self.ws.settimeout(0.5)
                 
-                # Use recv_data_frame instead of recv to properly handle all frame types
-                op_code, frame = self.ws.recv_data_frame(True)
-                self.last_received_time = time.time()
-                
-                # Handle different frame types
-                if op_code == ABNF.OPCODE_TEXT:
-                    message = frame.data.decode("utf-8")
-                    self._handle_message(message)
-                elif op_code == ABNF.OPCODE_BINARY:
-                    self.logger.debug("Received binary frame")
-                elif op_code == ABNF.OPCODE_PING:
-                    self.logger.debug("Received ping frame, sending pong")
-                    try:
-                        self.ws.pong(frame.data)
-                    except Exception as e:
-                        self.logger.error(f"Failed to send pong: {e}")
-                elif op_code == ABNF.OPCODE_PONG:
-                    self.logger.debug("Received pong frame")
-                elif op_code == ABNF.OPCODE_CLOSE:
-                    self.logger.info("Received close frame")
+                # Try to receive data
+                try:
+                    # Use recv_data_frame to handle all frame types
+                    op_code, frame = self.ws.recv_data_frame(True)
+                    self.last_received_time = time.time()
+                    
+                    # Handle different frame types
+                    if op_code == ABNF.OPCODE_TEXT:
+                        message = frame.data.decode("utf-8")
+                        self._handle_message(message)
+                    elif op_code == ABNF.OPCODE_BINARY:
+                        self.logger.debug("Received binary frame")
+                    elif op_code == ABNF.OPCODE_PING:
+                        self.logger.debug("Received ping frame, sending pong")
+                        try:
+                            self.ws.pong(frame.data)
+                        except Exception as e:
+                            self.logger.error(f"Failed to send pong: {e}")
+                    elif op_code == ABNF.OPCODE_PONG:
+                        self.logger.debug("Received pong frame")
+                    elif op_code == ABNF.OPCODE_CLOSE:
+                        self.logger.info("Received close frame")
+                        if not self.is_closed_by_user:
+                            self._handle_disconnect()
+                        break
+                        
+                except websocket.WebSocketTimeoutException:
+                    # Just a timeout, continue
+                    pass
+                except WebSocketConnectionClosedException:
                     if not self.is_closed_by_user:
+                        self.logger.error("WebSocket connection closed unexpectedly")
                         self._handle_disconnect()
                     break
-                
-            except websocket.WebSocketTimeoutException:
-                # This is normal - just a timeout on receive, continue
-                continue
-            except WebSocketConnectionClosedException:
-                if not self.is_closed_by_user:
-                    self.logger.error("WebSocket connection closed unexpectedly")
-                    self._handle_disconnect()
-                break
+                    
+                # Small sleep to yield control back to event loop
+                await asyncio.sleep(0.01)
+                    
             except Exception as e:
-                self.logger.error(f"Error while listening for messages: {e}")
+                self.logger.error(f"Error in async listener: {e}")
                 if not self.is_closed_by_user:
                     self._handle_disconnect()
                 break
+                
+        self.logger.debug("Async listener stopped")
+    
+    async def _ping_async(self):
+        """Asynchronous replacement for _ping_forever thread"""
+        self.logger.debug("Starting async ping service")
+        
+        while self._running and self._ping_running and self.ws_connected:
+            try:
+                # Check if it's time to send a ping
+                current_time = time.time()
+                if current_time - self.last_ping_time >= self.ping_interval:
+                    if self.ws_connected:
+                        try:
+                            # Send a websocket ping frame
+                            self.ws.ping()
+                            self.last_ping_time = current_time
+                            self.logger.debug("Sent ping frame")
+                        except Exception as e:
+                            self.logger.error(f"Error sending ping frame: {e}")
+                            
+                # Check for connection timeout
+                if current_time - self.last_received_time > 60:  # 60 seconds without response
+                    self.logger.warning("No messages received for 60 seconds, reconnecting...")
+                    self._handle_disconnect()
+                    break
+                    
+                # Sleep to yield control, use small intervals to be responsive
+                await asyncio.sleep(1)
+                    
+            except Exception as e:
+                self.logger.error(f"Error in async ping service: {e}")
+                
+        self.logger.debug("Async ping service stopped")
+    
+    async def _reconnect_async(self):
+        """Async reconnection method with exponential backoff"""
+        attempts = 0
+        max_attempts = 5
+        
+        while attempts < max_attempts and not self.ws_connected and self._running:
+            # Exponential backoff
+            wait_time = min(60, (2 ** attempts))
+            self.logger.info(f"Reconnecting in {wait_time} seconds (attempt {attempts+1}/{max_attempts})...")
+            
+            # Use asyncio sleep
+            await asyncio.sleep(wait_time)
+            
+            if self.connect():
+                self.logger.info("Reconnected successfully")
+                break
+            
+            attempts += 1
+            
+        if not self.ws_connected:
+            self.logger.error(f"Failed to reconnect after {max_attempts} attempts")
     
     def _ping_forever(self):
         """Background thread that sends ping frames"""
@@ -414,6 +491,10 @@ class BinanceWebSocketAPIClient:
         self.ws_connected = False
         self.session_authenticated = False
         
+        # Stop the running tasks
+        self._listen_running = False
+        self._ping_running = False
+        
         if self.ws:
             try:
                 self.ws.close()
@@ -422,41 +503,40 @@ class BinanceWebSocketAPIClient:
             self.ws = None
         
         # Auto-reconnect if enabled
-        if self.auto_reconnect and not self.is_closed_by_user:
-            self.logger.info("Attempting to reconnect...")
+        if self.auto_reconnect and not self.is_closed_by_user and self.loop:
+            self.logger.info("Scheduling reconnection...")
             
-            # Exponential backoff for reconnection attempts
-            attempts = 0
-            max_attempts = 5
-            while attempts < max_attempts and not self.ws_connected and self._running:
-                wait_time = min(60, (2 ** attempts))
-                self.logger.info(f"Reconnecting in {wait_time} seconds (attempt {attempts+1}/{max_attempts})...")
-                time.sleep(wait_time)
-                
-                if self.connect():
-                    self.logger.info("Reconnected successfully")
-                    break
-                
-                attempts += 1
-                
-            if not self.ws_connected:
-                self.logger.error(f"Failed to reconnect after {max_attempts} attempts")
+            # Schedule reconnection in event loop, not a new thread
+            self.loop.call_soon_threadsafe(
+                lambda: asyncio.ensure_future(self._reconnect_async(), loop=self.loop)
+            )
     
     def close(self):
         """Close the WebSocket connection gracefully"""
         self.logger.info("Closing WebSocket connection...")
         self.is_closed_by_user = True
         self._running = False
+        self._listen_running = False
+        self._ping_running = False
         
         # Clear all pending requests
         with self.lock:
             self.request_callbacks = {}
         
+        # Close WebSocket connection
         if self.ws:
             try:
                 self.ws.close()
             except:
                 pass
+            self.ws = None
+        
+        # Cancel all tasks
+        if self.loop:
+            for task in self._tasks:
+                if hasattr(task, 'cancel'):
+                    task.cancel()
+        self._tasks = []
         
         self.ws_connected = False
         self.session_authenticated = False

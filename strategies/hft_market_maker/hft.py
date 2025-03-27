@@ -869,7 +869,7 @@ class HFTMarketMaker:
                     cancel_success = await self._cancel_order(client_order_id)
                     
                     # Place market order with fallback
-                    await self._place_market_hedge_fallback(order['side'], order['quantity'])
+                    await self._place_market_hedge_fallback(side, quantity)
                     
                     # Remove from active orders
                     with self.order_lock:
