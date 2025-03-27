@@ -153,6 +153,13 @@ class HFTMarketMaker:
         
         self.heartbeat_interval = 5  # 5 seconds between heartbeats
         
+    def _handle_coroutine_exception(self, future):
+        """Handle exceptions from scheduled coroutines."""
+        try:
+            future.result()
+        except Exception as e:
+            self.logger.error(f"Unhandled exception in coroutine: {e}")
+
     def start(self):
         """Start the HFT market making strategy with single-thread event loop model"""
         self.logger.info(f"Starting HFT market maker for {self.symbol}")
@@ -203,7 +210,8 @@ class HFTMarketMaker:
             self.loop.call_soon_threadsafe(self._scheduled_gc_task)
             self.loop.call_soon_threadsafe(self._monitoring_task)
             # Schedule our main coroutine
-            asyncio.run_coroutine_threadsafe(self._strategy_coroutine(), self.loop)
+            future = asyncio.run_coroutine_threadsafe(self._strategy_coroutine(), self.loop)
+            future.add_done_callback(self._handle_coroutine_exception)
         
         self.is_active = True
         self.logger.info("HFT market maker started successfully")
