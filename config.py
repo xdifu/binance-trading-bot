@@ -64,7 +64,7 @@ ENABLE_RISK_MANAGER = os.getenv("ENABLE_RISK_MANAGER", "false").lower() == "true
 
 # 高频交易配置
 HFT_ENABLED = os.getenv("HFT_ENABLED", "true").lower() == "true"  # 是否启用高频交易模式
-ENABLE_HFT_MARKET_MAKING = os.getenv("ENABLE_HFT_MARKET_MAKING", "false").lower() == "true"  # 是否启用高频做市策略
+ENABLE_HFT_MARKET_MAKING = os.getenv("ENABLE_HFT_MARKET_MAKING", "true").lower() == "true"  # 是否启用高频做市策略
 
 # 参数验证函数
 def validate_config():
