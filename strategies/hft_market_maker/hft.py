@@ -151,6 +151,8 @@ class HFTMarketMaker:
         self.trade_entries = {}  # Dict of order_id -> entry info for stop loss tracking
         self.trade_lock = threading.RLock()
         
+        self.heartbeat_interval = 5  # 5 seconds between heartbeats
+        
     def start(self):
         """Start the HFT market making strategy with single-thread event loop model"""
         self.logger.info(f"Starting HFT market maker for {self.symbol}")
@@ -182,12 +184,26 @@ class HFTMarketMaker:
         # Initialize WebSocket connection for order book data
         self._initialize_websocket()
         
-        # Initialize and run the event loop directly in current thread
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
+        # Modified event loop handling:
+        try:
+            # Try to get existing loop instead of creating a new one
+            self.loop = asyncio.get_event_loop()
+        except RuntimeError:
+            # If there's no loop in this thread, create one
+            self.loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self.loop)
         
-        # Start event loop in current thread (no additional threads)
-        self._run_event_loop()
+        # Instead of running the loop directly in this thread,
+        # schedule the tasks in the existing loop
+        if not self.loop.is_running():
+            # Only run the loop if it's not already running
+            self._run_event_loop()
+        else:
+            # If loop is already running, just schedule our tasks
+            self.loop.call_soon_threadsafe(self._scheduled_gc_task)
+            self.loop.call_soon_threadsafe(self._monitoring_task)
+            # Schedule our main coroutine
+            asyncio.run_coroutine_threadsafe(self._strategy_coroutine(), self.loop)
         
         self.is_active = True
         self.logger.info("HFT market maker started successfully")
@@ -256,6 +272,7 @@ class HFTMarketMaker:
         - Tracks connection quality metrics
         - Optimized for t2.micro instance constraints
         """
+        import asyncio  # 添加这行导入
         try:
             # Track connection attempt start time
             attempt_start = time.time()
