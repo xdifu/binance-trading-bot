@@ -48,7 +48,7 @@ RISK_UPDATE_INTERVAL_MINUTES = float(os.getenv("RISK_UPDATE_INTERVAL_MINUTES", "
 
 # 高级交易设置
 TRADING_FEE_RATE = float(os.getenv("TRADING_FEE_RATE", "0.06"))  # 交易手续费率(%)，根据实际费率调整，影响利润计算
-MIN_NOTIONAL_VALUE = float(os.getenv("MIN_NOTIONAL_VALUE", "6"))   # 最小订单价值(USDT)，低于此值的订单将被跳过
+MIN_NOTIONAL_VALUE = float(os.getenv("MIN_NOTIONAL_VALUE", "6"))  # 最小订单价值(USDT)，低于此值的订单将被跳过
 
 # Telegram设置
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")  # Telegram机器人token，填入token可启用通知功能
