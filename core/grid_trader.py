@@ -687,11 +687,53 @@ class GridTrader:
     
     # OPTIMIZED: Unified order placement method replacing both previous methods
     def _place_grid_orders(self):
-        """Place all grid orders with unified logic for both WebSocket and REST APIs"""
+        """
+        Place all grid orders, prioritizing core zone for better capital utilization
+        """
+        # Get current balances
+        base_asset = self.symbol.replace('USDT', '')
+        quote_asset = 'USDT'
+        base_balance = self.binance_client.check_balance(base_asset)
+        quote_balance = self.binance_client.check_balance(quote_asset)
+        
+        # Account for locked balances
+        with self.balance_lock:
+            available_base = base_balance - self.locked_balances.get(base_asset, 0)
+            available_quote = quote_balance - self.locked_balances.get(quote_asset, 0)
+        
+        # Sort grid levels by priority before placing orders
+        current_price = self.current_market_price
+        grid_range = current_price * self.grid_range_percent
+        core_range = grid_range * self.core_zone_percentage
+        core_upper = current_price + (core_range / 2)
+        core_lower = current_price - (core_range / 2)
+        
+        # Create a list of levels with priorities
+        grid_with_priority = []
         for level in self.grid:
-            # Call the single order placement method for each level
+            # Calculate priority (0-1) based on proximity to current price
+            if core_lower <= level['price'] <= core_upper:
+                # Core zone - higher priority the closer to current price
+                priority = 1 - (abs(level['price'] - current_price) / (core_range/2))
+            else:
+                # Edge zone - lower priority
+                priority = 0.3
+                
+            # Boost BUY priority slightly when below current price to create a buy bias
+            if level['side'] == 'BUY' and level['price'] < current_price:
+                priority *= 1.1  # 10% boost to BUY orders
+                
+            grid_with_priority.append((level, priority))
+        
+        # Sort by priority (highest first)
+        grid_with_priority.sort(key=lambda x: x[1], reverse=True)
+        
+        # Place orders in priority order
+        for level, _ in grid_with_priority:
             self._place_grid_order(level)
-            
+    
+        self.logger.info(f"Placed grid orders with priority-based capital allocation")
+    
     def _place_grid_order(self, level):
         """
         Place a single grid order with unified WebSocket/REST handling
@@ -1080,6 +1122,7 @@ class GridTrader:
     def _process_filled_order(self, matching_level, level_index, side, quantity, price):
         """
         Process a filled order and place the opposite order
+        Add aggressive grid filling after order processing
         
         Args:
             matching_level: Grid level that was filled
@@ -1230,17 +1273,31 @@ class GridTrader:
                     self.logger.error(f"Fallback order placement also failed: {retry_error}")
             return False
         
+        # Immediately check for unfilled grid slots to maximize capital utilization
+        # Do this after order processing to capture the newly freed capital
+        threading.Thread(
+            target=self._check_for_unfilled_grid_slots,
+            daemon=True
+        ).start()
+        
         # Notify risk manager to update OCO orders after SELL order fills (creates base asset)
         if side == "SELL" and self.telegram_bot and hasattr(self.telegram_bot, 'risk_manager') and self.telegram_bot.risk_manager:
             risk_manager = self.telegram_bot.risk_manager
             if risk_manager.is_active:
                 self.logger.info(f"SELL order filled, triggering OCO order update")
-                risk_manager._check_for_missing_oco_orders()
-
+                # Use a background thread to avoid blocking
+                threading.Thread(
+                    target=risk_manager._check_for_missing_oco_orders,
+                    daemon=True
+                ).start()
+                
+        return True
+    
     # OPTIMIZED: New helper method for capital calculation
     def _calculate_dynamic_capital_for_level(self, price):
         """
-        Calculate capital allocation for a grid level based on its position and available funds
+        Calculate capital allocation for a grid level based on its position
+        Using a more aggressive allocation strategy that prioritizes grid trading
         
         Args:
             price: Price level for the grid
@@ -1261,18 +1318,17 @@ class GridTrader:
         if core_lower <= price <= core_upper:
             # Core zone - allocate more capital closer to current price
             distance_factor = min(1, abs(price - current_price) / (core_range/2)) if core_range > 0 else 0
-            position_factor = 1 - (distance_factor * 0.5)  # 1.0 at current price, 0.5 at edge of core
+            position_factor = 1 - (distance_factor * 0.4)  # 1.0 at current price, 0.6 at edge of core (increased from 0.5)
         else:
-            # Edge zone - allocate less capital
-            position_factor = 0.4  # 40% allocation for edge zones
-        
-        # Calculate base capital using position factor
+            # Edge zone - allocate less capital but still meaningful amount
+            position_factor = 0.5  # Increased from 0.4 to allocate more capital to edge zones
+    
+        # If not initialized, calculate now
         if not hasattr(self, 'current_capital_per_grid'):
-            # If not initialized, calculate now
             _, capital_per_grid = self._optimize_grid_parameters()
             self.current_capital_per_grid = capital_per_grid
-        
-        # Calculate allocation for this level
+    
+        # Calculate allocation for this level with priority on grid completeness
         allocation = self.current_capital_per_grid * position_factor
         
         # Ensure minimum notional value is met
@@ -1541,8 +1597,8 @@ class GridTrader:
     
     def _check_for_unfilled_grid_slots(self):
         """
-        Check for grid slots without orders and attempt to fill them if funds are available.
-        This allows dynamically utilizing funds as they become available without full grid recalculation.
+        Aggressively check for grid slots without orders and fill them with ANY available funds.
+        This ensures ALL capital is utilized for grid trading at all times.
         
         Returns:
             int: Number of new orders placed
@@ -1564,48 +1620,72 @@ class GridTrader:
             available_base = base_balance - self.locked_balances.get(base_asset, 0)
             available_quote = quote_balance - self.locked_balances.get(quote_asset, 0)
         
-        # Update dynamic capital allocation before checking
+        # Update dynamic capital allocation whenever this method runs
+        # This ensures we're always using updated capital calculations
         total_capital, _, _ = self._calculate_available_capital()
-        if abs(total_capital - self.total_available_capital) / self.total_available_capital >= 0.1:  # 10% change in capital
-            self.logger.info(f"Detected {total_capital-self.total_available_capital:.2f} USDT increase in available capital")
-            self.total_available_capital = total_capital
-            # Recalculate parameters with new capital
-            self._recalibrate_capital_allocation()
         
-        # For each level without an order, recalculate its capital allocation
+        # Always recalibrate to capture any change in capital
+        self.total_available_capital = total_capital
+        self._recalibrate_capital_allocation()
+        
+        # First, identify all unfilled grid slots and sort them by priority
+        unfilled_slots = []
         for i, level in enumerate(self.grid):
             if not level.get('order_id'):
                 # Update capital for this level based on current funds
                 level['capital'] = self._calculate_dynamic_capital_for_level(level['price'])
         
-        # Go through grid and find slots without orders
-        for i, level in enumerate(self.grid):
-            if not level.get('order_id'):
-                price = level['price']
-                side = level['side']
-                
-                # Check if we have funds for this order
-                if side == 'BUY':
-                    capital_needed = level['capital']  # Use dynamic capital allocation
-                    if available_quote >= capital_needed:
-                        # We have funds, try to place the order
-                        if self._place_grid_order(level):
-                            orders_placed += 1
-                            available_quote -= capital_needed
-                            self.logger.info(f"Filled previously unfunded BUY grid slot at price {price} with {capital_needed} USDT")
-                else:  # SELL
-                    quantity_needed = level['capital'] / price  # Use dynamic capital allocation
-                    if available_base >= quantity_needed:
-                        # We have funds, try to place the order
-                        if self._place_grid_order(level):
-                            orders_placed += 1
-                            available_base -= quantity_needed
-                            self.logger.info(f"Filled previously unfunded SELL grid slot at price {price} with {quantity_needed} {base_asset}")
+                # Calculate priority: core zone gets higher priority
+                current_price = self.current_market_price
+                grid_range = current_price * self.grid_range_percent
+                core_range = grid_range * self.core_zone_percentage
+                core_upper = current_price + (core_range / 2)
+                core_lower = current_price - (core_range / 2)
         
+                # Higher priority for levels closer to current price
+                if core_lower <= level['price'] <= core_upper:
+                    # Core zone - higher priority the closer to current price
+                    priority = 1 - (abs(level['price'] - current_price) / (core_range/2))
+                else:
+                    # Edge zone - lower priority
+                    priority = 0.3
+                    
+                unfilled_slots.append((i, level, priority))
+    
+        # Sort by priority (highest first)
+        unfilled_slots.sort(key=lambda x: x[2], reverse=True)
+    
+        # Try to place orders for unfilled slots in priority order
+        for i, level, _ in unfilled_slots:
+            side = level['side']
+            price = level['price']
+        
+            # Check if we have funds for this order
+            if side == 'BUY':
+                capital_needed = level['capital']
+                if available_quote >= capital_needed:
+                    # We have funds, try to place the order
+                    if self._place_grid_order(level):
+                        orders_placed += 1
+                        available_quote -= capital_needed
+                        self.logger.info(f"Filled unfunded BUY grid slot at price {price} with {capital_needed} USDT (priority)")
+            else:  # SELL
+                quantity_needed = level['capital'] / price
+                if available_base >= quantity_needed:
+                    # We have funds, try to place the order
+                    if self._place_grid_order(level):
+                        orders_placed += 1
+                        available_base -= quantity_needed
+                        self.logger.info(f"Filled unfunded SELL grid slot at price {price} with {quantity_needed} {base_asset} (priority)")
+    
         if orders_placed > 0:
-            self.logger.info(f"Filled {orders_placed} previously unfunded grid slots with newly available funds")
+            self.logger.info(f"Filled {orders_placed} unfunded grid slots with priority allocation")
             if self.telegram_bot:
-                self.telegram_bot.send_message(f"✅ Placed {orders_placed} new grid orders using newly available funds")
+                self.telegram_bot.send_message(f"✅ Added {orders_placed} grid orders prioritizing full capital utilization")
+                
+            # Notify risk manager that grid orders have been placed
+            if orders_placed > 0 and self.telegram_bot and hasattr(self.telegram_bot, 'risk_manager'):
+                self.telegram_bot.risk_manager._check_for_missing_oco_orders()
                 
         return orders_placed
     
@@ -1749,13 +1829,14 @@ class GridTrader:
         total_in_quote = base_in_quote + available_quote
         
         # Log the available capital
-        self.logger.info(f"Available capital: {available_quote} {quote_asset} + {available_base} {base_asset} (≈{base_in_quote} {quote_asset}) = {total_in_quote} {quote_asset}")
+        self.logger.info(f"Available capital: {available_quote} {quote_asset} + {available_base} {base_asset} (≈{base_in_quote}{quote_asset}) = {total_in_quote} {quote_asset}")
         
         return total_in_quote, available_base, available_quote
 
     def _optimize_grid_parameters(self):
         """
         Dynamically optimize grid levels and capital allocation based on available funds
+        Prioritizes using ALL available capital for grid trading
         
         Returns:
             tuple: (optimized_grid_levels, capital_per_grid)
@@ -1780,19 +1861,17 @@ class GridTrader:
                 f"Insufficient capital for {self.dynamic_grid_levels} grid levels. "
                 f"Reducing to {target_grid_levels} levels based on available capital ({total_capital} USDT)"
             )
-    
-        # Calculate capital per grid level
-        # MODIFY: Remove capital reservation - use all available capital
-        capital_per_grid = total_capital / target_grid_levels  # Use 100% of capital rather than reserving 25%
+
+        # Calculate capital per grid level - use ALL available capital
+        capital_per_grid = total_capital / target_grid_levels
         
         # Ensure each grid meets minimum notional value
         if capital_per_grid < self.min_capital_per_grid:
             capital_per_grid = self.min_capital_per_grid
             # Recalculate grid levels with this capital per grid
-            # MODIFY: Remove reservation buffer to use all capital
             target_grid_levels = max(2, int(total_capital / capital_per_grid))
             self.logger.warning(
-                f"Adjusting to {target_grid_levels} grid levels with {capital_per_grid} USDT per grid "
+                f"Adjusting to {target_grid_levels} grid levels with{capital_per_grid} USDT per grid "
                 f"to meet minimum notional value ({config.MIN_NOTIONAL_VALUE} USDT)"
             )
         
@@ -1800,37 +1879,41 @@ class GridTrader:
 
     def _recalibrate_capital_allocation(self):
         """
-        Periodically recalibrate capital allocation based on current balances
-        Called during regular grid checks
+        Aggressively recalibrate capital allocation based on current balances
+        Always use the maximum available capital for grid trading
         
         Returns:
             bool: True if recalibration changed parameters, False otherwise
         """
-        # Only recalibrate every 30 minutes to avoid unnecessary processing
-        if not hasattr(self, 'last_capital_recalibration') or \
-           (time.time() - self.last_capital_recalibration) > 1800:  # 30 minutes
+        # Calculate new optimized parameters
+        new_levels, new_capital = self._optimize_grid_parameters()
+        
+        # Save previous values for comparison
+        previous_levels = self.dynamic_grid_levels
+        previous_capital = getattr(self, 'current_capital_per_grid', 0)
+        
+        # Check if significant changes occurred
+        levels_changed = previous_levels != new_levels
+        capital_changed = previous_capital != 0 and abs(new_capital - previous_capital) / previous_capital > 0.1  # 10% change threshold (reduced from 20%)
+        
+        if levels_changed or capital_changed:
+            self.logger.info(
+                f"Capital allocation recalibrated: Grid levels {previous_levels}->{new_levels}, "
+                f"Capital per grid {previous_capital:.2f}->{new_capital:.2f} USDT"
+            )
             
-            # Save previous values for comparison
-            previous_levels = self.dynamic_grid_levels
-            previous_capital = getattr(self, 'current_capital_per_grid', 0)
+            # Update parameters
+            self.dynamic_grid_levels = new_levels
+            self.current_capital_per_grid = new_capital
             
+            # Store recalibration time
+            self.last_capital_recalibration = time.time()
+            return True
             
-            # Check if significant changes occurred
-            levels_changed = previous_levels != new_levels
-            capital_changed = previous_capital != 0 and abs(new_capital - previous_capital) / previous_capital > 0.2  # 20% change threshold
-            
-            if levels_changed or capital_changed:
-                self.logger.info(
-                    f"Capital allocation recalibrated: Grid levels {previous_levels}->{new_levels}, "
-                                       f"Capital per grid {previous_capital:.2f}->{new_capital:.2f} USDT"
-                )
-                
-                # Update parameters
-                self.dynamic_grid_levels = new_levels
-                self.current_capital_per_grid = new_capital
-                
-                # Store recalibration time
-                self.last_capital_recalibration = time.time()
-                return True
-            
+        # Update current parameters even if no significant change    
+        self.dynamic_grid_levels = new_levels
+        self.current_capital_per_grid = new_capital
+        
+        # Just update the timestamp
+        self.last_capital_recalibration = time.time()
         return False
