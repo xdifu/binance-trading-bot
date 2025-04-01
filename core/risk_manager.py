@@ -565,7 +565,7 @@ class RiskManager:
                 
                 # Now ensure we're only using truly excess funds
                 # We'll consider "excess" as any funds beyond what's needed for a completed grid
-                excess_percentage = 0.1  # Only use 10% of available base asset for risk management
+                excess_percentage = 0.3  # use 30% of available base asset for risk management
                 excess_amount = asset_balance * excess_percentage
                 
                 # Check if excess amount meets minimum requirements

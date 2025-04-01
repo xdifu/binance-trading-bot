@@ -42,8 +42,8 @@ ALLOCATION_STRATEGY = os.getenv("ALLOCATION_STRATEGY", "balanced")  # 资金分�
 CORE_ZONE_BOOST = float(os.getenv("CORE_ZONE_BOOST", "1.5"))  # 核心区域资金提升系数，增加可使核心区域资金更集中
 
 # 非对称网格参数（核心区域优化）
-CORE_ZONE_PERCENTAGE = float(os.getenv("CORE_ZONE_PERCENTAGE", "0.7"))  # 核心区域占总范围的比例，增大可集中更多资金在中心价格附近
-CORE_CAPITAL_RATIO = float(os.getenv("CORE_CAPITAL_RATIO", "0.8"))  # 核心区域资金比例，增大可增强中心区域交易能力
+CORE_ZONE_PERCENTAGE = float(os.getenv("CORE_ZONE_PERCENTAGE", "0.6"))  # 核心区域占总范围的比例，增大可集中更多资金在中心价格附近
+CORE_CAPITAL_RATIO = float(os.getenv("CORE_CAPITAL_RATIO", "0.7"))  # 核心区域资金比例，增大可增强中心区域交易能力
 CORE_GRID_RATIO = float(os.getenv("CORE_GRID_RATIO", "0.7"))  # 核心区域网格点比例，增大可在中心区域创建更多订单
 
 # 订单管理

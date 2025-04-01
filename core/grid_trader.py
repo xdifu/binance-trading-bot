@@ -1322,12 +1322,12 @@ class GridTrader:
         
         # Calculate position factor (distance from current price)
         if core_lower <= price <= core_upper:
-            # Core zone - allocate more capital closer to current price
+            # Core zone - higher capital allocation for levels closer to current price
             distance_factor = min(1, abs(price - current_price) / (core_range/2)) if core_range > 0 else 0
-            position_factor = 1 - (distance_factor * 0.4)  # 1.0 at current price, 0.6 at edge of core (increased from 0.5)
+            position_factor = 1 - (distance_factor * 0.3)  # Scale from 1.0 (at current price) to 0.7 (at core boundary)
         else:
-            # Edge zone - allocate less capital but still meaningful amount
-            position_factor = 0.5  # Increased from 0.4 to allocate more capital to edge zones
+            # Edge zone - reduced but still significant capital allocation (80% of core maximum)
+            position_factor = 0.8  # Higher edge allocation to maximize opportunity capture
     
         # If not initialized, calculate now
         if not hasattr(self, 'current_capital_per_grid'):
@@ -1642,8 +1642,8 @@ class GridTrader:
                 capital_needed = level['capital']
                 
                 # ULTRA-AGGRESSIVE: Use even very small amounts of capital (down to MIN_NOTIONAL)
-                if available_quote >= config.MIN_NOTIONAL_VALUE and available_quote >= capital_needed * 0.9:
-                    # If we have at least 90% of needed capital, adjust the order to use what we have
+                if available_quote >= config.MIN_NOTIONAL_VALUE and available_quote >= capital_needed * 0.6:  # Lowered from 0.9 to 0.6
+                    # If we have at least 60% of needed capital, adjust the order to use what we have
                     if available_quote < capital_needed:
                         adjusted_capital = available_quote * 0.99  # Use 99% of available
                         level['capital'] = adjusted_capital
