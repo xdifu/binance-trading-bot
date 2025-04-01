@@ -13,6 +13,9 @@ if not hasattr(config, 'MIN_NOTIONAL_VALUE'):
     raise AttributeError("config.MIN_NOTIONAL_VALUE is not defined. Please define it in the config module.")
 
 class GridTrader:
+    # Define constants for configuration
+    CAPITAL_INCREASE_FACTOR = 1.1  # 10% increase in capital
+
     def __init__(self, binance_client, telegram_bot=None):
         """
         Initialize grid trading strategy
@@ -33,9 +36,11 @@ class GridTrader:
         self.grid_spacing = min(config.GRID_SPACING / 100, 0.003)  # Max 0.3% spacing
         
         # Add new attributes for dynamic capital allocation
-        self.total_available_capital = 0
+        # Initialize total available capital with the current total capital to avoid unintended recalibrations
+        self.total_available_capital, _, _ = self._calculate_available_capital()
         self.dynamic_grid_levels = max(min(config.GRID_LEVELS, 5), 4)
         self.min_capital_per_grid = config.MIN_NOTIONAL_VALUE * 1.1  # Add 10% buffer to minimum
+        self.current_capital_per_grid = self.min_capital_per_grid  # Initialize with a default value
         
         # Log change to dynamic capital allocation
         self.logger.info("Using dynamic capital allocation instead of fixed CAPITAL_PER_LEVEL")
@@ -59,6 +64,9 @@ class GridTrader:
         
         # Store previous ATR value for volatility change detection
         self.last_atr_value = None
+        
+        # Initialize last capital recalibration timestamp
+        self.last_capital_recalibration = 0
         
         # Initialize logger
         self.logger = logging.getLogger(__name__)
@@ -691,17 +699,14 @@ class GridTrader:
         price = level['price']
         side = level['side']
         
-        # Get capital for this level (use dynamic capital if available, otherwise fall back to default)
-        capital = level.get('capital', self.capital_per_level)
+        # Get capital for this level (dynamically calculated)
+        capital = self._calculate_dynamic_capital_for_level(price)
+        level['capital'] = capital  # Store the calculated capital in the level
         
-        # Validate price before proceeding
-        if price <= 0:
-            self.logger.error(f"Invalid price value: {price} for {side} order, skipping")
-            return False
-            
         # Calculate order quantity based on level's capital
         quantity = capital / price
         
+        # Rest of method remains the same
         # Adjust quantity and price precision
         formatted_quantity = self._adjust_quantity_precision(quantity)
         formatted_price = self._adjust_price_precision(price)
@@ -915,6 +920,12 @@ class GridTrader:
                         risk_manager.update_stop_loss_take_profit(grid_lowest, grid_highest)
                         self.logger.info(f"Notified risk manager of grid recalculation: new bounds {grid_lowest:.8f} - {grid_highest:.8f}")
                 
+                # Add capital allocation recalibration
+                recalibration_changed = self._recalibrate_capital_allocation()
+                if recalibration_changed:
+                    self.logger.info("Capital allocation parameters updated, checking for unfilled grid slots...")
+                    self._check_for_unfilled_grid_slots()
+                
                 return True
             except Exception as e:
                 self.logger.error(f"Failed to recalculate grid: {e}")
@@ -1117,8 +1128,8 @@ class GridTrader:
             self.logger.error(f"Invalid formatted price: {formatted_price} for {price}, using minimum valid price")
             formatted_price = self._adjust_price_precision(self.tick_size)  # Use minimum valid price
         
-        # Determine capital for dynamic allocation
-        capital = self._calculate_dynamic_capital_for_level(float(formatted_price))
+        # Determine capital for dynamic allocation (replace fixed capital)
+        capital = self._calculate_dynamic_capital_for_level(price)
         
         # Now place the order using the regular order placement logic
         if self.simulation_mode:
@@ -1547,6 +1558,20 @@ class GridTrader:
             available_base = base_balance - self.locked_balances.get(base_asset, 0)
             available_quote = quote_balance - self.locked_balances.get(quote_asset, 0)
         
+        # Update dynamic capital allocation before checking
+        total_capital, _, _ = self._calculate_available_capital()
+        if abs(total_capital - self.total_available_capital) / self.total_available_capital >= 0.1:  # 10% change in capital
+            self.logger.info(f"Detected {total_capital-self.total_available_capital:.2f} USDT increase in available capital")
+            self.total_available_capital = total_capital
+            # Recalculate parameters with new capital
+            self._recalibrate_capital_allocation()
+        
+        # For each level without an order, recalculate its capital allocation
+        for i, level in enumerate(self.grid):
+            if not level.get('order_id'):
+                # Update capital for this level based on current funds
+                level['capital'] = self._calculate_dynamic_capital_for_level(level['price'])
+        
         # Go through grid and find slots without orders
         for i, level in enumerate(self.grid):
             if not level.get('order_id'):
@@ -1555,7 +1580,7 @@ class GridTrader:
                 
                 # Check if we have funds for this order
                 if side == 'BUY':
-                    capital_needed = level.get('capital', self.capital_per_level)
+                    capital_needed = level['capital']  # Use dynamic capital allocation
                     if available_quote >= capital_needed:
                         # We have funds, try to place the order
                         if self._place_grid_order(level):
@@ -1563,7 +1588,7 @@ class GridTrader:
                             available_quote -= capital_needed
                             self.logger.info(f"Filled previously unfunded BUY grid slot at price {price} with {capital_needed} USDT")
                 else:  # SELL
-                    quantity_needed = level.get('capital', self.capital_per_level) / price
+                    quantity_needed = level['capital'] / price  # Use dynamic capital allocation
                     if available_base >= quantity_needed:
                         # We have funds, try to place the order
                         if self._place_grid_order(level):
@@ -1764,3 +1789,42 @@ class GridTrader:
             )
         
         return target_grid_levels, capital_per_grid
+
+    def _recalibrate_capital_allocation(self):
+        """
+        Periodically recalibrate capital allocation based on current balances
+        Called during regular grid checks
+        
+        Returns:
+            bool: True if recalibration changed parameters, False otherwise
+        """
+        # Only recalibrate every 30 minutes to avoid unnecessary processing
+        if not hasattr(self, 'last_capital_recalibration') or \
+           (time.time() - self.last_capital_recalibration) > 1800:  # 30 minutes
+            
+            # Save previous values for comparison
+            previous_levels = self.dynamic_grid_levels
+            previous_capital = getattr(self, 'current_capital_per_grid', 0)
+            
+            # Recalculate optimal parameters
+            new_levels, new_capital = self._optimize_grid_parameters()
+            
+            # Check if significant changes occurred
+            levels_changed = previous_levels != new_levels
+            capital_changed = previous_capital != 0 and abs(new_capital - previous_capital) / previous_capital > 0.2  # 20% change threshold
+            
+            if levels_changed or capital_changed:
+                self.logger.info(
+                    f"Capital allocation recalibrated: Grid levels {previous_levels}->{new_levels}, "
+                    f"Capital per grid {previous_capital:.2f}->{new_capital:.2f} USDT"
+                )
+                
+                # Update parameters
+                self.dynamic_grid_levels = new_levels
+                self.current_capital_per_grid = new_capital
+                
+                # Store recalibration time
+                self.last_capital_recalibration = time.time()
+                return True
+            
+        return False
