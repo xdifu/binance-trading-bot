@@ -433,7 +433,7 @@ class GridTrader:
     def _calculate_grid_levels(self):
         """
         Calculate asymmetric grid price levels with funds concentrated near current price
-        Optimized for small capital accounts with trend adaptation
+        Optimized for dynamic capital allocation
         
         Returns:
             list: List of grid levels with prices, sides and capital allocation
@@ -445,6 +445,9 @@ class GridTrader:
         # Calculate grid range based on current price and adjusted grid_range_percent
         grid_range = current_price * self.grid_range_percent
         
+        # Use dynamic grid levels instead of fixed config value
+        grid_count = self.dynamic_grid_levels
+        
         # Get klines for trend calculation - reuse from ATR calculation if possible
         klines = self.binance_client.get_historical_klines(
             symbol=self.symbol,
@@ -454,33 +457,33 @@ class GridTrader:
         
         # Calculate trend strength and apply grid offset
         trend_strength = self._calculate_trend_strength(klines)
-
+    
         # 1. First calculate safe grid boundaries
         safe_grid_range = current_price * self.grid_range_percent
         upper_bound = current_price + (safe_grid_range / 2)
         lower_bound = current_price - (safe_grid_range / 2)
-
+    
         # 2. Calculate maximum safe offset range (ensuring core zone doesn't exceed total range)
         max_safe_offset = min(
             (upper_bound - current_price) * 0.8,  # 80% of distance to upper bound
             (current_price - lower_bound) * 0.8   # 80% of distance to lower bound
         ) * 0.5  # Additional 50% safety factor
-
+    
         # 3. Apply trend strength with bounded offset using sigmoid function
         import math
         normalized_strength = max(min(trend_strength, 1.0), -1.0)
         sigmoid_factor = 2 / (1 + math.exp(-4 * abs(normalized_strength))) - 1  # Range 0-1
         trend_direction = 1 if normalized_strength > 0 else -1
         trend_offset = trend_direction * sigmoid_factor * max_safe_offset
-
+    
         self.logger.info(f"Trend strength: {trend_strength:.2f}, Safe max offset: {max_safe_offset:.8f}, Applied offset: {trend_offset:.8f}")
-
+    
         # Define core zone with higher percentage
         core_range = safe_grid_range * self.core_zone_percentage
-
+    
         # Apply calculated trend offset to core zone
         core_center = current_price + trend_offset
-
+    
         # Apply boundary constraints to core center first
         if core_center > (upper_bound + lower_bound) / 2:
             self.logger.warning(f"Adjusting core center: {core_center:.8f} too high")
@@ -490,11 +493,11 @@ class GridTrader:
             self.logger.warning(f"Adjusting core center: {core_center:.8f} too low")
             core_center = max(core_center, (upper_bound + lower_bound) / 2)
             # Ensure core center is not too low
-
+    
         # Calculate core boundaries symmetrically around core center
         core_upper = min(core_center + (core_range / 2), upper_bound * 0.95)
         core_lower = max(core_center - (core_range / 2), lower_bound * 1.05)
-
+    
         # Critical validation: ensure core_lower < core_upper
         if core_lower >= core_upper:
             self.logger.warning(f"Core boundary inversion detected: lower={core_lower:.8f}, upper={core_upper:.8f}")
@@ -508,10 +511,10 @@ class GridTrader:
             core_lower = mid_point - (min_separation / 2)
             
             self.logger.info(f"Fixed core boundaries: lower={core_lower:.8f}, upper={core_upper:.8f}")
-
-        # Define number of grid levels in each zone
-        core_levels = int(self.grid_levels * self.core_grid_ratio)
-        edge_levels = self.grid_levels - core_levels
+    
+        # Define number of grid levels in each zone based on dynamic grid count
+        core_levels = int(grid_count * self.core_grid_ratio)
+        edge_levels = grid_count - core_levels
         
         # Ensure minimum number of levels in each zone
         if core_levels < 2:
@@ -532,7 +535,7 @@ class GridTrader:
                 # Determine buy/sell based on position relative to current price
                 side = "SELL" if level_price >= current_price else "BUY"
                 
-                # Calculate capital for this level
+                # Calculate capital for this level using dynamic method
                 capital = self._calculate_dynamic_capital_for_level(level_price)
                 
                 grid_levels.append({
@@ -563,11 +566,11 @@ class GridTrader:
                     # Create upper edge levels with exponential spacing
                     upper_step_multiplier = 1.2
                     current_step = upper_edge_step
-                    current_price = core_upper
+                    current_price_point = core_upper  # Renamed to avoid shadowing current_price
                     
                     for i in range(upper_edge_levels):
-                        level_price = current_price + current_step
-                        current_price = level_price
+                        level_price = current_price_point + current_step
+                        current_price_point = level_price
                         current_step *= upper_step_multiplier
                         
                         # Upper levels are always SELL
@@ -583,7 +586,8 @@ class GridTrader:
                         })
             
             # Calculate lower edge levels
-            lower_edge_levels = edge_levels  # Ensure lower_edge_levels is initialized
+            lower_edge_levels = edge_levels - (upper_edge_levels if 'upper_edge_levels' in locals() else 0)
+            
             # Ensure lower edge levels are calculated only once and not overwritten
             if lower_edge_levels > 0:
                 lower_edge_step = (core_lower - lower_bound) / lower_edge_levels if lower_edge_levels > 0 else 0
@@ -595,7 +599,7 @@ class GridTrader:
                     # Lower levels are always BUY
                     side = "BUY"
                     
-                    # Calculate edge zone capital
+                    # Calculate edge zone capital using dynamic method
                     capital = self._calculate_dynamic_capital_for_level(level_price)
                     
                     grid_levels.append({
