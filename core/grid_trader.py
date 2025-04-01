@@ -1194,7 +1194,30 @@ class GridTrader:
     # OPTIMIZED: New helper method for capital calculation
     def _calculate_dynamic_capital_for_level(self, price):
         """
-        Calculate appropriate capital allocation with minimum order value enforcement
+        Improved capital allocation method that considers total available funds
+        """
+        # Get available funds total
+        base_asset = self.symbol.replace('USDT', '')
+        quote_asset = 'USDT'
+        available_quote = self.binance_client.check_balance(quote_asset) - self.locked_balances.get(quote_asset, 0)
+        available_base = self.binance_client.check_balance(base_asset) - self.locked_balances.get(base_asset, 0)
+        
+        # Calculate total available capital (conservative estimate)
+        estimated_total_capital = available_quote + (available_base * price * 0.95)
+        
+        # Adjust per-level capital allocation
+        grid_count = len(self.grid) if self.grid else self.grid_levels
+        max_safe_capital_per_level = estimated_total_capital / (grid_count * 1.5)  # Reserve 50% margin for additional trades
+        
+        # Original allocation calculation remains unchanged
+        original_allocation = self._calculate_original_dynamic_capital_for_level(price)
+        
+        # Return the smaller value to ensure we don't exceed total funds
+        return min(original_allocation, max_safe_capital_per_level)
+
+    def _calculate_original_dynamic_capital_for_level(self, price):
+        """
+        Original capital calculation logic moved to a separate method
         """
         current_price = self.current_market_price
         grid_range = current_price * self.grid_range_percent
@@ -1271,23 +1294,23 @@ class GridTrader:
     
     def _release_funds(self, asset, amount):
         """
-        Release previously locked funds
-        
-        Args:
-            asset: Asset symbol (e.g., 'BTC', 'USDT')
-            amount: Amount to release
-            
-        Returns:
-            None
+        Improved fund release mechanism to prevent over-locking
         """
         with self.balance_lock:
             current_locked = self.locked_balances.get(asset, 0)
             
-            # Ensure we don't release more than locked
+            # Additional check: log warning if trying to release more than locked
+            if amount > current_locked:
+                self.logger.warning(
+                    f"Attempting to release more funds ({amount} {asset}) than currently locked ({current_locked} {asset}), "
+                    f"possible fund tracking inconsistency"
+                )
+            
+            # Prevent negative values
             release_amount = min(current_locked, amount)
             
             if release_amount > 0:
-                self.locked_balances[asset] = current_locked - release_amount
+                self.locked_balances[asset] = max(0, current_locked - release_amount)
                 self.logger.debug(f"Released {release_amount} {asset}, remaining locked: {self.locked_balances[asset]}")
     
     def _reset_locks(self):
