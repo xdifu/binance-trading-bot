@@ -555,33 +555,29 @@ class RiskManager:
                 self.logger.info(f"No available {asset} for risk management")
                 return
             
-            # Reserve portion of assets for grid trading
-            if self.grid_trader and hasattr(self.grid_trader, 'locked_balances'):
-                # Check if asset is locked by grid trader
-                locked_by_grid = self.grid_trader.locked_balances.get(asset, 0)
+            # Check grid for incomplete slots before using any funds for OCO
+            if self.grid_trader and hasattr(self.grid_trader, '_check_for_unfilled_grid_slots'):
+                # First check for any unfilled grid slots
+                unfilled_count = self.grid_trader._count_unfilled_grid_slots()
+                if unfilled_count > 0:
+                    self.logger.info(f"Found {unfilled_count} unfilled grid slots - prioritizing grid completion over OCO orders")
+                    return
                 
-                # Also check for dynamic allocation capability
-                if hasattr(self.grid_trader, 'total_available_capital'):
-                    # More intelligent reservation based on grid trader's allocation strategy
-                    grid_allocation_percent = 0.7  # Reserve 70% for grid, leave 30% for risk management
-                    total_available = self.grid_trader.total_available_capital
-                    reserved_amount = max(
-                        locked_by_grid,
-                        asset_balance * grid_allocation_percent  # Base dynamic reservation on actual capital
-                    )
-                else:
-                    # Fallback to simple percentage if grid trader doesn't use dynamic allocation
-                    reserve_for_grid = 0.3  # Reserve 30% of available assets for grid trading
-                    reserved_amount = max(locked_by_grid, asset_balance * reserve_for_grid)
+                # Now ensure we're only using truly excess funds
+                # We'll consider "excess" as any funds beyond what's needed for a completed grid
+                excess_percentage = 0.1  # Only use 10% of available base asset for risk management
+                excess_amount = asset_balance * excess_percentage
                 
-                if asset_balance > reserved_amount:
-                    original_balance = asset_balance
-                    asset_balance -= reserved_amount
-                    self.logger.info(f"Reserved {reserved_amount} {asset} for grid trading. Using {asset_balance}/{original_balance} for OCO orders")
-                else:
-                    self.logger.info(f"Insufficient {asset} balance for OCO orders after grid reservation")
-                    return False
-
+                # Check if excess amount meets minimum requirements
+                min_required = self.min_order_value / current_price 
+                if excess_amount < min_required:
+                    self.logger.info(f"Insufficient excess {asset} for OCO orders. Available excess: {excess_amount}, required: {min_required}")
+                    return
+                
+                # Use only the calculated excess amount
+                asset_balance = excess_amount
+                self.logger.info(f"Using ONLY excess funds for OCO: {asset_balance} {asset} (after ensuring all grid positions filled)")
+            
             # Calculate appropriate OCO quantity based on available balance and grid allocation
             if self.grid_trader and hasattr(self.grid_trader, '_calculate_dynamic_capital_for_level'):
                 # Get a dynamic allocation based on current price

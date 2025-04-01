@@ -736,7 +736,7 @@ class GridTrader:
     
     def _place_grid_order(self, level):
         """
-        Place a single grid order with unified WebSocket/REST handling
+        Place a single grid order with improved capital utilization
         
         Args:
             level: The grid level dictionary with order details
@@ -747,12 +747,18 @@ class GridTrader:
         price = level['price']
         side = level['side']
         
-        # Get capital for this level (dynamically calculated)
-        capital = self._calculate_dynamic_capital_for_level(price)
-        level['capital'] = capital  # Store the calculated capital in the level
+        # Get capital for this level (from level or calculate dynamically)
+        if 'capital' in level and level['capital'] > 0:
+            capital = level['capital']
+        else:
+            capital = self._calculate_dynamic_capital_for_level(price)
+            level['capital'] = capital
         
         # Calculate order quantity based on level's capital
         quantity = capital / price
+        
+        # Additional log to track capital usage
+        self.logger.debug(f"Order preparation: {side} at {price}, capital={capital:.2f}, quantity={quantity:.6f}")
         
         # Rest of method remains the same
         # Adjust quantity and price precision
@@ -1597,8 +1603,8 @@ class GridTrader:
     
     def _check_for_unfilled_grid_slots(self):
         """
-        Aggressively check for grid slots without orders and fill them with ANY available funds.
-        This ensures ALL capital is utilized for grid trading at all times.
+        Aggressively check for grid slots without orders and fill them with ALL available funds.
+        Ensures maximum capital utilization, leaving NO funds unused.
         
         Returns:
             int: Number of new orders placed
@@ -1612,14 +1618,17 @@ class GridTrader:
         # Get current balances
         base_asset = self.symbol.replace('USDT', '')
         quote_asset = 'USDT'
-        base_balance = self.binance_client.check_balance(base_asset)
+        base_balance = self.binance_client.check_balance(base_asset) 
         quote_balance = self.binance_client.check_balance(quote_asset)
         
         # Account for locked balances
         with self.balance_lock:
             available_base = base_balance - self.locked_balances.get(base_asset, 0)
             available_quote = quote_balance - self.locked_balances.get(quote_asset, 0)
-        
+    
+        # Log available capital for debugging
+        self.logger.info(f"Checking unfilled grid slots. Available: {available_quote} USDT, {available_base} {base_asset}")
+    
         # Update dynamic capital allocation whenever this method runs
         # This ensures we're always using updated capital calculations
         total_capital, _, _ = self._calculate_available_capital()
@@ -1635,59 +1644,101 @@ class GridTrader:
                 # Update capital for this level based on current funds
                 level['capital'] = self._calculate_dynamic_capital_for_level(level['price'])
         
-                # Calculate priority: core zone gets higher priority
+                # Calculate priority with stronger current price bias
                 current_price = self.current_market_price
-                grid_range = current_price * self.grid_range_percent
-                core_range = grid_range * self.core_zone_percentage
-                core_upper = current_price + (core_range / 2)
-                core_lower = current_price - (core_range / 2)
-        
-                # Higher priority for levels closer to current price
-                if core_lower <= level['price'] <= core_upper:
-                    # Core zone - higher priority the closer to current price
-                    priority = 1 - (abs(level['price'] - current_price) / (core_range/2))
+                distance_from_current = abs(level['price'] - current_price) / current_price
+
+                # More aggressive super-power priority algorithm
+                # 1. Highest priority: BUY orders below current price
+                # 2. Second priority: SELL orders above current price
+                # 3. Lowest priority: Orders against trend (BUY above or SELL below)
+                if level['side'] == 'BUY' and level['price'] < current_price:
+                    # BUY below current price (optimal trade zone)
+                    # Inversely proportional to distance, with exponential boost for closer orders
+                    priority = 2.0 * (1.0 - min(distance_from_current * 5, 0.9))
+                elif level['side'] == 'SELL' and level['price'] > current_price:
+                    # SELL above current price (optimal trade zone)
+                    priority = 1.5 * (1.0 - min(distance_from_current * 5, 0.9))
                 else:
-                    # Edge zone - lower priority
-                    priority = 0.3
+                    # Against trend - lower priority but still potentially valuable
+                    priority = 0.5 * (1.0 - min(distance_from_current * 5, 0.9))
                     
+                # Log priority calculation
+                self.logger.debug(f"Unfilled slot priority: {level['side']} at {level['price']}, priority={priority:.2f}")
+                
                 unfilled_slots.append((i, level, priority))
     
         # Sort by priority (highest first)
         unfilled_slots.sort(key=lambda x: x[2], reverse=True)
     
         # Try to place orders for unfilled slots in priority order
-        for i, level, _ in unfilled_slots:
+        for i, level, priority in unfilled_slots:
             side = level['side']
             price = level['price']
         
             # Check if we have funds for this order
             if side == 'BUY':
                 capital_needed = level['capital']
-                if available_quote >= capital_needed:
-                    # We have funds, try to place the order
-                    if self._place_grid_order(level):
-                        orders_placed += 1
-                        available_quote -= capital_needed
-                        self.logger.info(f"Filled unfunded BUY grid slot at price {price} with {capital_needed} USDT (priority)")
+                
+                # ULTRA-AGGRESSIVE: Use even very small amounts of capital (down to MIN_NOTIONAL)
+                if available_quote >= config.MIN_NOTIONAL_VALUE and available_quote >= capital_needed * 0.9:
+                    # If we have at least 90% of needed capital, adjust the order to use what we have
+                    if available_quote < capital_needed:
+                        adjusted_capital = available_quote * 0.99  # Use 99% of available
+                        level['capital'] = adjusted_capital
+                        self.logger.info(f"Adjusted capital for BUY order: {capital_needed:.2f} → {adjusted_capital:.2f}")
+                        capital_needed = adjusted_capital
+                
+                # We have funds, try to place the order
+                if self._place_grid_order(level):
+                    orders_placed += 1
+                    available_quote -= capital_needed
+                    self.logger.info(f"Filled unfunded BUY grid slot at price {price} with {capital_needed} USDT (priority={priority:.2f})")
             else:  # SELL
                 quantity_needed = level['capital'] / price
-                if available_base >= quantity_needed:
+            
+                # ULTRA-AGGRESSIVE: Use even very small amounts if they meet minimum requirements
+                min_quantity = config.MIN_NOTIONAL_VALUE / price
+                if available_base >= min_quantity:
+                    # If we have enough for minimum order but not full amount, adjust
+                    if available_base < quantity_needed and available_base >= min_quantity:
+                        adjusted_quantity = available_base * 0.99  # Use 99% of available
+                        adjusted_capital = adjusted_quantity * price
+                        level['capital'] = adjusted_capital
+                        self.logger.info(f"Adjusted quantity for SELL order: {quantity_needed:.6f} → {adjusted_quantity:.6f}")
+                        quantity_needed = adjusted_quantity
+                
                     # We have funds, try to place the order
                     if self._place_grid_order(level):
                         orders_placed += 1
                         available_base -= quantity_needed
-                        self.logger.info(f"Filled unfunded SELL grid slot at price {price} with {quantity_needed} {base_asset} (priority)")
+                        self.logger.info(f"Filled unfunded SELL grid slot at price {price} with {quantity_needed} {base_asset} (priority={priority:.2f})")
     
         if orders_placed > 0:
-            self.logger.info(f"Filled {orders_placed} unfunded grid slots with priority allocation")
+            self.logger.info(f"Filled {orders_placed} unfilled grid slots with MAXIMUM capital utilization")
             if self.telegram_bot:
-                self.telegram_bot.send_message(f"✅ Added {orders_placed} grid orders prioritizing full capital utilization")
+                self.telegram_bot.send_message(f"✅ Added {orders_placed} grid orders with ultra-aggressive capital utilization")
                 
             # Notify risk manager that grid orders have been placed
             if orders_placed > 0 and self.telegram_bot and hasattr(self.telegram_bot, 'risk_manager'):
                 self.telegram_bot.risk_manager._check_for_missing_oco_orders()
+        
+            # Check if we've used everything - if not, try again with remaining funds
+            # This recursive approach ensures we use EVERY bit of available capital
+            remaining_base = self.binance_client.check_balance(base_asset) - self.locked_balances.get(base_asset, 0)
+            remaining_quote = self.binance_client.check_balance(quote_asset) - self.locked_balances.get(quote_asset, 0)
+        
+            # If we have enough to meet minimum notional value, try again
+            if remaining_quote >= config.MIN_NOTIONAL_VALUE or remaining_base >= (config.MIN_NOTIONAL_VALUE / self.current_market_price):
+                self.logger.info(f"Still have unused funds: {remaining_quote:.2f} USDT, {remaining_base:.6f} {base_asset}. Trying secondary allocation.")
                 
-        return orders_placed
+            # If remaining funds are sufficient for another slot, create a background task
+            threading.Thread(
+                target=self._adjust_grid_for_remaining_funds,
+                args=(remaining_base, remaining_quote),
+                daemon=True
+            ).start()
+            return orders_placed
     
     def _calculate_trend_strength(self, klines, lookback=20):
         """
@@ -1880,7 +1931,7 @@ class GridTrader:
     def _recalibrate_capital_allocation(self):
         """
         Aggressively recalibrate capital allocation based on current balances
-        Always use the maximum available capital for grid trading
+        Uses even very small amounts of newly available capital
         
         Returns:
             bool: True if recalibration changed parameters, False otherwise
@@ -1894,17 +1945,33 @@ class GridTrader:
         
         # Check if significant changes occurred
         levels_changed = previous_levels != new_levels
-        capital_changed = previous_capital != 0 and abs(new_capital - previous_capital) / previous_capital > 0.1  # 10% change threshold (reduced from 20%)
         
-        if levels_changed or capital_changed:
-            self.logger.info(
-                f"Capital allocation recalibrated: Grid levels {previous_levels}->{new_levels}, "
-                f"Capital per grid {previous_capital:.2f}->{new_capital:.2f} USDT"
-            )
+        # ANY capital change is now significant - maximizing capital utilization
+        # Change threshold reduced from 10% to 5%
+        capital_changed = previous_capital != 0 and abs(new_capital - previous_capital) / previous_capital > 0.05
+        
+        # Even without significant change, check for any additional capital
+        current_total, _, _ = self._calculate_available_capital()
+        previous_total = getattr(self, 'total_available_capital', 0)
+        additional_capital = current_total - previous_total
+        
+        # If there's ANY additional capital above minimum notional, recalibrate
+        capital_increase = additional_capital > config.MIN_NOTIONAL_VALUE
+        
+        if levels_changed or capital_changed or capital_increase:
+            # Log appropriate message based on what changed
+            if capital_increase:
+                self.logger.info(f"Additional {additional_capital:.2f} USDT detected, recalibrating grid")
+            else:
+                self.logger.info(
+                    f"Capital allocation recalibrated: Grid levels {previous_levels}->{new_levels}, "
+                    f"Capital per grid {previous_capital:.2f}->{new_capital:.2f} USDT"
+                )
             
             # Update parameters
             self.dynamic_grid_levels = new_levels
             self.current_capital_per_grid = new_capital
+            self.total_available_capital = current_total  # Update the total tracking
             
             # Store recalibration time
             self.last_capital_recalibration = time.time()
@@ -1913,7 +1980,62 @@ class GridTrader:
         # Update current parameters even if no significant change    
         self.dynamic_grid_levels = new_levels
         self.current_capital_per_grid = new_capital
+        self.total_available_capital = current_total
         
         # Just update the timestamp
         self.last_capital_recalibration = time.time()
         return False
+
+    def _count_unfilled_grid_slots(self):
+        """
+        Count number of unfilled grid slots that need capital
+        
+        Returns:
+            int: Number of grid slots without active orders
+        """
+        if not self.is_running or self.simulation_mode:
+            return 0
+            
+        # Count slots without orders
+        unfilled_count = sum(1 for level in self.grid if not level.get('order_id'))
+        
+        # If we have any unfilled slots, check if we have funds to fill them
+        if unfilled_count > 0:
+            base_asset = self.symbol.replace('USDT', '')
+            quote_asset = 'USDT'
+            
+            # Get current balances
+            base_balance = self.binance_client.check_balance(base_asset)
+            quote_balance = self.binance_client.check_balance(quote_asset)
+            
+            # Account for locked balances
+            with self.balance_lock:
+                available_base = base_balance - self.locked_balances.get(base_asset, 0)
+                available_quote = quote_balance - self.locked_balances.get(quote_asset, 0)
+            
+            # Check if we have funds to fill at least one slot
+            have_funds_for_slots = False
+            
+            for level in self.grid:
+                if not level.get('order_id'):
+                    side = level['side']
+                    price = level['price']
+                    capital = level.get('capital', self._calculate_dynamic_capital_for_level(price))
+                    
+                    if side == 'BUY' and available_quote >= capital:
+                        have_funds_for_slots = True
+                        break
+                    elif side == 'SELL':
+                        quantity_needed = capital / price
+                        if available_base >= quantity_needed:
+                            have_funds_for_slots = True
+                            break
+            
+            # Only return unfilled count if we actually have funds to fill slots
+            if have_funds_for_slots:
+                return unfilled_count
+            else:
+                self.logger.debug(f"Found {unfilled_count} unfilled slots but insufficient funds to fill any")
+                return 0
+                
+        return unfilled_count
