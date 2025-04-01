@@ -24,7 +24,7 @@ WS_RECONNECT_DELAY = int(os.getenv("WS_RECONNECT_DELAY", "5"))  # 重连间隔�
 SYMBOL = os.getenv("SYMBOL", "TRXUSDT")  # 默认交易对为"TRXUSDT"，可修改为其他如"BTCUSDT"或"ETHUSDT"等
 GRID_LEVELS = int(os.getenv("GRID_LEVELS", "5"))  # 网格数量，增加数值可提高交易频率但需要更多资金
 GRID_SPACING = float(os.getenv("GRID_SPACING", "0.15"))  # 网格间距(%)，增大可捕获更大波动，减小可提高交易频次
-CAPITAL_PER_LEVEL = float(os.getenv("CAPITAL_PER_LEVEL", "12"))  # 每个网格的资金(USDT)，增加可提高利润但需要更多总资金
+CAPITAL_PER_LEVEL = float(os.getenv("CAPITAL_PER_LEVEL", "8"))  # 每个网格的资金(USDT)，增加可提高利润但需要更多总资金
 GRID_RANGE_PERCENT = float(os.getenv("GRID_RANGE_PERCENT", "1.0"))  # 总网格价格范围(%)，增大可覆盖更大波动，减小则集中在小范围
 RECALCULATION_PERIOD = int(os.getenv("RECALCULATION_PERIOD", "1"))  # 网格重新计算周期(天)，减小可更频繁更新网格位置
 ATR_PERIOD = int(os.getenv("ATR_PERIOD", "14"))  # ATR指标周期，增大可减少敏感度，减小可对短期波动更敏感
@@ -81,6 +81,8 @@ def validate_config():
     
     if CAPITAL_PER_LEVEL <= 0:
         errors.append(f"CAPITAL_PER_LEVEL必须大于0，当前值: {CAPITAL_PER_LEVEL}")
+    if CAPITAL_PER_LEVEL < MIN_NOTIONAL_VALUE:
+        errors.append(f"CAPITAL_PER_LEVEL必须大于等于最小订单价值(MIN_NOTIONAL_VALUE)，当前值: {CAPITAL_PER_LEVEL}, 最小值: {MIN_NOTIONAL_VALUE}")
     
     if GRID_RANGE_PERCENT <= 0:
         errors.append(f"GRID_RANGE_PERCENT必须大于0，当前值: {GRID_RANGE_PERCENT}")

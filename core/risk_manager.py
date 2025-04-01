@@ -19,6 +19,10 @@ class RiskManager:
         self.grid_trader = grid_trader  # Store reference to grid trader for fund coordination
         self.symbol = config.SYMBOL
         
+        # Add validation for MIN_NOTIONAL_VALUE
+        if not hasattr(config, 'MIN_NOTIONAL_VALUE'):
+            raise AttributeError("config.MIN_NOTIONAL_VALUE is not defined. Please define it in the config module.")
+    
         # Initialize logger first to enable logging
         self.logger = logging.getLogger(__name__)
         
@@ -598,7 +602,7 @@ class RiskManager:
                 return False
             
             # Get minimum notional value from config or set default
-            min_notional_value = getattr(config, 'MIN_NOTIONAL_VALUE', 10)  # Default 10 USDT
+            min_notional_value = config.MIN_NOTIONAL_VALUE  # Use value from config
 
             # Calculate order value
             order_value = float(quantity) * current_price
