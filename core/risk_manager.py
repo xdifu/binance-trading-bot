@@ -273,7 +273,7 @@ class RiskManager:
     def deactivate(self):
         """Deactivate risk management system"""
         if not self.is_active:
-            return
+            return False
         
         try:
             # Cancel existing OCO orders
