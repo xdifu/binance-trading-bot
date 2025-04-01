@@ -32,8 +32,13 @@ class GridTrader:
         # Reduce grid spacing for tighter price capture
         self.grid_spacing = min(config.GRID_SPACING / 100, 0.003)  # Max 0.3% spacing
         
-        # Preserve original capital per level setting
-        self.capital_per_level = config.CAPITAL_PER_LEVEL
+        # Add new attributes for dynamic capital allocation
+        self.total_available_capital = 0
+        self.dynamic_grid_levels = max(min(config.GRID_LEVELS, 5), 4)
+        self.min_capital_per_grid = config.MIN_NOTIONAL_VALUE * 1.1  # Add 10% buffer to minimum
+        
+        # Log change to dynamic capital allocation
+        self.logger.info("Using dynamic capital allocation instead of fixed CAPITAL_PER_LEVEL")
         
         # Reduce grid range to concentrate capital in smaller price movements
         self.grid_range_percent = min(config.GRID_RANGE_PERCENT / 100, 0.03)  # Max 3% range
@@ -390,6 +395,17 @@ class GridTrader:
     
     def _setup_grid(self):
         """Set up grid levels and place initial orders"""
+        # Optimize grid parameters based on available capital
+        optimized_levels, capital_per_grid = self._optimize_grid_parameters()
+        
+        # Update grid level count if needed
+        if optimized_levels != self.dynamic_grid_levels:
+            self.dynamic_grid_levels = optimized_levels
+        
+        # Store the current capital per grid for reference
+        self.current_capital_per_grid = capital_per_grid
+        self.total_available_capital, _, _ = self._calculate_available_capital()
+        
         # Calculate grid levels
         self.grid = self._calculate_grid_levels()
         
@@ -1203,26 +1219,45 @@ class GridTrader:
     # OPTIMIZED: New helper method for capital calculation
     def _calculate_dynamic_capital_for_level(self, price):
         """
-        Improved capital allocation method that considers total available funds
+        Calculate capital allocation for a grid level based on its position and available funds
+        
+        Args:
+            price: Price level for the grid
+            
+        Returns:
+            float: Capital amount to allocate for this grid level
         """
-        # Get available funds total
-        base_asset = self.symbol.replace('USDT', '')
-        quote_asset = 'USDT'
-        available_quote = self.binance_client.check_balance(quote_asset) - self.locked_balances.get(quote_asset, 0)
-        available_base = self.binance_client.check_balance(base_asset) - self.locked_balances.get(base_asset, 0)
+        # Get reference values
+        current_price = self.current_market_price
         
-        # Calculate total available capital (conservative estimate)
-        estimated_total_capital = available_quote + (available_base * price * 0.95)
+        # Get the core zone boundaries
+        grid_range = current_price * self.grid_range_percent
+        core_range = grid_range * self.core_zone_percentage
+        core_upper = current_price + (core_range / 2)
+        core_lower = current_price - (core_range / 2)
         
-        # Adjust per-level capital allocation
-        grid_count = len(self.grid) if self.grid else self.grid_levels
-        max_safe_capital_per_level = estimated_total_capital / (grid_count * 1.5)  # Reserve 50% margin for additional trades
+        # Calculate position factor (distance from current price)
+        if core_lower <= price <= core_upper:
+            # Core zone - allocate more capital closer to current price
+            distance_factor = min(1, abs(price - current_price) / (core_range/2)) if core_range > 0 else 0
+            position_factor = 1 - (distance_factor * 0.5)  # 1.0 at current price, 0.5 at edge of core
+        else:
+            # Edge zone - allocate less capital
+            position_factor = 0.4  # 40% allocation for edge zones
         
-        # Original allocation calculation remains unchanged
-        original_allocation = self._calculate_original_dynamic_capital_for_level(price)
+        # Calculate base capital using position factor
+        if not hasattr(self, 'current_capital_per_grid'):
+            # If not initialized, calculate now
+            _, capital_per_grid = self._optimize_grid_parameters()
+            self.current_capital_per_grid = capital_per_grid
         
-        # Return the smaller value to ensure we don't exceed total funds
-        return min(original_allocation, max_safe_capital_per_level)
+        # Calculate allocation for this level
+        allocation = self.current_capital_per_grid * position_factor
+        
+        # Ensure minimum notional value is met
+        allocation = max(config.MIN_NOTIONAL_VALUE * 1.05, allocation)
+        
+        return allocation
 
     def _calculate_original_dynamic_capital_for_level(self, price):
         """
@@ -1651,3 +1686,77 @@ class GridTrader:
         except Exception as e:
             self.logger.error(f"Error during grid consistency check: {e}")
             return 0
+
+    def _calculate_available_capital(self):
+        """
+        Calculate total available capital for grid trading considering both quote and base assets
+        
+        Returns:
+            tuple: (total_quote_value_in_usdt, available_base_asset, available_quote_asset)
+        """
+        base_asset = self.symbol.replace('USDT', '')
+        quote_asset = 'USDT'
+        
+        # Get raw balances
+        base_balance = self.binance_client.check_balance(base_asset)
+        quote_balance = self.binance_client.check_balance(quote_asset)
+        
+        # Get current price for converting base asset to quote value
+        current_price = self.binance_client.get_symbol_price(self.symbol)
+        
+        # Account for locked balances
+        with self.balance_lock:
+            available_base = max(0, base_balance - self.locked_balances.get(base_asset, 0))
+            available_quote = max(0, quote_balance - self.locked_balances.get(quote_asset, 0))
+        
+        # Convert base asset to quote asset value and calculate total
+        base_in_quote = available_base * current_price
+        total_in_quote = base_in_quote + available_quote
+        
+        # Log the available capital
+        self.logger.info(f"Available capital: {available_quote} {quote_asset} + {available_base} {base_asset} (≈{base_in_quote} {quote_asset}) = {total_in_quote} {quote_asset}")
+        
+        return total_in_quote, available_base, available_quote
+
+    def _optimize_grid_parameters(self):
+        """
+        Dynamically optimize grid levels and capital allocation based on available funds
+        
+        Returns:
+            tuple: (optimized_grid_levels, capital_per_grid)
+        """
+        total_capital, available_base, available_quote = self._calculate_available_capital()
+        current_price = self.binance_client.get_symbol_price(self.symbol)
+        
+        # Start with configured grid levels
+        target_grid_levels = self.dynamic_grid_levels
+        
+        # Calculate minimum capital needed for this many grids
+        min_capital_needed = target_grid_levels * self.min_capital_per_grid
+        
+        # If we don't have enough capital, reduce the number of grids
+        if total_capital < min_capital_needed:
+            # Calculate maximum affordable grid levels
+            max_affordable_levels = max(2, int(total_capital / self.min_capital_per_grid))
+            
+            # Update grid levels count
+            target_grid_levels = max_affordable_levels
+            self.logger.warning(
+                f"Insufficient capital for {self.dynamic_grid_levels} grid levels. "
+                f"Reducing to {target_grid_levels} levels based on available capital ({total_capital} USDT)"
+            )
+        
+        # Calculate capital per grid level
+        capital_per_grid = total_capital / (target_grid_levels * 1.25)  # Reserve 20% for operations
+        
+        # Ensure each grid meets minimum notional value
+        if capital_per_grid < self.min_capital_per_grid:
+            capital_per_grid = self.min_capital_per_grid
+            # Recalculate grid levels with this capital per grid
+            target_grid_levels = max(2, int(total_capital / (capital_per_grid * 1.25)))
+            self.logger.warning(
+                f"Adjusting to {target_grid_levels} grid levels with {capital_per_grid} USDT per grid "
+                f"to meet minimum notional value ({config.MIN_NOTIONAL_VALUE} USDT)"
+            )
+        
+        return target_grid_levels, capital_per_grid
