@@ -24,10 +24,22 @@ WS_RECONNECT_DELAY = int(os.getenv("WS_RECONNECT_DELAY", "5"))  # 重连间隔�
 SYMBOL = os.getenv("SYMBOL", "TRXUSDT")  # 默认交易对为"TRXUSDT"，可修改为其他如"BTCUSDT"或"ETHUSDT"等
 GRID_LEVELS = int(os.getenv("GRID_LEVELS", "5"))  # 网格数量，增加数值可提高交易频率但需要更多资金
 GRID_SPACING = float(os.getenv("GRID_SPACING", "0.15"))  # 网格间距(%)，增大可捕获更大波动，减小可提高交易频次
-CAPITAL_PER_LEVEL = float(os.getenv("CAPITAL_PER_LEVEL", "8"))  # 每个网格的资金(USDT)，增加可提高利润但需要更多总资金
+
+# 注意：CAPITAL_PER_LEVEL 参数已被移除，替换为动态资金分配系统
+# 系统现在会根据可用资金自动计算每个网格的资金分配
+
 GRID_RANGE_PERCENT = float(os.getenv("GRID_RANGE_PERCENT", "1.0"))  # 总网格价格范围(%)，增大可覆盖更大波动，减小则集中在小范围
 RECALCULATION_PERIOD = int(os.getenv("RECALCULATION_PERIOD", "1"))  # 网格重新计算周期(天)，减小可更频繁更新网格位置
 ATR_PERIOD = int(os.getenv("ATR_PERIOD", "14"))  # ATR指标周期，增大可减少敏感度，减小可对短期波动更敏感
+
+# 动态资金分配参数
+MIN_GRID_LEVELS = int(os.getenv("MIN_GRID_LEVELS", "3"))  # 最小网格数量，确保至少有这么多网格
+MAX_GRID_LEVELS = int(os.getenv("MAX_GRID_LEVELS", "10"))  # 最大网格数量，根据可用资金可能会降低
+CAPITAL_RESERVE_PERCENT = float(os.getenv("CAPITAL_RESERVE_PERCENT", "0"))  # 预留资金百分比，用于应对市场波动
+
+# 资金分配策略参数
+ALLOCATION_STRATEGY = os.getenv("ALLOCATION_STRATEGY", "balanced")  # 资金分配策略：'conservative', 'balanced', 'aggressive'
+CORE_ZONE_BOOST = float(os.getenv("CORE_ZONE_BOOST", "1.5"))  # 核心区域资金提升系数，增加可使核心区域资金更集中
 
 # 非对称网格参数（核心区域优化）
 CORE_ZONE_PERCENTAGE = float(os.getenv("CORE_ZONE_PERCENTAGE", "0.7"))  # 核心区域占总范围的比例，增大可集中更多资金在中心价格附近
@@ -79,10 +91,7 @@ def validate_config():
     if GRID_SPACING <= 0:
         errors.append(f"GRID_SPACING必须大于0，当前值: {GRID_SPACING}")
     
-    if CAPITAL_PER_LEVEL <= 0:
-        errors.append(f"CAPITAL_PER_LEVEL必须大于0，当前值: {CAPITAL_PER_LEVEL}")
-    if CAPITAL_PER_LEVEL < MIN_NOTIONAL_VALUE:
-        errors.append(f"CAPITAL_PER_LEVEL必须大于等于最小订单价值(MIN_NOTIONAL_VALUE)，当前值: {CAPITAL_PER_LEVEL}, 最小值: {MIN_NOTIONAL_VALUE}")
+    # 注意：移除了对 CAPITAL_PER_LEVEL 的验证，因为该参数已不再使用
     
     if GRID_RANGE_PERCENT <= 0:
         errors.append(f"GRID_RANGE_PERCENT必须大于0，当前值: {GRID_RANGE_PERCENT}")
@@ -103,6 +112,20 @@ def validate_config():
     
     if TRAILING_TAKE_PROFIT_PERCENT <= 0:
         errors.append(f"TRAILING_TAKE_PROFIT_PERCENT必须大于0，当前值: {TRAILING_TAKE_PROFIT_PERCENT}")
+    
+    # 验证动态资金分配参数
+    if MIN_GRID_LEVELS < 2:
+        errors.append(f"MIN_GRID_LEVELS必须至少为2，当前值: {MIN_GRID_LEVELS}")
+    
+    if MAX_GRID_LEVELS < MIN_GRID_LEVELS:
+        errors.append(f"MAX_GRID_LEVELS必须大于等于MIN_GRID_LEVELS，当前值: {MAX_GRID_LEVELS}，最小值: {MIN_GRID_LEVELS}")
+    
+    if not 0 <= CAPITAL_RESERVE_PERCENT <= 50:
+        errors.append(f"CAPITAL_RESERVE_PERCENT必须在0和50之间，当前值: {CAPITAL_RESERVE_PERCENT}")
+    
+    # 验证最小订单价值
+    if MIN_NOTIONAL_VALUE <= 0:
+        errors.append(f"MIN_NOTIONAL_VALUE必须大于0，当前值: {MIN_NOTIONAL_VALUE}")
     
     return errors
 

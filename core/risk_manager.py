@@ -72,6 +72,15 @@ class RiskManager:
         # Track pending operations for better error handling
         self.pending_oco_orders = {}
 
+        # Remove the dependency on CAPITAL_PER_LEVEL
+        # Instead of directly using grid_trader.capital_per_level, we'll use dynamic allocation
+        
+        # Add new capital tracking attributes
+        self.min_order_value = config.MIN_NOTIONAL_VALUE
+        self.dynamic_allocation_enabled = True  # Flag to indicate we're using dynamic allocation
+        
+        self.logger.info("Using dynamic capital allocation for risk management orders")
+
     def _get_symbol_info(self):
         """
         Get symbol information with connection status tracking
@@ -183,6 +192,30 @@ class RiskManager:
             
             # Create initial OCO order
             self._place_oco_orders()
+            
+            # Check for dynamic allocation capability in grid trader
+            if self.grid_trader and hasattr(self.grid_trader, 'total_available_capital'):
+                # Store reference to available capital for future checks
+                self.total_grid_capital = self.grid_trader.total_available_capital
+                self.logger.info(f"Risk management activated with dynamic allocation reference: {self.total_grid_capital:.2f} USDT total grid capital")
+                
+                # Set dynamic risk parameters based on account size
+                if self.total_grid_capital < 100:  # Small account (<$100)
+                    # Tighter risk management for small accounts
+                    capital_adjustment_factor = 0.7  # 30% tighter stops
+                elif self.total_grid_capital < 500:  # Medium account ($100-$500)
+                    capital_adjustment_factor = 0.8  # 20% tighter stops
+                else:  # Large account (>$500)
+                    capital_adjustment_factor = 0.9  # 10% tighter stops
+                    
+                # Apply adjustment to risk parameters
+                base_stop_loss = self.trailing_stop_loss_percent
+                base_take_profit = self.trailing_take_profit_percent
+                
+                self.trailing_stop_loss_percent = max(0.005, base_stop_loss * capital_adjustment_factor)
+                self.trailing_take_profit_percent = max(0.005, base_take_profit * capital_adjustment_factor)
+                
+                self.logger.info(f"Risk parameters adjusted based on capital size: SL {self.trailing_stop_loss_percent*100:.2f}%, TP {self.trailing_take_profit_percent*100:.2f}%")
             
         except Exception as e:
             self.logger.error(f"Failed to activate risk management: {e}")
@@ -527,9 +560,19 @@ class RiskManager:
                 # Check if asset is locked by grid trader
                 locked_by_grid = self.grid_trader.locked_balances.get(asset, 0)
                 
-                # Also reserve a portion for future grid orders
-                reserve_for_grid = 0.3  # Reserve 30% of available assets for grid trading
-                reserved_amount = max(locked_by_grid, asset_balance * reserve_for_grid)
+                # Also check for dynamic allocation capability
+                if hasattr(self.grid_trader, 'total_available_capital'):
+                    # More intelligent reservation based on grid trader's allocation strategy
+                    grid_allocation_percent = 0.7  # Reserve 70% for grid, leave 30% for risk management
+                    total_available = self.grid_trader.total_available_capital
+                    reserved_amount = max(
+                        locked_by_grid,
+                        asset_balance * grid_allocation_percent  # Base dynamic reservation on actual capital
+                    )
+                else:
+                    # Fallback to simple percentage if grid trader doesn't use dynamic allocation
+                    reserve_for_grid = 0.3  # Reserve 30% of available assets for grid trading
+                    reserved_amount = max(locked_by_grid, asset_balance * reserve_for_grid)
                 
                 if asset_balance > reserved_amount:
                     original_balance = asset_balance
@@ -539,8 +582,34 @@ class RiskManager:
                     self.logger.info(f"Insufficient {asset} balance for OCO orders after grid reservation")
                     return False
 
-            # Set quantity with remaining available assets and format
-            quantity = self._adjust_quantity_precision(asset_balance)
+            # Calculate appropriate OCO quantity based on available balance and grid allocation
+            if self.grid_trader and hasattr(self.grid_trader, '_calculate_dynamic_capital_for_level'):
+                # Get a dynamic allocation based on current price
+                suggested_allocation = self.grid_trader._calculate_dynamic_capital_for_level(current_price)
+                
+                # Calculate available percentage after grid reservation
+                available_pct = 0.3  # Allow using 30% of assets for risk management
+                
+                # Calculate suggested quantity based on allocation
+                suggested_qty = (asset_balance * available_pct) if asset_balance > 0 else 0
+                
+                # Fix: Use self.min_order_value instead of undefined min_notional_value
+                min_notional_value = self.min_order_value
+                
+                # Ensure quantity meets minimum requirements
+                min_qty_for_min_notional = min_notional_value / current_price
+                quantity = max(suggested_qty, min_qty_for_min_notional)
+                
+                # Format with precision
+                quantity = self._adjust_quantity_precision(quantity)
+                
+                self.logger.info(f"Using dynamic allocation for OCO orders: {quantity} {asset} (based on {available_pct*100}% of balance)")
+            else:
+                # Original code for quantity calculation
+                # Fix: Use self.min_order_value instead of undefined min_notional_value
+                min_notional_value = self.min_order_value
+                min_qty_for_min_notional = min_notional_value / current_price
+                quantity = self._adjust_quantity_precision(asset_balance)
             
             # Get symbol info for price filter constraints
             symbol_info = self.binance_client.get_symbol_info(self.symbol)
@@ -601,8 +670,17 @@ class RiskManager:
                     self.telegram_bot.send_message(f"⚠️ Cannot create OCO order: invalid price relationship")
                 return False
             
-            # Get minimum notional value from config or set default
-            min_notional_value = config.MIN_NOTIONAL_VALUE  # Use value from config
+            # Get minimum notional value dynamically based on current conditions
+            if hasattr(self.grid_trader, 'current_capital_per_grid'):
+                # Use a fraction of grid trader's dynamic capital as minimum for risk orders
+                min_notional_value = max(
+                    config.MIN_NOTIONAL_VALUE,  # Base minimum
+                    self.grid_trader.current_capital_per_grid * 0.5  # Half of current grid capital
+                )
+                self.logger.debug(f"Using dynamic minimum order value: {min_notional_value} based on grid allocation")
+            else:
+                # Fallback to config value
+                min_notional_value = config.MIN_NOTIONAL_VALUE
 
             # Calculate order value
             order_value = float(quantity) * current_price
@@ -1181,9 +1259,7 @@ class RiskManager:
         """
         Check if OCO orders should be placed but are missing,
         and attempt to place them if funds are now available.
-        
-        This ensures continuous risk protection as soon as funds become available,
-        rather than waiting for the next scheduled check.
+        With support for dynamic capital allocation.
         
         Returns:
             bool: True if OCO orders were placed, False otherwise
@@ -1199,10 +1275,26 @@ class RiskManager:
         asset = self.symbol.replace('USDT', '')
         balance = self.binance_client.check_balance(asset)
         
+        # If grid trader is using dynamic allocation, check for available capital
+        if self.grid_trader and hasattr(self.grid_trader, 'total_available_capital'):
+            # Check if there's significant capital change that might enable OCO orders
+            if hasattr(self, 'last_checked_capital'):
+                capital_increase = self.grid_trader.total_available_capital - self.last_checked_capital
+                significant_increase = capital_increase > config.MIN_NOTIONAL_VALUE * 2  # Twice minimum order value
+                
+                if significant_increase:
+                    self.logger.info(f"Detected capital increase of {capital_increase:.2f} USDT, reassessing OCO order placement")
+                    
+            # Update last checked capital
+            self.last_checked_capital = self.grid_trader.total_available_capital
+        
+        # Check base asset balance (existing code)
         if balance > 0:
-            self.logger.info(f"Detected {balance} {asset} available for risk management, placing OCO orders")
-            return self._place_oco_orders()
-            
+            min_quantity_needed = config.MIN_NOTIONAL_VALUE / self.binance_client.get_symbol_price(self.symbol)
+            if balance > min_quantity_needed:
+                self.logger.info(f"Detected {balance} {asset} available for risk management, placing OCO orders")
+                return self._place_oco_orders()
+                
         return False
 
     def update_stop_loss_take_profit(self, grid_lowest, grid_highest):
@@ -1265,6 +1357,7 @@ class RiskManager:
     def verify_alignment_with_grid(self, grid_trader):
         """
         Verify that risk management settings align with current grid state
+        with support for dynamic capital allocation
         
         Args:
             grid_trader: The grid trader instance to check against
@@ -1276,6 +1369,9 @@ class RiskManager:
             return False
             
         try:
+            # Check if the grid trader uses dynamic allocation
+            has_dynamic_allocation = hasattr(grid_trader, 'dynamic_grid_levels')
+            
             # Get grid price boundaries
             grid_prices = [level['price'] for level in grid_trader.grid if level.get('price')]
             if not grid_prices:
@@ -1288,6 +1384,18 @@ class RiskManager:
             # Get current price
             current_price = self.binance_client.get_symbol_price(self.symbol)
             
+            # For dynamic allocation, check if grid structure has changed significantly
+            if has_dynamic_allocation:
+                current_grid_levels = grid_trader.dynamic_grid_levels
+                if hasattr(self, 'last_verified_grid_levels') and self.last_verified_grid_levels != current_grid_levels:
+                    self.logger.info(f"Grid structure changed from {self.last_verified_grid_levels} to {current_grid_levels} levels")
+                    self.update_stop_loss_take_profit(grid_lowest, grid_highest)
+                    self.last_verified_grid_levels = current_grid_levels
+                    return True
+                    
+                # Store current level count for future comparison
+                self.last_verified_grid_levels = current_grid_levels
+                
             # Calculate expected stop loss and take profit 
             expected_sl = grid_lowest * (1 - self.trailing_stop_loss_percent)
             expected_tp = grid_highest * (1 + self.trailing_take_profit_percent)
@@ -1313,3 +1421,52 @@ class RiskManager:
         except Exception as e:
             self.logger.error(f"Error verifying risk alignment with grid: {e}")
             return False
+
+    # Add this method to periodically check for capital changes and adjust OCO orders
+    def check_capital_changes(self):
+        """
+        Check for significant changes in available capital and adjust risk orders if needed
+        
+        Returns:
+            bool: True if adjustments were made, False otherwise
+        """
+        if not self.is_active or not self.grid_trader:
+            return False
+            
+        # Only applicable for grid traders with dynamic allocation
+        if not hasattr(self.grid_trader, 'total_available_capital'):
+            return False
+            
+        # Get current total capital
+        current_capital = self.grid_trader.total_available_capital
+        
+        # Check if we have a reference value to compare against
+        if not hasattr(self, 'last_capital_check') or not hasattr(self, 'total_grid_capital'):
+            # Initialize reference values
+            self.last_capital_check = current_capital
+            self.total_grid_capital = current_capital
+            return False
+            
+        # Calculate capital change
+        capital_change = abs(current_capital - self.last_capital_check) / self.last_capital_check
+        
+        # If significant change (>20%), readjust OCO orders
+        if capital_change > 0.2:  # 20% threshold
+            self.logger.info(f"Significant capital change detected: {capital_change*100:.1f}% ({self.last_capital_check:.2f}->{current_capital:.2f} USDT)")
+            
+            # Update reference values
+            self.last_capital_check = current_capital
+            self.total_grid_capital = current_capital
+            
+            # Cancel and replace OCO orders with new allocation
+            if self.oco_order_id:
+                self.logger.info("Cancelling existing OCO orders to adjust for capital change")
+                self._cancel_oco_orders()
+                
+            # Place new OCO orders with updated allocations
+            placement_result = self._place_oco_orders()
+            return placement_result
+        
+        # Update reference value even if no significant change
+        self.last_capital_check = current_capital
+        return False

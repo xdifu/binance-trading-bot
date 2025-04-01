@@ -28,6 +28,13 @@ class GridTrader:
         self.telegram_bot = telegram_bot
         self.symbol = config.SYMBOL
         
+        # Initialize logger
+        self.logger = logging.getLogger(__name__)
+        
+        # Add resource locking mechanism early to prevent race conditions
+        self.locked_balances = {}  # Tracks locked balances by asset
+        self.balance_lock = threading.RLock()  # Thread-safe lock for balance operations
+        
         # Apply optimized settings for small capital accounts ($64)
         # Increase grid levels for more frequent trading opportunities
         self.grid_levels = max(min(config.GRID_LEVELS, 5), 4)  # Enforce range of 4-5 grid levels for optimal capital distribution
@@ -36,11 +43,15 @@ class GridTrader:
         self.grid_spacing = min(config.GRID_SPACING / 100, 0.003)  # Max 0.3% spacing
         
         # Add new attributes for dynamic capital allocation
-        # Initialize total available capital with the current total capital to avoid unintended recalibrations
-        self.total_available_capital, _, _ = self._calculate_available_capital()
         self.dynamic_grid_levels = max(min(config.GRID_LEVELS, 5), 4)
         self.min_capital_per_grid = config.MIN_NOTIONAL_VALUE * 1.1  # Add 10% buffer to minimum
         self.current_capital_per_grid = self.min_capital_per_grid  # Initialize with a default value
+        
+        # Initialize last capital recalibration timestamp
+        self.last_capital_recalibration = 0
+        
+        # Initialize total available capital with the current total capital to avoid unintended recalibrations
+        self.total_available_capital, _, _ = self._calculate_available_capital()
         
         # Log change to dynamic capital allocation
         self.logger.info("Using dynamic capital allocation instead of fixed CAPITAL_PER_LEVEL")
@@ -64,12 +75,6 @@ class GridTrader:
         
         # Store previous ATR value for volatility change detection
         self.last_atr_value = None
-        
-        # Initialize last capital recalibration timestamp
-        self.last_capital_recalibration = 0
-        
-        # Initialize logger
-        self.logger = logging.getLogger(__name__)
         
         # Log the optimized settings
         self.logger.info(f"Using optimized grid settings for small capital: {self.grid_levels} levels, {self.grid_spacing*100:.2f}% spacing, {self.grid_range_percent*100:.2f}% range")
@@ -99,10 +104,6 @@ class GridTrader:
         
         # Track pending operations for better error handling
         self.pending_orders = {}  # Track orders waiting for WebSocket confirmation
-        
-        # Add resource locking mechanism to prevent race conditions
-        self.locked_balances = {}  # Tracks locked balances by asset
-        self.balance_lock = threading.RLock()  # Thread-safe lock for balance operations
     
     def _get_symbol_info(self):
         """
@@ -246,6 +247,9 @@ class GridTrader:
         base_asset = self.symbol.replace('USDT', '')
         quote_asset = 'USDT'
         
+        # Get optimal grid parameters to estimate resource needs
+        optimized_levels, capital_per_grid = self._optimize_grid_parameters()
+        
         # Calculate temporary grid to estimate resource requirements
         temp_grid = self._calculate_grid_levels()
         
@@ -255,11 +259,13 @@ class GridTrader:
         
         for level in temp_grid:
             price = level['price']
-            quantity = self.capital_per_level / price
+            # Use level's capital if available, or fall back to calculated capital_per_grid
+            capital = level.get('capital', capital_per_grid)
+            quantity = capital / price
             
             if level['side'] == 'BUY':
                 # Buy orders need USDT
-                usdt_needed += self.capital_per_level
+                usdt_needed += capital
             else:
                 # Sell orders need base asset
                 base_needed += quantity
@@ -1774,15 +1780,17 @@ class GridTrader:
                 f"Insufficient capital for {self.dynamic_grid_levels} grid levels. "
                 f"Reducing to {target_grid_levels} levels based on available capital ({total_capital} USDT)"
             )
-        
+    
         # Calculate capital per grid level
-        capital_per_grid = total_capital / (target_grid_levels * 1.25)  # Reserve 20% for operations
+        # MODIFY: Remove capital reservation - use all available capital
+        capital_per_grid = total_capital / target_grid_levels  # Use 100% of capital rather than reserving 25%
         
         # Ensure each grid meets minimum notional value
         if capital_per_grid < self.min_capital_per_grid:
             capital_per_grid = self.min_capital_per_grid
             # Recalculate grid levels with this capital per grid
-            target_grid_levels = max(2, int(total_capital / (capital_per_grid * 1.25)))
+            # MODIFY: Remove reservation buffer to use all capital
+            target_grid_levels = max(2, int(total_capital / capital_per_grid))
             self.logger.warning(
                 f"Adjusting to {target_grid_levels} grid levels with {capital_per_grid} USDT per grid "
                 f"to meet minimum notional value ({config.MIN_NOTIONAL_VALUE} USDT)"
@@ -1806,8 +1814,6 @@ class GridTrader:
             previous_levels = self.dynamic_grid_levels
             previous_capital = getattr(self, 'current_capital_per_grid', 0)
             
-            # Recalculate optimal parameters
-            new_levels, new_capital = self._optimize_grid_parameters()
             
             # Check if significant changes occurred
             levels_changed = previous_levels != new_levels
@@ -1816,7 +1822,7 @@ class GridTrader:
             if levels_changed or capital_changed:
                 self.logger.info(
                     f"Capital allocation recalibrated: Grid levels {previous_levels}->{new_levels}, "
-                    f"Capital per grid {previous_capital:.2f}->{new_capital:.2f} USDT"
+                                       f"Capital per grid {previous_capital:.2f}->{new_capital:.2f} USDT"
                 )
                 
                 # Update parameters
