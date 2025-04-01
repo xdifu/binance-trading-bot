@@ -452,9 +452,47 @@ class RiskManager:
                 self.lowest_price = current_price
             
             # Recalculate stop loss and take profit based on current price
-            safety_margin = 0.01  # 1% safety margin
-            self.stop_loss_price = current_price * (1 - self.trailing_stop_loss_percent)
-            self.take_profit_price = current_price * (1 + self.trailing_take_profit_percent)
+            try:
+                # Calculate ATR for dynamic safety margin
+                klines = self.binance_client.get_historical_klines(
+                    symbol=self.symbol,
+                    interval="1h",  # Use 1-hour timeframe for stability
+                    limit=14  # Standard ATR period
+                )
+                
+                if klines:
+                    from utils.indicators import calculate_atr
+                    atr = calculate_atr(klines, period=14)
+                    
+                    # Use ATR as a percentage of price for relative volatility
+                    atr_percent = atr / current_price if current_price > 0 else 0.01
+                    
+                    # Scale ATR based on account size and risk appetite
+                    # Small accounts need more protection - use at least 1.5x ATR
+                    atr_multiplier = 1.5
+                    
+                    # Ensure minimum safety margin regardless of ATR
+                    min_safety_percent = 0.005  # 0.5% minimum
+                    
+                    # Calculate dynamic safety margins
+                    sl_margin = max(min_safety_percent, atr_percent * atr_multiplier)
+                    tp_margin = max(min_safety_percent, atr_percent * atr_multiplier)
+                    
+                    self.logger.info(f"Using ATR-based safety margins: SL {sl_margin*100:.2f}%, TP {tp_margin*100:.2f}% (ATR: {atr_percent*100:.2f}%)")
+                    
+                    # Apply the calculated margins
+                    self.stop_loss_price = current_price * (1 - sl_margin)
+                    self.take_profit_price = current_price * (1 + tp_margin)
+                else:
+                    # Fallback to standard calculation if ATR calculation fails
+                    self.stop_loss_price = current_price * (1 - self.trailing_stop_loss_percent)
+                    self.take_profit_price = current_price * (1 + self.trailing_take_profit_percent)
+                    self.logger.warning("Could not calculate ATR, using fixed safety margins")
+            except Exception as e:
+                # Fallback to standard calculation on error
+                self.stop_loss_price = current_price * (1 - self.trailing_stop_loss_percent)
+                self.take_profit_price = current_price * (1 + self.trailing_take_profit_percent)
+                self.logger.error(f"Error calculating ATR-based margins: {e}, using fixed safety margins")
             
             # Get account balance - Always use current symbol to determine the asset
             balance = self.binance_client.get_account_info()
@@ -559,6 +597,37 @@ class RiskManager:
                     self.telegram_bot.send_message(f"⚠️ Cannot create OCO order: invalid price relationship")
                 return False
             
+            # Get minimum notional value from config or set default
+            min_notional_value = getattr(config, 'MIN_NOTIONAL_VALUE', 10)  # Default 10 USDT
+
+            # Calculate order value
+            order_value = float(quantity) * current_price
+
+            # Check if order meets minimum value requirement
+            if order_value < min_notional_value:
+                self.logger.warning(
+                    f"OCO order value ({order_value:.2f} USDT) below minimum required ({min_notional_value} USDT). "
+                    f"Adjusting quantity to meet minimum requirement."
+                )
+                
+                # Calculate new quantity to meet minimum
+                adjusted_quantity = min_notional_value / current_price
+                
+                # Format quantity with precision
+                quantity = self._adjust_quantity_precision(adjusted_quantity)
+                
+                # Verify the adjustment worked
+                new_order_value = float(quantity) * current_price
+                
+                if new_order_value < min_notional_value:
+                    self.logger.error(
+                        f"Cannot place OCO orders: even with adjustment, order value ({new_order_value:.2f} USDT) "
+                        f"still below minimum ({min_notional_value} USDT)"
+                    )
+                    return False
+                
+                self.logger.info(f"Adjusted quantity to {quantity} to meet minimum order value")
+
             self.logger.info(f"Placing OCO order via {api_type}: Stop: {stop_price}, Limit: {limit_price}, Qty: {quantity}")
             
             # Place OCO order with standard parameters
@@ -616,7 +685,26 @@ class RiskManager:
                 return False
                 
         except Exception as e:
-            self.logger.error(f"Failed to create OCO order: {e}")
+            self.logger.error(f"Failed to create OCO order: {e}", exc_info=True)
+            
+            # Log API response details if available
+            if hasattr(e, 'response') and hasattr(e.response, 'text'):
+                self.logger.error(f"API response: {e.response.text}")
+                
+            # Provide more actionable information
+            error_message = str(e).lower()
+            if "insufficient balance" in error_message:
+                self.logger.warning(f"Insufficient balance detected. Required: {quantity} {asset}, checking actual balance...")
+                # Log actual balance for comparison
+                try:
+                    actual_balance = self.binance_client.check_balance(asset)
+                    self.logger.info(f"Actual {asset} balance: {actual_balance}")
+                except Exception as balance_error:
+                    self.logger.error(f"Failed to get balance info: {balance_error}")
+            elif "price" in error_message and ("invalid" in error_message or "trigger" in error_message):
+                self.logger.warning(f"Price validation issue. SL: {stop_price}, TP: {limit_price}, Current: {current_price_str}")
+            elif "quantity" in error_message:
+                self.logger.warning(f"Quantity validation issue. Check LOT_SIZE filter. Quantity: {quantity}")
             
             # If this was a WebSocket error, try once more with REST
             if "connection" in str(e).lower() and self.using_websocket:
@@ -703,6 +791,39 @@ class RiskManager:
             return
             
         try:
+            # Check order status before attempting to cancel
+            try:
+                order_status = None
+                order_list_status = None
+                
+                # Try to get the OCO order status
+                order_details = self.binance_client.get_oco_order(self.symbol, orderListId=self.oco_order_id)
+                
+                if order_details:
+                    # Extract status from response
+                    if 'listStatusType' in order_details:
+                        order_list_status = order_details['listStatusType']
+                    elif 'result' in order_details and 'listStatusType' in order_details['result']:
+                        order_list_status = order_details['result']['listStatusType']
+                        
+                    self.logger.info(f"OCO order {self.oco_order_id} current status: {order_list_status}")
+                    
+                    # If order is already in terminal state, just update our tracking
+                    if order_list_status in ['ALL_DONE', 'EXPIRED', 'CANCELLED']:
+                        self.logger.info(f"OCO order {self.oco_order_id} already in terminal state: {order_list_status}, no cancellation needed")
+                        # Capture the original order ID before resetting
+                        original_order_id = str(self.oco_order_id)
+                        self.oco_order_id = None
+                        
+                        # Clear from pending orders tracking
+                        if original_order_id in self.pending_oco_orders:
+                            self.pending_oco_orders.pop(original_order_id)
+                            
+                        return
+            except Exception as status_error:
+                # Log error but proceed with cancellation attempt
+                self.logger.warning(f"Error checking OCO order status: {status_error}, proceeding with cancellation")
+
             # Check WebSocket availability before proceeding
             client_status = self.binance_client.get_client_status()
             self.using_websocket = client_status["websocket_available"]
@@ -965,7 +1086,7 @@ class RiskManager:
             self.logger.info(message)
             if self.telegram_bot:
                 self.telegram_bot.send_message(message)
-                
+
     def get_status(self):
         """
         Get current risk management status
@@ -1079,3 +1200,112 @@ class RiskManager:
             return self._place_oco_orders()
             
         return False
+
+    def update_stop_loss_take_profit(self, grid_lowest, grid_highest):
+        """
+        Update stop loss and take profit based on grid boundaries
+        
+        Args:
+            grid_lowest (float): Lowest price in the grid
+            grid_highest (float): Highest price in the grid
+        """
+        if not self.is_active:
+            self.logger.debug("Risk manager not active, ignoring stop loss/take profit update")
+            return False
+            
+        # Verify inputs are valid
+        if grid_lowest is None or grid_highest is None or grid_lowest <= 0 or grid_highest <= 0:
+            self.logger.warning(f"Invalid grid boundaries for SL/TP update: low={grid_lowest}, high={grid_highest}")
+            return False
+            
+        # Get current price for reference
+        try:
+            current_price = self.binance_client.get_symbol_price(self.symbol)
+            
+            # Calculate new stop loss and take profit prices based on grid boundaries
+            # Use a percentage of the grid range for improved protection
+            
+            # Store old values for logging
+            old_sl = self.stop_loss_price
+            old_tp = self.take_profit_price
+            
+            # Calculate new values based on grid boundaries with padding
+            # For small capital accounts, be more conservative with stop loss
+            grid_range = grid_highest - grid_lowest
+            grid_center = (grid_highest + grid_lowest) / 2
+            
+            # Set stop loss below grid bottom with trailing_stop_loss_percent padding
+            self.stop_loss_price = grid_lowest * (1 - self.trailing_stop_loss_percent)
+            
+            # Set take profit above grid top with trailing_take_profit_percent padding
+            self.take_profit_price = grid_highest * (1 + self.trailing_take_profit_percent)
+            
+            # Log the changes
+            self.logger.info(
+                f"Updated risk parameters based on grid boundaries [{grid_lowest:.8f} - {grid_highest:.8f}]\n"
+                f"Stop loss: {old_sl:.8f} -> {self.stop_loss_price:.8f}\n"
+                f"Take profit: {old_tp:.8f} -> {self.take_profit_price:.8f}"
+            )
+            
+            # If we have an active OCO order, cancel and replace it
+            if self.oco_order_id:
+                self.logger.info("Cancelling existing OCO orders to apply new risk parameters")
+                self._cancel_oco_orders()
+                self._place_oco_orders()
+                
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to update stop loss/take profit: {e}")
+            return False
+
+    def verify_alignment_with_grid(self, grid_trader):
+        """
+        Verify that risk management settings align with current grid state
+        
+        Args:
+            grid_trader: The grid trader instance to check against
+            
+        Returns:
+            bool: True if aligned, False if needs adjustment
+        """
+        if not self.is_active or not grid_trader or not grid_trader.grid:
+            return False
+            
+        try:
+            # Get grid price boundaries
+            grid_prices = [level['price'] for level in grid_trader.grid if level.get('price')]
+            if not grid_prices:
+                self.logger.warning("Grid has no price levels, cannot verify alignment")
+                return False
+                
+            grid_lowest = min(grid_prices)
+            grid_highest = max(grid_prices)
+            
+            # Get current price
+            current_price = self.binance_client.get_symbol_price(self.symbol)
+            
+            # Calculate expected stop loss and take profit 
+            expected_sl = grid_lowest * (1 - self.trailing_stop_loss_percent)
+            expected_tp = grid_highest * (1 + self.trailing_take_profit_percent)
+            
+            # Check if current settings deviate significantly
+            sl_deviation = abs(self.stop_loss_price - expected_sl) / expected_sl if expected_sl > 0 else 1
+            tp_deviation = abs(self.take_profit_price - expected_tp) / expected_tp if expected_tp > 0 else 1
+            
+            # If deviation exceeds threshold, update
+            if sl_deviation > 0.05 or tp_deviation > 0.05:  # 5% threshold
+                self.logger.info(
+                    f"Risk management not aligned with grid (deviation SL: {sl_deviation*100:.1f}%, TP: {tp_deviation*100:.1f}%). "
+                    f"Updating to match grid boundaries: [{grid_lowest:.8f} - {grid_highest:.8f}]"
+                )
+                
+                # Update to match grid
+                self.update_stop_loss_take_profit(grid_lowest, grid_highest)
+                return True
+            
+            self.logger.debug("Risk management aligned with current grid state")
+            return False
+            
+        except Exception as e:
+            self.logger.error(f"Error verifying risk alignment with grid: {e}")
+            return False

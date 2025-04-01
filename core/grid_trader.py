@@ -6,7 +6,11 @@ from datetime import datetime, timedelta
 from binance_api.client import BinanceClient
 from utils.indicators import calculate_atr
 from utils.format_utils import format_price, format_quantity, get_precision_from_filters
-import config
+import config  # Ensure this line is present to import the config module
+
+# Ensure MIN_NOTIONAL_VALUE is defined in the config module
+if not hasattr(config, 'MIN_NOTIONAL_VALUE'):
+    raise AttributeError("config.MIN_NOTIONAL_VALUE is not defined. Please define it in the config module.")
 
 class GridTrader:
     def __init__(self, binance_client, telegram_bot=None):
@@ -398,6 +402,17 @@ class GridTrader:
         
         # Place grid orders (using unified method)
         self._place_grid_orders()
+        
+        # Connect grid recalculation with risk management
+        if self.telegram_bot and hasattr(self.telegram_bot, 'risk_manager'):
+            # Calculate grid price range for risk manager
+            grid_prices = [level['price'] for level in self.grid]
+            grid_lowest = min(grid_prices)
+            grid_highest = max(grid_prices)
+            
+            # Update risk manager with new grid boundaries
+            self.telegram_bot.risk_manager.update_stop_loss_take_profit(grid_lowest, grid_highest)
+            self.logger.info(f"Updated risk management bounds to match new grid: {grid_lowest:.8f} - {grid_highest:.8f}")
     
     def _calculate_grid_levels(self):
         """
@@ -423,10 +438,14 @@ class GridTrader:
         
         # Calculate trend strength and apply grid offset
         trend_strength = self._calculate_trend_strength(klines)
-        trend_offset = current_price * trend_strength * 0.05  # Maximum 5% shift
-        
-        self.logger.info(f"Detected trend strength: {trend_strength:.2f}, applying offset: {trend_offset:.8f} ({(trend_strength*100):.1f}%)")
-        
+        trend_offset = current_price * trend_strength * 0.05
+        # Limit offset to prevent core zone from exceeding grid bounds
+        grid_range = current_price * self.grid_range_percent
+        max_offset = grid_range * 0.2  # Maximum 20% of total grid range
+        trend_offset = max(min(trend_offset, max_offset), -max_offset)
+
+        self.logger.info(f"Detected trend strength: {trend_strength:.2f}, applying bounded offset: {trend_offset:.8f} ({(trend_strength*100):.1f}%)")
+
         # Calculate upper and lower bounds of the entire grid
         upper_bound = current_price + (grid_range / 2)
         lower_bound = current_price - (grid_range / 2)
@@ -436,7 +455,14 @@ class GridTrader:
         
         # Apply trend-based offset to core zone
         core_upper = current_price + (core_range / 2) + trend_offset
-        core_lower = current_price - (core_range / 2) + trend_offset
+        if core_upper > upper_bound * 0.95:
+            self.logger.warning(f"Clamping core_upper to {upper_bound * 0.95:.8f} may distort grid boundaries. Original: {core_upper:.8f}, Upper Bound: {upper_bound:.8f}")
+            core_upper = upper_bound * 0.95
+        if core_upper < current_price + (core_range / 2) + trend_offset:
+            self.logger.warning(f"Clamping core_upper to {core_upper:.8f} may distort grid boundaries. Original: {(current_price + (core_range / 2) + trend_offset):.8f}, Upper Bound: {upper_bound:.8f}")
+        core_lower = max(current_price - (core_range / 2) + trend_offset, lower_bound * 1.05)
+        if core_lower > current_price - (core_range / 2) + trend_offset:
+            self.logger.warning(f"Clamping core_lower to {core_lower:.8f} may distort grid boundaries. Original: {(current_price - (core_range / 2) + trend_offset):.8f}, Lower Bound: {lower_bound:.8f}")
         
         # Ensure core zone stays within overall grid bounds
         core_upper = min(core_upper, upper_bound)
@@ -478,32 +504,46 @@ class GridTrader:
         
         # Calculate upper edge levels if any
         if edge_levels > 0:
-            # Split remaining levels between upper and lower edges
-            upper_edge_levels = edge_levels // 2
-            lower_edge_levels = edge_levels - upper_edge_levels
-            
-            if upper_edge_levels > 0:
-                upper_edge_step = (upper_bound - core_upper) / upper_edge_levels if upper_edge_levels > 0 else 0
+            # Ensure balanced distribution of edge levels
+            if edge_levels > 1:
+                # Calculate golden ratio based division for more natural distribution
+                golden_ratio = 0.618
+                upper_edge_levels = max(1, int(edge_levels * golden_ratio))
+                lower_edge_levels = edge_levels - upper_edge_levels
                 
-                # Create upper edge levels
-                for i in range(upper_edge_levels):
-                    level_price = core_upper + ((i + 1) * upper_edge_step)  # Start from beyond core zone
+                self.logger.debug(f"Edge levels distribution: {upper_edge_levels} upper, {lower_edge_levels} lower")
+                
+                # Adjust step sizes for smoother price progression
+                if upper_edge_levels > 0:
+                    # Use exponential step size for upper levels to ensure better coverage
+                    upper_range = upper_bound - core_upper
+                    upper_edge_step = upper_range / sum(1.2**i for i in range(upper_edge_levels))
                     
-                    # Upper levels are always SELL
-                    side = "SELL"
+                    # Create upper edge levels with exponential spacing
+                    upper_step_multiplier = 1.2
+                    current_step = upper_edge_step
+                    current_price = core_upper
                     
-                    # Calculate edge zone capital
-                    capital = self._calculate_dynamic_capital_for_level(level_price)
-                    
-                    grid_levels.append({
-                        "price": level_price,
-                        "side": side,
-                        "order_id": None,
-                        "capital": capital,
-                        "timestamp": None
-                    })
+                    for i in range(upper_edge_levels):
+                        level_price = current_price + current_step
+                        current_price = level_price
+                        current_step *= upper_step_multiplier
+                        
+                        # Upper levels are always SELL
+                        side = "SELL"
+                        capital = self._calculate_dynamic_capital_for_level(level_price)
+                        
+                        grid_levels.append({
+                            "price": level_price,
+                            "side": side,
+                            "order_id": None,
+                            "capital": capital,
+                            "timestamp": None
+                        })
             
             # Calculate lower edge levels
+            lower_edge_levels = edge_levels  # Ensure lower_edge_levels is initialized
+            # Ensure lower edge levels are calculated only once and not overwritten
             if lower_edge_levels > 0:
                 lower_edge_step = (core_lower - lower_bound) / lower_edge_levels if lower_edge_levels > 0 else 0
                 
@@ -547,10 +587,7 @@ class GridTrader:
     
     def _cancel_all_open_orders(self):
         """
-        Cancel all open orders for the trading pair
-        
-        Returns:
-            bool: True if successful, False otherwise
+        Cancel all open orders with improved error handling and state verification
         """
         try:
             # Use WebSocket if available, otherwise REST
@@ -567,7 +604,17 @@ class GridTrader:
                 if self.simulation_mode:
                     self.logger.info(f"Simulation - Would cancel order {order['orderId']}")
                     continue
-                    
+                
+                # Check order status before cancelling to avoid errors
+                try:
+                    order_status = self.binance_client.get_order_status(self.symbol, order['orderId'])
+                    if order_status in ['FILLED', 'CANCELLED', 'REJECTED', 'EXPIRED']:
+                        self.logger.info(f"Order {order['orderId']} already in terminal state: {order_status}, skipping cancel")
+                        continue
+                except Exception as status_error:
+                    self.logger.warning(f"Error checking order status: {status_error}, proceeding with cancellation")
+                        
+                # Now proceed with cancellation
                 result = self.binance_client.cancel_order(
                     symbol=self.symbol,
                     order_id=order['orderId']
@@ -639,6 +686,19 @@ class GridTrader:
                 self.logger.warning(f"Could not lock funds for {side} order. Required: {required} {asset}")
                 return False
             
+            # Double-check current balance after locking
+            current_balance = self.binance_client.check_balance(asset)
+            available = current_balance - self.locked_balances.get(asset, 0)
+            
+            if available < required:
+                # We don't actually have enough funds - release the lock and abort
+                self._release_funds(asset, required)
+                self.logger.warning(f"Insufficient {asset} for order after locking. " 
+                                   f"Required: {required}, Available: {available}")
+                return False
+                
+            self.logger.debug(f"Double-verified {asset} funds for order: {required} available: {available}")
+            
             try:
                 # Generate a client order ID for tracking
                 client_order_id = f"grid_{int(time.time())}_{side}_{formatted_price}"
@@ -674,7 +734,17 @@ class GridTrader:
             except Exception as e:
                 # Release the funds if order placement fails
                 self._release_funds(asset, required)
-                self.logger.error(f"Failed to place order: {side} {formatted_quantity} @ {formatted_price}, Error: {e}")
+                
+                # Improved error logging with more details and stack trace
+                self.logger.error(
+                    f"Failed to place {side} order: qty={formatted_quantity}, price={formatted_price}", 
+                    exc_info=True  # Add stack trace
+                )
+                self.logger.error(f"Error details: {str(e)}")
+                
+                # Add API response logging if available
+                if hasattr(e, 'response') and e.response:
+                    self.logger.error(f"API response: {e.response.text if hasattr(e.response, 'text') else str(e.response)}")
                 
                 # Check if connection was lost and retry with fallback
                 if "connection" in str(e).lower() and self.using_websocket:
@@ -785,6 +855,20 @@ class GridTrader:
                 self.logger.info(message)
                 if self.telegram_bot:
                     self.telegram_bot.send_message(message)
+                
+                # Add in check_grid_recalculation method, after performing full recalculation
+                if self.telegram_bot and hasattr(self.telegram_bot, 'risk_manager'):
+                    # When grid is recalculated, make sure risk manager is notified
+                    risk_manager = self.telegram_bot.risk_manager
+                    if risk_manager.is_active:
+                        # Calculate grid price range
+                        grid_prices = [level['price'] for level in self.grid]
+                        grid_lowest = min(grid_prices)
+                        grid_highest = max(grid_prices)
+                        
+                        # Update risk manager
+                        risk_manager.update_stop_loss_take_profit(grid_lowest, grid_highest)
+                        self.logger.info(f"Notified risk manager of grid recalculation: new bounds {grid_lowest:.8f} - {grid_highest:.8f}")
                 
                 return True
             except Exception as e:
@@ -1094,14 +1178,7 @@ class GridTrader:
     # OPTIMIZED: New helper method for capital calculation
     def _calculate_dynamic_capital_for_level(self, price):
         """
-        Calculate appropriate capital allocation based on price zone with optimized distribution
-        for small capital accounts ($64)
-        
-        Args:
-            price: The price for the order
-            
-        Returns:
-            float: The capital allocation for this price level
+        Calculate appropriate capital allocation with minimum order value enforcement
         """
         current_price = self.current_market_price
         grid_range = current_price * self.grid_range_percent
@@ -1109,8 +1186,8 @@ class GridTrader:
         core_upper = current_price + (core_range / 2)
         core_lower = current_price - (core_range / 2)
 
-        # Calculate minimum required capital for valid orders (usually 6 USDT for Binance)
-        min_required_capital = 6.0  # Minimum capital to ensure order meets exchange requirements
+        # Use configured minimum rather than hardcoded value
+        min_required_capital = config.MIN_NOTIONAL_VALUE
         
         # Determine capital based on price zone with enhanced concentration
         if core_lower <= price <= core_upper:
@@ -1249,8 +1326,9 @@ class GridTrader:
                 # Release locked funds
                 if level['side'] == 'BUY':
                     asset = 'USDT'
-                    capital = level.get('capital', self.capital_per_level)
-                    self._release_funds(asset, capital)
+                    quantity = level.get('capital', self.capital_per_level) / level['price']
+                    formatted_quantity = self._adjust_quantity_precision(quantity)
+                    self._release_funds(asset, float(formatted_quantity))
                 else:
                     asset = self.symbol.replace('USDT', '')
                     quantity = level.get('capital', self.capital_per_level) / level['price']
@@ -1473,3 +1551,55 @@ class GridTrader:
         except Exception as e:
             self.logger.error(f"Error calculating trend strength: {e}")
             return 0  # Default to no trend on error
+
+    # Add a new periodic consistency check method
+    def _verify_grid_consistency(self):
+        """Verify grid state matches actual open orders and correct discrepancies"""
+        if not self.is_running or self.simulation_mode:
+            return
+            
+        try:
+            # Get all actual open orders from exchange
+            open_orders = self.binance_client.get_open_orders(self.symbol)
+            exchange_order_ids = set(str(order['orderId']) for order in open_orders)
+            
+            # Track grid orders that don't exist on exchange
+            phantom_orders = []
+            
+            # Check grid orders against exchange data
+            for i, level in enumerate(self.grid):
+                if level.get('order_id'):
+                    grid_order_id = str(level['order_id'])
+                    
+                    # If order in grid but not on exchange
+                    if grid_order_id not in exchange_order_ids:
+                        phantom_orders.append((i, level))
+                        self.logger.warning(f"Grid inconsistency: Order {grid_order_id} in grid but not found on exchange")
+            
+            # Fix phantom orders
+            for i, level in phantom_orders:
+                self.logger.info(f"Fixing phantom order in grid level {i}: {level}")
+                
+                # Release any locked funds
+                if level['side'] == 'BUY':
+                    asset = 'USDT'
+                    capital = level.get('capital', self.capital_per_level)
+                    self._release_funds(asset, capital)
+                else:
+                    asset = self.symbol.replace('USDT', '')
+                    quantity = level.get('capital', self.capital_per_level) / level['price']
+                    self._release_funds(asset, quantity)
+                
+                # Reset order ID
+                level['order_id'] = None
+                
+                # Try to place a new order if possible
+                self._place_grid_order(level)
+                
+            if phantom_orders:
+                self.logger.info(f"Grid consistency check: fixed {len(phantom_orders)} phantom orders")
+                
+            return len(phantom_orders)
+        except Exception as e:
+            self.logger.error(f"Error during grid consistency check: {e}")
+            return 0
