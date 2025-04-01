@@ -454,20 +454,36 @@ class GridTrader:
         core_range = grid_range * self.core_zone_percentage
         
         # Apply trend-based offset to core zone
-        core_upper = current_price + (core_range / 2) + trend_offset
-        if core_upper > upper_bound * 0.95:
-            self.logger.warning(f"Clamping core_upper to {upper_bound * 0.95:.8f} may distort grid boundaries. Original: {core_upper:.8f}, Upper Bound: {upper_bound:.8f}")
-            core_upper = upper_bound * 0.95
-        if core_upper < current_price + (core_range / 2) + trend_offset:
-            self.logger.warning(f"Clamping core_upper to {core_upper:.8f} may distort grid boundaries. Original: {(current_price + (core_range / 2) + trend_offset):.8f}, Upper Bound: {upper_bound:.8f}")
-        core_lower = max(current_price - (core_range / 2) + trend_offset, lower_bound * 1.05)
-        if core_lower > current_price - (core_range / 2) + trend_offset:
-            self.logger.warning(f"Clamping core_lower to {core_lower:.8f} may distort grid boundaries. Original: {(current_price - (core_range / 2) + trend_offset):.8f}, Lower Bound: {lower_bound:.8f}")
-        
-        # Ensure core zone stays within overall grid bounds
-        core_upper = min(core_upper, upper_bound)
-        core_lower = max(core_lower, lower_bound)
-        
+        core_center = current_price + trend_offset
+
+        # Apply boundary constraints to core center first
+        if core_center > (upper_bound + lower_bound) / 2:
+            self.logger.warning(f"Adjusting core center: {core_center:.8f} too high")
+            # Limit core center to not exceed middle of overall grid
+            core_center = min(core_center, (upper_bound + lower_bound) / 2)
+        elif core_center < (upper_bound + lower_bound) / 2:
+            self.logger.warning(f"Adjusting core center: {core_center:.8f} too low")
+            # Ensure core center is not too low
+            core_center = max(core_center, (upper_bound + lower_bound) / 2)
+
+        # Calculate core boundaries symmetrically around core center
+        core_upper = min(core_center + (core_range / 2), upper_bound * 0.95)
+        core_lower = max(core_center - (core_range / 2), lower_bound * 1.05)
+
+        # Critical validation: ensure core_lower < core_upper
+        if core_lower >= core_upper:
+            self.logger.warning(f"Core boundary inversion detected: lower={core_lower:.8f}, upper={core_upper:.8f}")
+            
+            # Calculate midpoint and enforce minimum separation
+            mid_point = (core_lower + core_upper) / 2
+            min_separation = grid_range * 0.05  # Ensure at least 5% of grid range separation
+            
+            # Fix the boundaries
+            core_upper = mid_point + (min_separation / 2)
+            core_lower = mid_point - (min_separation / 2)
+            
+            self.logger.info(f"Fixed core boundaries: lower={core_lower:.8f}, upper={core_upper:.8f}")
+
         # Define number of grid levels in each zone
         core_levels = int(self.grid_levels * self.core_grid_ratio)
         edge_levels = self.grid_levels - core_levels
@@ -608,7 +624,7 @@ class GridTrader:
                 # Check order status before cancelling to avoid errors
                 try:
                     order_status = self.binance_client.get_order_status(self.symbol, order['orderId'])
-                    if order_status in ['FILLED', 'CANCELLED', 'REJECTED', 'EXPIRED']:
+                    if order_status and order_status in ['FILLED', 'CANCELLED', 'REJECTED', 'EXPIRED']:
                         self.logger.info(f"Order {order['orderId']} already in terminal state: {order_status}, skipping cancel")
                         continue
                 except Exception as status_error:

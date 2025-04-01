@@ -594,6 +594,50 @@ class BinanceClient:
             self.logger.error(f"Failed to check balance for {asset}: {e}")
             return 0.0
 
+    def get_order_status(self, symbol, order_id):
+        """
+        Get the status of a specific order
+        
+        Args:
+            symbol (str): Trading pair symbol (e.g., 'BTCUSDT')
+            order_id (int): Order ID to query
+            
+        Returns:
+            str: Order status ('NEW', 'PARTIALLY_FILLED', 'FILLED', 'CANCELLED', 'REJECTED', 'EXPIRED')
+        """
+        try:
+            # First try to use WebSocket API if available
+            if self.ws_client and self.ws_client.is_connected():
+                response = self.ws_client.get_order(symbol=symbol, orderId=order_id)
+                
+                # Extract status from response
+                if isinstance(response, dict):
+                    if 'status' in response:
+                        # Standardize the status (ensure CANCELLED with double L)
+                        status = response['status']
+                        if status == 'CANCELED':
+                            return 'CANCELLED'
+                        return status
+                    elif 'result' in response and 'status' in response['result']:
+                        status = response['result']['status']
+                        if status == 'CANCELED':
+                            return 'CANCELLED'
+                        return status
+                
+            # Fallback to REST API
+            response = self.rest_client.get_order(symbol=symbol, orderId=order_id)
+            
+            # Extract and standardize status
+            status = response.get('status', '')
+            if status == 'CANCELED':
+                return 'CANCELLED'
+            return status
+                
+        except Exception as e:
+            self.logger.error(f"Error getting order status: {e}")
+            # Return None to indicate error, caller should handle this appropriately
+            return None
+
     # Additional utility methods
     
     def get_client_status(self):
