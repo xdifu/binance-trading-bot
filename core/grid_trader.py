@@ -438,22 +438,31 @@ class GridTrader:
         
         # Calculate trend strength and apply grid offset
         trend_strength = self._calculate_trend_strength(klines)
-        trend_offset = current_price * trend_strength * 0.05
-        # Limit offset to prevent core zone from exceeding grid bounds
-        grid_range = current_price * self.grid_range_percent
-        max_offset = grid_range * 0.2  # Maximum 20% of total grid range
-        trend_offset = max(min(trend_offset, max_offset), -max_offset)
 
-        self.logger.info(f"Detected trend strength: {trend_strength:.2f}, applying bounded offset: {trend_offset:.8f} ({(trend_strength*100):.1f}%)")
+        # 1. First calculate safe grid boundaries
+        safe_grid_range = current_price * self.grid_range_percent
+        upper_bound = current_price + (safe_grid_range / 2)
+        lower_bound = current_price - (safe_grid_range / 2)
 
-        # Calculate upper and lower bounds of the entire grid
-        upper_bound = current_price + (grid_range / 2)
-        lower_bound = current_price - (grid_range / 2)
-        
+        # 2. Calculate maximum safe offset range (ensuring core zone doesn't exceed total range)
+        max_safe_offset = min(
+            (upper_bound - current_price) * 0.8,  # 80% of distance to upper bound
+            (current_price - lower_bound) * 0.8   # 80% of distance to lower bound
+        ) * 0.5  # Additional 50% safety factor
+
+        # 3. Apply trend strength with bounded offset using sigmoid function
+        import math
+        normalized_strength = max(min(trend_strength, 1.0), -1.0)
+        sigmoid_factor = 2 / (1 + math.exp(-4 * abs(normalized_strength))) - 1  # Range 0-1
+        trend_direction = 1 if normalized_strength > 0 else -1
+        trend_offset = trend_direction * sigmoid_factor * max_safe_offset
+
+        self.logger.info(f"Trend strength: {trend_strength:.2f}, Safe max offset: {max_safe_offset:.8f}, Applied offset: {trend_offset:.8f}")
+
         # Define core zone with higher percentage
-        core_range = grid_range * self.core_zone_percentage
-        
-        # Apply trend-based offset to core zone
+        core_range = safe_grid_range * self.core_zone_percentage
+
+        # Apply calculated trend offset to core zone
         core_center = current_price + trend_offset
 
         # Apply boundary constraints to core center first
@@ -463,8 +472,8 @@ class GridTrader:
             core_center = min(core_center, (upper_bound + lower_bound) / 2)
         elif core_center < (upper_bound + lower_bound) / 2:
             self.logger.warning(f"Adjusting core center: {core_center:.8f} too low")
-            # Ensure core center is not too low
             core_center = max(core_center, (upper_bound + lower_bound) / 2)
+            # Ensure core center is not too low
 
         # Calculate core boundaries symmetrically around core center
         core_upper = min(core_center + (core_range / 2), upper_bound * 0.95)

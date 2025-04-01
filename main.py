@@ -388,7 +388,8 @@ class GridTradingBot:
         """Grid maintenance thread with improved timing precision and unfilled slot checking"""
         last_grid_check = datetime.now()
         last_unfilled_check = datetime.now()
-        last_oco_check = datetime.now()  # Add new timestamp for OCO checks
+        last_oco_check = datetime.now()
+        last_ws_check = datetime.now()  # Add new timestamp for WebSocket checks
         
         while True:
             try:
@@ -396,7 +397,7 @@ class GridTradingBot:
                 with self.state_lock:
                     if not self.is_running:
                         break
-                
+            
                 now = datetime.now()
                 
                 # Check grid recalculation using configuration constant
@@ -415,6 +416,13 @@ class GridTradingBot:
                         self.risk_manager._check_for_missing_oco_orders()
                     last_oco_check = now
                 
+                # NEW: Check WebSocket connection every 2 minutes
+                if (now - last_ws_check).total_seconds() > 2 * 60:  # 2 minutes
+                    if not ensure_websocket_connection(self.binance_client):
+                        logger.error("WebSocket connection check failed, attempting reconnection")
+                        self._setup_websocket()
+                    last_ws_check = now
+            
                 # Short sleep to allow for timely shutdown
                 time.sleep(MAINTENANCE_THREAD_SLEEP)
             except Exception as e:
@@ -547,6 +555,91 @@ class GridTradingBot:
         logger.info("Grid Trading Bot stopped")
 
 
-if __name__ == "__main__":
+def ensure_websocket_connection(binance_client):
+    """
+    Ensure WebSocket connection is available, reconnect if needed
+    """
+    try:
+        status = binance_client.get_client_status()
+        logger.info("Checked client status for WebSocket connection")
+        if not status.get("websocket_available"):
+            logger.warning("WebSocket connection unavailable, attempting reconnection")
+            # Reinitialize WebSocket
+            binance_client.reconnect_websocket()
+            
+            # Verify reconnection result
+            new_status = binance_client.get_client_status()
+            if new_status.get("websocket_available"):
+                logger.info("WebSocket reconnection successful")
+            else:
+                logger.error("WebSocket reconnection failed, switching to REST API mode")
+    except Exception as e:
+        logger.error(f"Error checking WebSocket connection: {e}")
+        return False
+    return True
+
+
+def run_grid_trading():
+    """
+    Initialize and run the grid trading bot
+    """
+    global grid_trader, risk_manager, telegram_bot
+    
+    # Create bot instance
     bot = GridTradingBot()
+    
+    # Store components in global variables for error handling access
+    grid_trader = bot.grid_trader
+    risk_manager = bot.risk_manager
+    telegram_bot = bot.telegram_bot
+    
+    # Start the bot
     bot.start()
+
+
+def run_trading_loop():
+    """
+    Main trading loop with enhanced error handling and recovery
+    """
+    restart_count = 0
+    max_restarts = 5
+    
+    while restart_count < max_restarts:
+        try:
+            # Main trading logic
+            run_grid_trading()
+        except Exception as e:
+            restart_count += 1
+            logging.critical(f"System error, preparing to restart ({restart_count}/{max_restarts}): {e}", exc_info=True)
+            
+            # Try to perform safe shutdown
+            try:
+                if 'grid_trader' in globals() and grid_trader is not None and grid_trader.is_running:
+                    grid_trader.stop()
+                if 'risk_manager' in globals() and risk_manager is not None and risk_manager.is_active:
+                    risk_manager.deactivate()
+            except Exception as cleanup_error:
+                logging.error(f"Error during shutdown process: {cleanup_error}")
+                
+            # Delay restart to prevent rapid crash loops
+            time.sleep(60)
+        else:
+            # Normal exit from loop
+            break
+
+    if restart_count >= max_restarts:
+        logging.critical(f"Maximum restart attempts ({max_restarts}) reached. System halting.")
+        # Send critical alert notification
+        if 'telegram_bot' in globals():
+            telegram_bot.send_message("🚨 CRITICAL: System halted after multiple restart failures")
+
+
+# Modify the main execution block at the end of the file
+if __name__ == "__main__":
+    # Define global variables for error handling
+    grid_trader = None
+    risk_manager = None
+    telegram_bot = None
+    
+    # Start with enhanced error handling
+    run_trading_loop()
