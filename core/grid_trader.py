@@ -469,7 +469,7 @@ class GridTrader:
             return
         
         # Store current ATR value for future volatility comparison
-        self.last_atr_value = self._get_current_atr()
+        # Removed redundant call to _get_current_atr to avoid overriding the ATR value
         
         # Check if WebSocket API is available for potential batch operations
         client_status = self.binance_client.get_client_status()
