@@ -386,7 +386,12 @@ class GridTrader:
                 self.tick_size = tick_size
                 
                 # Key modification: Directly return actual precision without forcing a minimum value of 4
-                return precision
+                # Ensure precision is a valid integer, fallback to default if invalid
+                try:
+                    return int(precision)
+                except (TypeError, ValueError):
+                    self.logger.warning(f"Invalid precision value '{precision}' for {self.symbol}. Falling back to default precision of 5.")
+                    return 5  # Default fallback precision
             else:
                 self.logger.warning(f"Price filter not found for {self.symbol}")
                 return 4  # Default fallback
@@ -427,8 +432,13 @@ class GridTrader:
         Format quantity with appropriate precision for LOT_SIZE filter compliance
         
         Args:
-            quantity (float): Original quantity value
-            
+        # Validate that quantity is a valid number
+        if not isinstance(quantity, (int, float)) or quantity <= 0:
+            self.logger.error(f"Invalid quantity value: {quantity}")
+            raise ValueError(f"Invalid quantity value: {quantity}")
+        
+        # Directly use format_quantity from utils
+        return format_quantity(quantity, self.quantity_precision)
         Returns:
             str: Formatted quantity string
         """
