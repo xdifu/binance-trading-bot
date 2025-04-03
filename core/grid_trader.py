@@ -446,12 +446,22 @@ class GridTrader:
         return format_quantity(quantity, self.quantity_precision)
     
     def _setup_grid(self):
-        """Set up grid levels and place initial orders"""
+        """
+        Set up grid levels and place initial orders.
+
+        This method calculates the grid levels based on the current market price,
+        ATR (Average True Range), and other parameters. If the ATR calculation fails,
+        a fallback value of 0.01 is used to ensure the grid setup proceeds. The grid
+        setup might fail if the calculated grid levels are empty or invalid, in which
+        case an error is logged, and the setup is aborted.
+        """
         # Calculate grid levels
         self.grid = self._calculate_grid_levels()
         
         # Check if the grid is empty
-        self.last_atr_value = self._get_current_atr()
+        atr_value = self._get_current_atr()
+        if atr_value is not None:
+            self.last_atr_value = atr_value
         if self.last_atr_value is None:
             self.logger.warning("ATR calculation failed. Using fallback value of 0.01 for grid setup.")
             self.last_atr_value = 0.01  # Fallback value to ensure grid setup proceeds
