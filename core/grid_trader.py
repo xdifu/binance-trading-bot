@@ -337,21 +337,23 @@ class GridTrader:
         try:
             # Cancel all open orders
             if not self.simulation_mode:
-                self._cancel_all_open_orders()
-            
+                if not self._cancel_all_open_orders():
+                    self.logger.error("Failed to cancel all open orders. Stopping further execution.")
             # Reset all fund locks
-            self._reset_locks()
-            
-            # Reset internal state
-            self.is_running = False
+            try:
+                self._reset_locks()
+            except Exception as e:
+                self.logger.error(f"Error resetting locks: {e}")
+                
             self.grid = []  # Clear grid
             self.pending_orders = {}  # Clear pending_orders tracking
             self.last_recalculation = None
+            self.is_running = False
+            # Reset internal state
+            stop_message = "Grid trading system stopped"
+            self.logger.info(stop_message)
+            return stop_message
             
-            message = "Grid trading system stopped"
-            self.logger.info(message)
-            
-            return message
         except Exception as e:
             error_message = f"Error stopping grid trading: {e}"
             self.logger.error(error_message)
