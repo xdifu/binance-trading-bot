@@ -297,7 +297,7 @@ class GridTrader:
         available_quote = quote_balance - self.locked_balances.get(quote_asset, 0)
 
         if available_quote < usdt_needed and not simulation:
-            warnings.append(f"Insufficient {quote_asset} balance. Required: {usdt_needed:.2f}, Available: {available_quote:.2f}")
+            warnings.append(f"Insufficient {quote_asset}: Required {usdt_needed:.2f}, Available {available_quote:.2f}")
             insufficient_funds = True
             
         if insufficient_funds and not simulation:
@@ -305,7 +305,7 @@ class GridTrader:
             insufficient_funds = True
         
         if insufficient_funds and not simulation:
-            warning_message = "⚠️ Warning: " + " ".join(warnings) + "\nStarting in limited mode."
+            warning_message = f"⚠️ Warning: {' '.join(warnings)}\nStarting in limited mode."
             self.logger.warning(warning_message)
             if self.telegram_bot:
                 self.telegram_bot.send_message(warning_message)
