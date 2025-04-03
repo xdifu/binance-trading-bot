@@ -505,7 +505,7 @@ class GridTrader:
         trend_multiplier = getattr(config, 'TREND_MULTIPLIER', 0.05)  # Default to 5% if not set in config
         trend_offset = current_price * trend_strength * trend_multiplier
         
-        self.logger.info(f"Detected trend strength: {trend_strength:.2f}, applying offset: {trend_offset:.8f} ({(trend_strength*100):.1f}%)")
+        self.logger.info(f"Detected trend strength: {trend_strength:.2f}, applying price offset: {trend_offset:.8f} USDT ({(trend_strength*trend_multiplier*100):.1f}% of current price)")
         
         # Calculate upper and lower bounds of the entire grid
         upper_bound = current_price + (grid_range / 2)
@@ -540,7 +540,11 @@ class GridTrader:
                 core_upper += self.tick_size  # Adjust core_upper slightly to ensure a valid range
                 self.logger.warning(f"Adjusted core_upper to avoid zero core_step. New core_upper: {core_upper}, core_lower: {core_lower}")
             
-            core_step = (core_upper - core_lower) / (core_levels - 1)
+            if core_levels > 1:
+                core_step = (core_upper - core_lower) / (core_levels - 1)
+            else:
+                self.logger.error(f"Invalid core_levels value: {core_levels}. Must be greater than 1 to calculate core_step.")
+                return []  # Return an empty grid to prevent further execution
             
             # Create grid levels in core zone
             if core_step <= 0:
@@ -616,17 +620,15 @@ class GridTrader:
                         "capital": capital,
                         "timestamp": None
                     })
-        
-        has_buy = any(level["side"] == "BUY" for level in grid_levels)
-        has_sell = any(level["side"] == "SELL" for level in grid_levels)
-
-        if not has_buy or not has_sell:
-            self.logger.warning(f"Grid calculation produced imbalanced grid: buy={has_buy}, sell={has_sell}")
-        
         # Sort grid levels by price
         grid_levels.sort(key=lambda x: x["price"])
+        
         # Check if we have at least one buy and one sell level
         has_buy = any(level["side"] == "BUY" for level in grid_levels)
+        has_sell = any(level["side"] == "SELL" for level in grid_levels)
+        
+        if not has_buy or not has_sell:
+            self.logger.warning(f"Grid calculation produced imbalanced grid: buy={has_buy}, sell={has_sell}")
         has_sell = any(level["side"] == "SELL" for level in grid_levels)
         
         if not has_buy or not has_sell:
@@ -646,16 +648,21 @@ class GridTrader:
                 self.logger.info(f"Added a BUY level at price {adjusted_lower_bound:.8f} to balance the grid")
             
             if not has_sell:
-                adjusted_upper_bound = float(self._adjust_price_precision(upper_bound))
-                sell_level = {
-                    "price": adjusted_upper_bound,
-                    "side": "SELL",
-                    "order_id": None,
-                    "capital": self._calculate_dynamic_capital_for_level(adjusted_upper_bound),
-                    "timestamp": None
-                }
-                grid_levels.append(sell_level)  # Add a SELL level at the upper bound
-                self.logger.info(f"Added a SELL level at price {adjusted_upper_bound:.8f} to balance the grid")
+                try:
+                    adjusted_upper_bound = float(self._adjust_price_precision(upper_bound))
+                except ValueError:
+                    self.logger.error(f"Invalid adjusted upper bound: {adjusted_upper_bound}. Skipping SELL level addition.")
+                    has_sell = False  # Ensure further processing of BUY levels
+                else:
+                    sell_level = {
+                        "price": adjusted_upper_bound,
+                        "side": "SELL",
+                        "order_id": None,
+                        "capital": self._calculate_dynamic_capital_for_level(adjusted_upper_bound),
+                        "timestamp": None
+                    }
+                    grid_levels.append(sell_level)  # Add a SELL level at the upper bound
+                    self.logger.info(f"Added a SELL level at price {adjusted_upper_bound:.8f} to balance the grid")
         return grid_levels
     
     def _cancel_all_open_orders(self):
