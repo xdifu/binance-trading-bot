@@ -362,13 +362,15 @@ class GridTrader:
     def _get_price_precision(self):
         """Get the price precision from the symbol information"""
         try:
-            symbol_info = self.binance_client.get_symbol_info(self.symbol)
-            if not symbol_info or not symbol_info.get('filters'):
+            if not self.symbol_info or not self.symbol_info.get('filters'):
                 self.logger.warning(f"Could not get symbol info or filters for {self.symbol}")
                 return 4  # Default fallback
             
             # Extract price filter
-            price_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'PRICE_FILTER'), None)
+            price_filter = next((f for f in self.symbol_info['filters'] if f['filterType'] == 'PRICE_FILTER'), None)
+            if not price_filter:
+                self.logger.warning(f"No PRICE_FILTER found for {self.symbol}. Using default precision of 4.")
+                return 4  # Default fallback precision
             
             if price_filter and 'tickSize' in price_filter:
                 tick_size = float(price_filter['tickSize'])
@@ -376,15 +378,14 @@ class GridTrader:
                 # Calculate precision based on tick size
                 # (e.g. if tickSize is 0.0001, precision is 4)
                 import math
-                tick_size_str = f"{tick_size:.10f}".rstrip('0').rstrip('.')
-                precision = len(tick_size_str.split('.')[-1]) if '.' in tick_size_str else 0
+                precision = -int(math.log10(tick_size))
                 
                 self.logger.info(f"Trading pair {self.symbol} price precision: {precision}")
                 
                 # Store the tick size for later use
                 self.tick_size = tick_size
                 
-                # 关键修改：直接返回实际精度，不强制最小值为4
+                # Key modification: Directly return actual precision without forcing a minimum value of 4
                 return precision
             else:
                 self.logger.warning(f"Price filter not found for {self.symbol}")
