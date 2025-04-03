@@ -111,6 +111,25 @@ class GridTrader:
             self.logger.error(f"Failed to get symbol info: {e}")
             return None
     
+    def _get_fallback_tick_size(self):
+        """
+        Get the fallback tick size dynamically or from configuration.
+        
+        Returns:
+            float: Fallback tick size value.
+        """
+        # Example: Fetch from configuration or set a default value
+        return getattr(config, 'FALLBACK_TICK_SIZE', 0.00000001)
+
+    def _is_symbol_info_valid(self):
+        """
+        Check if symbol information is valid and contains filters.
+
+        Returns:
+            bool: True if valid, False otherwise.
+        """
+        return self.symbol_info and 'filters' in self.symbol_info
+
     def _get_tick_size(self):
         """
         Get tick size directly from symbol filters
@@ -118,17 +137,19 @@ class GridTrader:
         Returns:
             float: Tick size value for price (default 0.00000001 if not found)
         """
-        if not self.symbol_info or 'filters' not in self.symbol_info:
-            self.logger.warning(f"Symbol info missing for {self.symbol}, using minimum tick size 0.00000001")
-            return 0.00000001  # Minimum tick size as fallback
+        if not self._is_symbol_info_valid():
+            error_msg = f"Symbol information is invalid for {self.symbol}. Cannot calculate grid levels."
+            self.logger.error(error_msg)
+            raise ValueError(error_msg)  # Raise an exception to stop further execution
         
         for f in self.symbol_info['filters']:
             if f['filterType'] == 'PRICE_FILTER':
                 tick_size = float(f['tickSize'])
                 self.logger.debug(f"Found tick size for {self.symbol}: {tick_size}")
                 return tick_size
-                
-        self.logger.warning(f"No PRICE_FILTER found for {self.symbol}, using minimum tick size 0.00000001")
+        fallback_tick_size = self._get_fallback_tick_size()
+        self.logger.warning(f"No PRICE_FILTER found for {self.symbol}, using fallback tick size {fallback_tick_size}")
+        return fallback_tick_size  # Default if not found
         return 0.00000001  # Default if not found
     
     def _get_step_size(self):
@@ -138,18 +159,23 @@ class GridTrader:
         Returns:
             float: Step size value for quantity (default 1.0 if not found)
         """
-        if not self.symbol_info or 'filters' not in self.symbol_info:
-            self.logger.warning(f"Symbol info missing for {self.symbol}, using minimum step size 1.0")
+        if not self._is_symbol_info_valid():
+            self.logger.warning(f"Symbol info missing for {self.symbol}. This might occur if the trading pair is invalid, delisted, or there is a connection issue. Using minimum step size 1.0")
             return 1.0  # Default step size
         
         for f in self.symbol_info['filters']:
             if f['filterType'] == 'LOT_SIZE':
-                step_size = float(f['stepSize'])
-                self.logger.debug(f"Found step size for {self.symbol}: {step_size}")
-                return step_size
+                if 'stepSize' in f:
+                    step_size = float(f['stepSize'])
+                    self.logger.debug(f"Found step size for trading pair {self.symbol}: {step_size}")
+                    return step_size
+                else:
+                    self.logger.warning(f"'stepSize' not found in LOT_SIZE filter for {self.symbol}. Filter details: {f}")
+                    continue
                 
-        self.logger.warning(f"No LOT_SIZE filter found for {self.symbol}, using minimum step size 1.0")
-        return 1.0  # Default if not found
+        fallback_step_size = getattr(config, 'FALLBACK_STEP_SIZE', 1.0)  # Configurable fallback
+        self.logger.warning(f"No LOT_SIZE filter found for {self.symbol}, using fallback step size {fallback_step_size}")
+        return fallback_step_size  # Use configurable fallback
     
     def get_status(self):
         """
@@ -230,7 +256,20 @@ class GridTrader:
         quote_asset = 'USDT'
         
         # Calculate temporary grid to estimate resource requirements
+        if not self._is_symbol_info_valid():
+            error_msg = f"Symbol info is invalid for {self.symbol}. Cannot calculate grid levels."
+            self.logger.error(error_msg)
+            if self.telegram_bot:
+                self.telegram_bot.send_message(f"⚠️ {error_msg}")
+            return f"Error: {error_msg}"
+        
         temp_grid = self._calculate_grid_levels()
+        if not temp_grid:
+            error_msg = "Failed to calculate grid levels. The grid is empty or invalid."
+            self.logger.error(error_msg)
+            if self.telegram_bot:
+                self.telegram_bot.send_message(f"⚠️ {error_msg}")
+            return f"Error: {error_msg}"
         
         # Calculate actual needed resources
         usdt_needed = 0
@@ -254,12 +293,15 @@ class GridTrader:
         insufficient_funds = False
         warnings = []
         
-        if quote_balance < usdt_needed and not simulation:
-            warnings.append(f"Insufficient {quote_asset} balance. Required: {usdt_needed:.2f}, Available: {quote_balance:.2f}")
+        available_base = base_balance - self.locked_balances.get(base_asset, 0)
+        available_quote = quote_balance - self.locked_balances.get(quote_asset, 0)
+
+        if available_quote < usdt_needed and not simulation:
+            warnings.append(f"Insufficient {quote_asset} balance. Required: {usdt_needed:.2f}, Available: {available_quote:.2f}")
             insufficient_funds = True
             
-        if base_balance < base_needed and not simulation:
-            warnings.append(f"Insufficient {base_asset} balance. Required: {base_needed:.2f}, Available: {base_balance:.2f}")
+        if insufficient_funds and not simulation:
+            warning_message = f"⚠️ Warning: {' '.join(warnings)}\nStarting in limited mode."
             insufficient_funds = True
         
         if insufficient_funds and not simulation:
@@ -271,7 +313,8 @@ class GridTrader:
         # Cancel all previous open orders
         self._cancel_all_open_orders()
         
-        # Calculate and set grid
+        simulation_status = "Simulation mode: ON" if self.simulation_mode else "Simulation mode: OFF"
+        message = f"Grid trading system started!\nCurrent price: {self.current_market_price}\nGrid range: {len(self.grid)} levels\nUsing {api_type}\n{simulation_status}"
         self._setup_grid()
         
         message = f"Grid trading system started!\nCurrent price: {self.current_market_price}\nGrid range: {len(self.grid)} levels\nUsing {api_type}"
@@ -350,7 +393,7 @@ class GridTrader:
         Returns:
             int: Quantity precision value (default 5 if unavailable)
         """
-        if not self.symbol_info or 'filters' not in self.symbol_info:
+        if not self._is_symbol_info_valid():
             return 5  # Default quantity precision
         
         # First try to get from LOT_SIZE filter
