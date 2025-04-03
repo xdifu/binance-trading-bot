@@ -550,7 +550,6 @@ class GridTrader:
             if core_step <= 0:
                 self.logger.error(f"Core step size is invalid. Unable to create grid levels in the core zone. core_upper: {core_upper}, core_lower: {core_lower}")
                 return []  # Return an empty grid to prevent further execution
-                return []  # Return an empty grid to prevent further execution
             else:
                 for i in range(core_levels):
                     level_price = core_lower + (i * core_step)
