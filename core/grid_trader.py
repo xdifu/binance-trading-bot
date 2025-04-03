@@ -450,6 +450,14 @@ class GridTrader:
         # Calculate grid levels
         self.grid = self._calculate_grid_levels()
         
+        # Check if the grid is empty
+        self.last_atr_value = self._get_current_atr()
+        if self.last_atr_value is None:
+            self.logger.warning("ATR calculation failed. Using fallback value of 0.01 for grid setup.")
+            self.last_atr_value = 0.01  # Fallback value to ensure grid setup proceeds
+            self.logger.error("Grid levels calculation returned an empty list. Aborting grid setup.")
+            return
+        
         # Store current ATR value for future volatility comparison
         self.last_atr_value = self._get_current_atr()
         
@@ -520,22 +528,25 @@ class GridTrader:
             core_step = (core_upper - core_lower) / (core_levels - 1) if core_levels > 1 else 0
             
             # Create grid levels in core zone
-            for i in range(core_levels):
-                level_price = core_lower + (i * core_step)
-                
-                # Determine buy/sell based on position relative to current price
-                side = "SELL" if level_price >= current_price else "BUY"
-                
-                # Calculate capital for this level
-                capital = self._calculate_dynamic_capital_for_level(level_price)
-                
-                grid_levels.append({
-                    "price": level_price,
-                    "side": side,
-                    "order_id": None,
-                    "capital": capital,
-                    "timestamp": None
-                })
+            if core_step == 0:
+                self.logger.warning(f"Core step size is zero. Unable to create grid levels in the core zone. core_upper: {core_upper}, core_lower: {core_lower}")
+            else:
+                for i in range(core_levels):
+                    level_price = core_lower + (i * core_step)
+                    
+                    # Determine buy/sell based on position relative to current price
+                    side = "SELL" if level_price >= current_price else "BUY"
+                    
+                    # Calculate capital for this level
+                    capital = self._calculate_dynamic_capital_for_level(level_price)
+                    
+                    grid_levels.append({
+                        "price": level_price,
+                        "side": side,
+                        "order_id": None,
+                        "capital": capital,
+                        "timestamp": None
+                    })
         
         # Calculate upper edge levels if any
         if edge_levels > 0:
@@ -587,23 +598,40 @@ class GridTrader:
                     })
         
         # Sort grid levels by price
+        if not has_buy or not has_sell:
+            self.logger.warning(f"Grid calculation produced imbalanced grid: buy={has_buy}, sell={has_sell}")
+        # Sort grid levels by price
         grid_levels.sort(key=lambda x: x["price"])
         
-        # Validate grid has at least one BUY and one SELL level
+        # Check if we have at least one buy and one sell level
         has_buy = any(level["side"] == "BUY" for level in grid_levels)
         has_sell = any(level["side"] == "SELL" for level in grid_levels)
         
         if not has_buy or not has_sell:
             self.logger.warning(f"Grid calculation produced imbalanced grid: buy={has_buy}, sell={has_sell}")
             
-            # Force at least one level of each if current grid is invalid
-            if not has_buy and len(grid_levels) > 1:
-                grid_levels[0]["side"] = "BUY"
-            if not has_sell and len(grid_levels) > 1:
-                grid_levels[-1]["side"] = "SELL"
-        
-        self.logger.info(f"Calculated {len(grid_levels)} grid levels: {core_levels} core, {edge_levels} edge")
-        
+            # Ensure at least one BUY and one SELL level by adding levels if necessary
+            if not has_buy:
+                buy_level = {
+                    "price": lower_bound,
+                    "side": "BUY",
+                    "order_id": None,
+                    "capital": self._calculate_dynamic_capital_for_level(lower_bound),
+                    "timestamp": None
+                }
+                grid_levels.insert(0, buy_level)  # Add a BUY level at the lower bound
+                self.logger.info(f"Added a BUY level at price {lower_bound:.8f} to balance the grid")
+            
+            if not has_sell:
+                sell_level = {
+                    "price": upper_bound,
+                    "side": "SELL",
+                    "order_id": None,
+                    "capital": self._calculate_dynamic_capital_for_level(upper_bound),
+                    "timestamp": None
+                }
+                grid_levels.append(sell_level)  # Add a SELL level at the upper bound
+                self.logger.info(f"Added a SELL level at price {upper_bound:.8f} to balance the grid")
         return grid_levels
     
     def _cancel_all_open_orders(self):
@@ -629,15 +657,25 @@ class GridTrader:
                     self.logger.info(f"Simulation - Would cancel order {order['orderId']}")
                     continue
                     
-                result = self.binance_client.cancel_order(
+                self.binance_client.cancel_order(
                     symbol=self.symbol,
                     order_id=order['orderId']
                 )
-                self.logger.info(f"Order cancelled: {order['orderId']}")
+                self.logger.info(f"Cancelled order {order['orderId']}")
             
             return True
         except Exception as e:
             self.logger.error(f"Error cancelling orders: {e}")
+            return False
+    def _place_grid_orders(self):
+        """Place all grid orders with unified logic for both WebSocket and REST APIs"""
+        for level in self.grid:
+            # Validate grid level data before placing the order
+            if 'price' not in level or 'side' not in level or level['price'] <= 0 or level['side'] not in ['BUY', 'SELL']:
+                self.logger.error(f"Invalid grid level data: {level}. Skipping order placement.")
+                continue
+            # Call the single order placement method for each level
+            self._place_grid_order(level)
             return False
     
     # OPTIMIZED: Unified order placement method replacing both previous methods
