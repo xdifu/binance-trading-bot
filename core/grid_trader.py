@@ -480,147 +480,236 @@ class GridTrader:
     
     def _calculate_grid_levels(self):
         """
-        Calculate asymmetric grid price levels with funds concentrated near current price
-        Optimized for small capital accounts with trend adaptation
+        Calculate asymmetric grid price levels with funds concentrated near current price.
+        Optimized for small capital accounts with trend adaptation.
+        
+        The grid is structured with:
+        - A core zone with higher density near the current price
+        - Edge zones with fewer levels at the extremes
+        - Dynamic capital allocation based on distance from current price
+        - Trend-based positioning to adapt to market direction
         
         Returns:
             list: List of grid levels with prices, sides and capital allocation
         """
-        # Get current market price 
-        current_price = self.binance_client.get_symbol_price(self.symbol)
-        self.current_market_price = current_price
+        # --- Step 1: Calculate basic grid parameters ---
+        try:
+            # Get current market price 
+            current_price = self.binance_client.get_symbol_price(self.symbol)
+            if current_price <= 0:
+                self.logger.error(f"Invalid current price: {current_price}")
+                return []
+                
+            self.current_market_price = current_price
+            grid_range = current_price * self.grid_range_percent
+            
+            # --- Step 2: Calculate trend-based offset ---
+            trend_offset = self._calculate_trend_offset(current_price)
+            
+            # --- Step 3: Define grid boundaries ---
+            # Overall grid boundaries
+            upper_bound = current_price + (grid_range / 2)
+            lower_bound = current_price - (grid_range / 2)
+            
+            # Core zone boundaries with trend offset
+            core_range = grid_range * self.core_zone_percentage
+            core_upper = min(current_price + (core_range / 2) + trend_offset, upper_bound)
+            core_lower = max(current_price - (core_range / 2) + trend_offset, lower_bound)
+            
+            # --- Step 4: Distribute grid levels ---
+            # Determine number of levels for each zone
+            core_levels = max(int(self.grid_levels * self.core_grid_ratio), 2)  # At least 2
+            edge_levels = max(self.grid_levels - core_levels, 1)  # At least 1
+            
+            grid_levels = []
+            
+            # Create core zone grid levels
+            core_grid = self._create_core_zone_grid(current_price, core_upper, core_lower, core_levels)
+            if not core_grid:
+                self.logger.error("Failed to create core zone grid")
+                return []
+            grid_levels.extend(core_grid)
+            
+            # Create edge zone grid levels if needed
+            if edge_levels > 0:
+                edge_grid = self._create_edge_zone_grid(
+                    current_price, core_upper, core_lower, upper_bound, lower_bound, edge_levels
+                )
+                grid_levels.extend(edge_grid)
+            
+            # --- Step 5: Sort and validate the grid ---
+            grid_levels.sort(key=lambda x: x["price"])
+            grid_levels = self._ensure_balanced_grid(grid_levels, upper_bound, lower_bound)
+            
+            return grid_levels
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating grid levels: {e}", exc_info=True)
+            return []
+            
+    def _calculate_trend_offset(self, current_price):
+        """
+        Calculate trend-based price offset for grid positioning
         
-        # Calculate grid range based on current price and adjusted grid_range_percent
-        grid_range = current_price * self.grid_range_percent
+        Args:
+            current_price: Current market price
+            
+        Returns:
+            float: Price offset value based on detected trend
+        """
+        try:
+            # Get klines for trend calculation
+            klines = self.binance_client.get_historical_klines(
+                symbol=self.symbol,
+                interval="1h",
+                limit=self.atr_period + 20  # Add extra for trend calculation
+            )
+            
+            # Calculate trend strength (-1 to 1)
+            trend_strength = self._calculate_trend_strength(klines)
+            
+            # Get configurable trend multiplier with default fallback
+            trend_multiplier = getattr(config, 'TREND_MULTIPLIER', 0.05)  # Default to 5%
+            
+            # Calculate offset with clear log message
+            trend_offset = current_price * trend_strength * trend_multiplier
+            self.logger.info(
+                f"Detected trend strength: {trend_strength:.2f}, "
+                f"applying price offset: {trend_offset:.8f} USDT "
+                f"({(trend_strength*trend_multiplier*100):.1f}% of current price)"
+            )
+            
+            return trend_offset
+        except Exception as e:
+            self.logger.warning(f"Error calculating trend offset: {e}. Using 0 offset.")
+            return 0
+    
+    def _create_core_zone_grid(self, current_price, core_upper, core_lower, core_levels):
+        """
+        Create grid levels for the core price zone
         
-        # Get klines for trend calculation - reuse from ATR calculation if possible
-        klines = self.binance_client.get_historical_klines(
-            symbol=self.symbol,
-            interval="1h",
-            limit=self.atr_period + 20  # Add extra for trend calculation
-        )
+        Args:
+            current_price: Current market price
+            core_upper: Upper bound of core zone
+            core_lower: Lower bound of core zone
+            core_levels: Number of grid levels in core zone
+            
+        Returns:
+            list: Grid levels in the core zone
+        """
+        core_grid = []
         
-        # Calculate trend strength and apply grid offset
-        trend_strength = self._calculate_trend_strength(klines)
-        trend_multiplier = getattr(config, 'TREND_MULTIPLIER', 0.05)  # Default to 5% if not set in config
-        trend_offset = current_price * trend_strength * trend_multiplier
+        # Ensure core zone has valid width
+        if core_upper <= core_lower:
+            core_upper = core_lower + self.tick_size
+            self.logger.warning(
+                f"Core zone has zero or negative width. "
+                f"Adjusted core_upper to {core_upper:.8f}, core_lower: {core_lower:.8f}"
+            )
         
-        self.logger.info(f"Detected trend strength: {trend_strength:.2f}, applying price offset: {trend_offset:.8f} USDT ({(trend_strength*trend_multiplier*100):.1f}% of current price)")
-        
-        # Calculate upper and lower bounds of the entire grid
-        upper_bound = current_price + (grid_range / 2)
-        lower_bound = current_price - (grid_range / 2)
-        
-        # Define core zone with higher percentage
-        core_range = grid_range * self.core_zone_percentage
-        
-        # Apply trend-based offset to core zone
-        core_upper = current_price + (core_range / 2) + trend_offset
-        core_lower = current_price - (core_range / 2) + trend_offset
-        
-        # Ensure core zone stays within overall grid bounds
-        core_upper = min(core_upper, upper_bound)
-        core_lower = max(core_lower, lower_bound)
-        
-        # Define number of grid levels in each zone
-        core_levels = int(self.grid_levels * self.core_grid_ratio)
-        edge_levels = self.grid_levels - core_levels
-        
-        # Ensure minimum number of levels in each zone
+        # Validate core_levels to prevent division by zero
         if core_levels < 2:
-            core_levels = 2
-        if edge_levels < 1:
-            edge_levels = 1
-            
-        grid_levels = []
-        # Calculate price step within core zone
-        if core_levels > 1:
-            # Ensure core_upper and core_lower are not equal to avoid zero core_step
-            if core_upper == core_lower:
-                core_upper += self.tick_size  # Adjust core_upper slightly to ensure a valid range
-                self.logger.warning(f"Adjusted core_upper to avoid zero core_step. New core_upper: {core_upper}, core_lower: {core_lower}")
-            
-            if core_levels > 1:
-                core_step = (core_upper - core_lower) / (core_levels - 1)
-            else:
-                self.logger.error(f"Invalid core_levels value: {core_levels}. Must be greater than 1 to calculate core_step.")
-                return []  # Return an empty grid to prevent further execution
-            
-            # Create grid levels in core zone
-            if core_step <= 0:
-                self.logger.error(f"Core step size is invalid. Unable to create grid levels in the core zone. core_upper: {core_upper}, core_lower: {core_lower}")
-                return []  # Return an empty grid to prevent further execution
-            else:
-                for i in range(core_levels):
-                    level_price = core_lower + (i * core_step)
-                    
-                    # Determine buy/sell based on position relative to current price
-                    side = "SELL" if level_price >= current_price else "BUY"
-                    
-                    # Calculate capital for this level
-                    capital = self._calculate_dynamic_capital_for_level(level_price)
-                    
-                    grid_levels.append({
-                        "price": level_price,
-                        "side": side,
-                        "order_id": None,
-                        "capital": capital,
-                        "timestamp": None
-                    })
+            self.logger.error(f"Invalid core_levels value: {core_levels}. Must be at least 2.")
+            return []
         
-        # Calculate upper edge levels if any
-        if edge_levels > 0:
-            # Split remaining levels between upper and lower edges
-            upper_edge_levels = edge_levels // 2
-            lower_edge_levels = edge_levels - upper_edge_levels
+        # Calculate step size between grid levels
+        core_step = (core_upper - core_lower) / (core_levels - 1)
+        
+        # Validate step size
+        if core_step <= 0:
+            self.logger.error(
+                f"Core step size is invalid: {core_step}. "
+                f"core_upper: {core_upper:.8f}, core_lower: {core_lower:.8f}"
+            )
+            return []
             
-            if upper_edge_levels > 0:
-                upper_edge_step = (upper_bound - core_upper) / upper_edge_levels if upper_edge_levels > 0 else 0
-                
-                # Create upper edge levels
-                for i in range(upper_edge_levels):
-                    level_price = core_upper + ((i + 1) * upper_edge_step)  # Start from beyond core zone
-                    
-                    # Upper levels are always SELL
-                    side = "SELL"
-                    
-                    # Calculate edge zone capital
-                    capital = self._calculate_dynamic_capital_for_level(level_price)
-                    
-                    grid_levels.append({
-                        "price": level_price,
-                        "side": side,
-                        "order_id": None,
-                        "capital": capital,
-                        "timestamp": None
-                    })
+        # Create grid levels
+        for i in range(core_levels):
+            level_price = core_lower + (i * core_step)
+            side = "SELL" if level_price >= current_price else "BUY"
+            capital = self._calculate_dynamic_capital_for_level(level_price)
             
-            # Calculate lower edge levels
-            if lower_edge_levels > 0:
-                lower_edge_step = (core_lower - lower_bound) / lower_edge_levels if lower_edge_levels > 0 else 0
+            core_grid.append({
+                "price": level_price,
+                "side": side,
+                "order_id": None,
+                "capital": capital,
+                "timestamp": None
+            })
+            
+        return core_grid
+    
+    def _create_edge_zone_grid(self, current_price, core_upper, core_lower, upper_bound, lower_bound, edge_levels):
+        """
+        Create grid levels for the upper and lower edge zones
+        
+        Args:
+            current_price: Current market price
+            core_upper: Upper bound of core zone
+            core_lower: Lower bound of core zone
+            upper_bound: Upper bound of entire grid
+            lower_bound: Lower bound of entire grid
+            edge_levels: Total number of grid levels in edge zones
+            
+        Returns:
+            list: Grid levels in the edge zones
+        """
+        edge_grid = []
+        
+        # Split remaining levels between upper and lower edges
+        upper_edge_levels = edge_levels // 2
+        lower_edge_levels = edge_levels - upper_edge_levels
+        
+        # Create upper edge levels
+        if upper_edge_levels > 0 and core_upper < upper_bound:
+            upper_edge_step = (upper_bound - core_upper) / upper_edge_levels
+            
+            for i in range(upper_edge_levels):
+                level_price = core_upper + ((i + 1) * upper_edge_step)
+                capital = self._calculate_dynamic_capital_for_level(level_price)
                 
-                # Create lower edge levels
-                for i in range(lower_edge_levels):
-                    level_price = core_lower - ((i + 1) * lower_edge_step)  # Start from beyond core zone
-                    
-                    # Lower levels are always BUY
-                    side = "BUY"
-                    
-                    # Calculate edge zone capital
-                    capital = self._calculate_dynamic_capital_for_level(level_price)
-                    
-                    # Calculate capital for this level
-                    capital = self._calculate_dynamic_capital_for_level(level_price)
-                    
-                    grid_levels.append({
-                        "price": level_price,
-                        "side": side,
-                        "order_id": None,
-                        "capital": capital,
-                        "timestamp": None
-                    })
-        # Sort grid levels by price
-        grid_levels.sort(key=lambda x: x["price"])
+                edge_grid.append({
+                    "price": level_price,
+                    "side": "SELL",  # Upper levels are always SELL
+                    "order_id": None,
+                    "capital": capital,
+                    "timestamp": None
+                })
+        
+        # Create lower edge levels
+        if lower_edge_levels > 0 and core_lower > lower_bound:
+            lower_edge_step = (core_lower - lower_bound) / lower_edge_levels
+            
+            for i in range(lower_edge_levels):
+                level_price = core_lower - ((i + 1) * lower_edge_step)
+                capital = self._calculate_dynamic_capital_for_level(level_price)
+                
+                edge_grid.append({
+                    "price": level_price,
+                    "side": "BUY",  # Lower levels are always BUY
+                    "order_id": None,
+                    "capital": capital,
+                    "timestamp": None
+                })
+                
+        return edge_grid
+    
+    def _ensure_balanced_grid(self, grid_levels, upper_bound, lower_bound):
+        """
+        Ensure grid has at least one BUY and one SELL level
+        
+        Args:
+            grid_levels: Current grid levels
+            upper_bound: Upper bound of grid
+            lower_bound: Lower bound of grid
+            
+        Returns:
+            list: Balanced grid with at least one BUY and one SELL level
+        """
+        # Check if grid is empty
+        if not grid_levels:
+            self.logger.warning("Empty grid detected. Creating minimal balanced grid.")
+            return self._create_minimal_grid(upper_bound, lower_bound)
         
         # Check if we have at least one buy and one sell level
         has_buy = any(level["side"] == "BUY" for level in grid_levels)
@@ -628,31 +717,27 @@ class GridTrader:
         
         if not has_buy or not has_sell:
             self.logger.warning(f"Grid calculation produced imbalanced grid: buy={has_buy}, sell={has_sell}")
-        has_sell = any(level["side"] == "SELL" for level in grid_levels)
-        
-        if not has_buy or not has_sell:
-            self.logger.warning(f"Grid calculation produced imbalanced grid: buy={has_buy}, sell={has_sell}")
             
-            # Ensure at least one BUY and one SELL level by adding levels if necessary
+            # Add a BUY level if needed
             if not has_buy:
-                adjusted_lower_bound = float(self._adjust_price_precision(lower_bound))
-                buy_level = {
-                    "price": adjusted_lower_bound,
-                    "side": "BUY",
-                    "order_id": None,
-                    "capital": self._calculate_dynamic_capital_for_level(adjusted_lower_bound),
-                    "timestamp": None
-                }
-                grid_levels.insert(0, buy_level)  # Add a BUY level at the lower bound
-                self.logger.info(f"Added a BUY level at price {adjusted_lower_bound:.8f} to balance the grid")
+                try:
+                    adjusted_lower_bound = float(self._adjust_price_precision(lower_bound))
+                    buy_level = {
+                        "price": adjusted_lower_bound,
+                        "side": "BUY",
+                        "order_id": None,
+                        "capital": self._calculate_dynamic_capital_for_level(adjusted_lower_bound),
+                        "timestamp": None
+                    }
+                    grid_levels.insert(0, buy_level)
+                    self.logger.info(f"Added a BUY level at price {adjusted_lower_bound:.8f} to balance the grid")
+                except Exception as e:
+                    self.logger.error(f"Failed to add BUY level: {e}")
             
+            # Add a SELL level if needed
             if not has_sell:
                 try:
                     adjusted_upper_bound = float(self._adjust_price_precision(upper_bound))
-                except ValueError:
-                    self.logger.error(f"Invalid adjusted upper bound: {adjusted_upper_bound}. Skipping SELL level addition.")
-                    has_sell = False  # Ensure further processing of BUY levels
-                else:
                     sell_level = {
                         "price": adjusted_upper_bound,
                         "side": "SELL",
@@ -660,9 +745,54 @@ class GridTrader:
                         "capital": self._calculate_dynamic_capital_for_level(adjusted_upper_bound),
                         "timestamp": None
                     }
-                    grid_levels.append(sell_level)  # Add a SELL level at the upper bound
+                    grid_levels.append(sell_level)
                     self.logger.info(f"Added a SELL level at price {adjusted_upper_bound:.8f} to balance the grid")
+                except Exception as e:
+                    self.logger.error(f"Failed to add SELL level: {e}")
+        
         return grid_levels
+    
+    def _create_minimal_grid(self, upper_bound, lower_bound):
+        """
+        Create a minimal grid with just a BUY and a SELL level
+        
+        Args:
+            upper_bound: Upper bound of grid
+            lower_bound: Lower bound of grid
+            
+        Returns:
+            list: Minimal grid with one BUY and one SELL level
+        """
+        minimal_grid = []
+        
+        try:
+            # Add minimal BUY level at lower bound
+            adjusted_lower_bound = float(self._adjust_price_precision(lower_bound))
+            buy_level = {
+                "price": adjusted_lower_bound,
+                "side": "BUY",
+                "order_id": None,
+                "capital": self._calculate_dynamic_capital_for_level(adjusted_lower_bound),
+                "timestamp": None
+            }
+            minimal_grid.append(buy_level)
+            
+            # Add minimal SELL level at upper bound
+            adjusted_upper_bound = float(self._adjust_price_precision(upper_bound))
+            sell_level = {
+                "price": adjusted_upper_bound,
+                "side": "SELL",
+                "order_id": None,
+                "capital": self._calculate_dynamic_capital_for_level(adjusted_upper_bound),
+                "timestamp": None
+            }
+            minimal_grid.append(sell_level)
+            
+            self.logger.info("Created minimal grid with one BUY and one SELL level")
+        except Exception as e:
+            self.logger.error(f"Failed to create minimal grid: {e}")
+            
+        return minimal_grid
     
     def _cancel_all_open_orders(self):
         """
