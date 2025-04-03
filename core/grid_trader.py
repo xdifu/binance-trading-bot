@@ -277,7 +277,11 @@ class GridTrader:
         
         for level in temp_grid:
             price = level['price']
-            quantity = self.capital_per_level / price
+            if price > 0:
+                quantity = self.capital_per_level / price
+            else:
+                self.logger.error(f"Invalid price value: {price}. Skipping grid level.")
+                continue
             
             if level['side'] == 'BUY':
                 # Buy orders need USDT
@@ -296,7 +300,8 @@ class GridTrader:
         available_base = base_balance - self.locked_balances.get(base_asset, 0)
         available_quote = quote_balance - self.locked_balances.get(quote_asset, 0)
 
-        if available_quote < usdt_needed and not simulation:
+        tolerance = 1e-6  # Small tolerance to account for floating-point rounding issues
+        if available_quote + tolerance < usdt_needed and not simulation:
             warnings.append(f"Insufficient {quote_asset}: Required {usdt_needed:.2f}, Available {available_quote:.2f}")
             insufficient_funds = True
             
