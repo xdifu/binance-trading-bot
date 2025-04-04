@@ -649,8 +649,8 @@ class GridTrader:
         core_grid = []
         
         # Ensure core zone has valid width
-        if core_upper <= core_lower:
-            core_upper = core_lower + self.tick_size
+        if core_upper <= core_lower + (self.tick_size * 5):
+            core_upper = core_lower + (self.tick_size * 5)
             self.logger.warning(
                 f"Core zone has zero or negative width. "
                 f"Adjusted core_upper to {core_upper:.8f}, core_lower: {core_lower:.8f}"
