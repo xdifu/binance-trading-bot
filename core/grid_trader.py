@@ -28,30 +28,27 @@ class GridTrader:
         # Calculate dynamic grid spacing based on market volatility using ATR
         initial_atr = self._get_current_atr()
         if initial_atr:
-            # Use 20% of ATR for spacing - empirically optimal for crypto markets
-            atr_ratio = 0.2
+            # Use ATR_RATIO from config for spacing calculation - optimal for crypto volatility
+            atr_ratio = config.ATR_RATIO
             atr_based_spacing = initial_atr / self.current_market_price * atr_ratio
             
-            # Set reasonable boundaries: min 0.1%, max 3%
-            # Crypto markets require wider spacing than traditional markets
-            min_spacing = 0.001  # 0.1% minimum to ensure orders aren't too dense
-            max_spacing = 0.03   # 3% maximum for high volatility periods
+            # Set minimum spacing to prevent overly dense grids
+            min_spacing = 0.001  # 0.1% minimum spacing for efficiency
             
-            # Apply constraints while respecting config setting as a possible limit
-            self.grid_spacing = max(min_spacing, min(config.GRID_SPACING / 100, atr_based_spacing, max_spacing))
+            # Apply constraints using config values for maximum limits
+            self.grid_spacing = max(min_spacing, min(config.GRID_SPACING / 100, atr_based_spacing, config.MAX_GRID_SPACING))
             
             self.logger.info(f"Dynamic grid spacing set to {self.grid_spacing*100:.2f}% based on ATR={initial_atr:.6f}")
         else:
-            # Fallback with higher maximum than before (3% instead of 0.3%)
-            # This accommodates crypto volatility when ATR calculation fails
-            self.grid_spacing = min(config.GRID_SPACING / 100, max_spacing)
+            # Fallback with configured maximum when ATR calculation fails
+            self.grid_spacing = min(config.GRID_SPACING / 100, config.MAX_GRID_SPACING)
             self.logger.info(f"Using fallback grid spacing: {self.grid_spacing*100:.2f}%")
+
+        # Use configured maximum for grid range limit
+        self.grid_range_percent = min(config.GRID_RANGE_PERCENT / 100, config.MAX_GRID_RANGE)  # Max range based on config
         
         # Preserve original capital per level setting
         self.capital_per_level = config.CAPITAL_PER_LEVEL
-        
-        # Reduce grid range to concentrate capital in smaller price movements
-        self.grid_range_percent = min(config.GRID_RANGE_PERCENT / 100, max_spacing)  # Max 3% range
         
         # Keep original timing parameters
         self.recalculation_period = config.RECALCULATION_PERIOD

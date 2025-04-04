@@ -29,6 +29,11 @@ GRID_RANGE_PERCENT = float(os.getenv("GRID_RANGE_PERCENT", "2.0"))  # 总网格�
 RECALCULATION_PERIOD = int(os.getenv("RECALCULATION_PERIOD", "1"))  # 网格重新计算周期(天)，减小可更频繁更新网格位置
 ATR_PERIOD = int(os.getenv("ATR_PERIOD", "14"))  # ATR指标周期，增大可减少敏感度，减小可对短期波动更敏感
 
+# 网格参数最大限制
+MAX_GRID_SPACING = float(os.getenv("MAX_GRID_SPACING", "0.03"))  # 最大单网格间距(3%)，控制单个网格的最大宽度
+MAX_GRID_RANGE = float(os.getenv("MAX_GRID_RANGE", "0.05"))  # 最大网格总范围(5%)，控制价格波动覆盖范围
+ATR_RATIO = float(os.getenv("ATR_RATIO", "0.2"))  # ATR比例系数，增大可设置更宽的网格间距
+
 # 非对称网格参数（核心区域优化）
 CORE_ZONE_PERCENTAGE = float(os.getenv("CORE_ZONE_PERCENTAGE", "0.7"))  # 核心区域占总范围的比例，增大可集中更多资金在中心价格附近
 CORE_CAPITAL_RATIO = float(os.getenv("CORE_CAPITAL_RATIO", "0.7"))  # 核心区域资金比例，增大可增强中心区域交易能力
