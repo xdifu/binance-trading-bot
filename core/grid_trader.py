@@ -504,6 +504,13 @@ class GridTrader:
         """
         # --- Step 1: Calculate basic grid parameters ---
         try:
+            # Calculate maximum possible grid count based on available funds
+            total_available_usdt = self.binance_client.check_balance('USDT')
+            adjusted_grid_levels = min(self.grid_levels, int(total_available_usdt / (self.capital_per_level * 0.8)))
+            if adjusted_grid_levels != self.grid_levels:
+                self.logger.info(f"Adjusted grid levels from {self.grid_levels} to {adjusted_grid_levels} based on available funds: {total_available_usdt} USDT")
+                self.grid_levels = max(adjusted_grid_levels, 3)  # Ensure at least 3 grid levels
+
             # Get current market price 
             current_price = self.binance_client.get_symbol_price(self.symbol)
             if current_price <= 0:
@@ -956,6 +963,15 @@ class GridTrader:
             # Call the single order placement method for each level
             if self._place_grid_order(level):
                 orders_placed += 1
+        
+        # Check for additional funds that can be used for more buy orders
+        available_usdt = self.binance_client.check_balance('USDT') - self.locked_balances.get('USDT', 0)
+        additional_levels = int(available_usdt / (self.capital_per_level * 1.1))  # Use slightly higher capital requirement for safety
+        
+        if additional_levels > 0:
+            self.logger.info(f"Found unused USDT: {available_usdt}, creating {additional_levels} additional buy levels")
+            added_orders = self._add_additional_buy_levels(additional_levels)
+            orders_placed += added_orders
         
         self.logger.info(f"Grid setup complete: {orders_placed} orders placed out of {len(self.grid)} grid levels")
         return orders_placed > 0
@@ -1775,9 +1791,94 @@ class GridTrader:
                             available_base -= quantity_needed
                             self.logger.info(f"Filled previously unfunded SELL grid slot at price {price} with {quantity_needed} {base_asset}")
         
+        # Check for substantial remaining USDT that could be used for additional buy grids
+        remaining_usdt = available_quote
+        if remaining_usdt > self.capital_per_level * 2:  # If enough for at least 2 more grids
+            additional_orders = self._create_additional_buy_grids(remaining_usdt)
+            orders_placed += additional_orders
+        
         if orders_placed > 0:
             self.logger.info(f"Filled {orders_placed} previously unfunded grid slots with newly available funds")
             if self.telegram_bot:
                 self.telegram_bot.send_message(f"✅ Placed {orders_placed} new grid orders using newly available funds")
                 
         return orders_placed
+    
+    def _add_additional_buy_levels(self, count):
+        """
+        Add additional buy levels using remaining USDT funds.
+        
+        Args:
+            count: Number of additional buy levels to add
+            
+        Returns:
+            int: Number of successfully placed orders
+        """
+        if count <= 0:
+            return 0
+            
+        # Get current price and calculate appropriate spacing
+        current_price = self.binance_client.get_symbol_price(self.symbol)
+        
+        # Find the lowest price in the current grid
+        existing_prices = [level['price'] for level in self.grid]
+        if existing_prices:
+            lowest_price = min(existing_prices)
+        else:
+            lowest_price = current_price * 0.98  # Default if grid is empty
+        
+        # Create new levels below the lowest existing level
+        new_levels = []
+        step = self.grid_spacing * current_price  # Calculate absolute step size
+        
+        for i in range(count):
+            # Each new level is placed below the previous one
+            price = lowest_price * (1 - (i + 1) * self.grid_spacing)
+            
+            # Create the new grid level
+            new_level = {
+                "price": price,
+                "side": "BUY",
+                "order_id": None,
+                "capital": self._calculate_dynamic_capital_for_level(price),
+                "timestamp": None
+            }
+            new_levels.append(new_level)
+            
+        # Place orders for new levels
+        orders_placed = 0
+        for level in new_levels:
+            if self._place_grid_order(level):
+                # Add successful orders to the grid
+                self.grid.append(level)
+                orders_placed += 1
+        
+        if orders_placed > 0:
+            self.logger.info(f"Added {orders_placed} additional buy levels to utilize remaining USDT")
+            
+        return orders_placed
+    
+    def _create_additional_buy_grids(self, available_usdt):
+        """
+        Create additional buy grid levels using excess available USDT.
+        This method is called when significant unused USDT is detected.
+        
+        Args:
+            available_usdt: Amount of available USDT to use
+            
+        Returns:
+            int: Number of additional orders placed
+        """
+        # Calculate how many additional grids we can create
+        max_additional_grids = int(available_usdt / self.capital_per_level)
+        
+        # Limit to a reasonable number to avoid creating too many small orders
+        additional_grids = min(max_additional_grids, 5)  # Max 5 additional grids at once
+        
+        if additional_grids <= 0:
+            return 0
+            
+        self.logger.info(f"Creating {additional_grids} additional buy grids with {available_usdt:.2f} excess USDT")
+        
+        # Use existing method to create the additional levels
+        return self._add_additional_buy_levels(additional_grids)
