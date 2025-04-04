@@ -448,34 +448,36 @@ class GridTrader:
     def _setup_grid(self):
         """
         Set up grid levels and place initial orders.
-
-        This method calculates the grid levels based on the current market price,
-        ATR (Average True Range), and other parameters. If the ATR calculation fails,
-        a fallback value of 0.01 is used to ensure the grid setup proceeds. The grid
-        setup might fail if the calculated grid levels are empty or invalid, in which
-        case an error is logged, and the setup is aborted.
+        
+        This method calculates grid levels based on current market price and ATR.
+        It includes fallback mechanisms for ATR calculation failures.
         """
         # Calculate grid levels
         self.grid = self._calculate_grid_levels()
         
-        # Check if the grid is empty
-        atr_value = self._get_current_atr()
-        if atr_value is not None:
-            self.last_atr_value = atr_value
-        if self.last_atr_value is None:
-            self.logger.warning("ATR calculation failed. Using fallback value of 0.01 for grid setup.")
-            self.last_atr_value = 0.01  # Fallback value to ensure grid setup proceeds
+        # Check if grid calculation succeeded
+        if not self.grid:
             self.logger.error("Grid levels calculation returned an empty list. Aborting grid setup.")
             return
         
-        # Store current ATR value for future volatility comparison
-        # Removed redundant call to _get_current_atr to avoid overriding the ATR value
+        # Update ATR value for volatility tracking
+        atr_value = self._get_current_atr()
+        if atr_value is not None:
+            self.last_atr_value = atr_value
+        elif self.last_atr_value is None:
+            # Set fallback ATR value only if we don't already have one
+            self.logger.warning("ATR calculation failed. Using fallback value of 0.01 for grid setup.")
+            self.last_atr_value = 0.01  # Fallback value to ensure grid setup proceeds
         
-        # Check if WebSocket API is available for potential batch operations
+        # Store current trend strength for future reference
+        trend_strength = getattr(self, 'trend_strength', 0)
+        self.last_trend_strength = trend_strength
+        
+        # Check WebSocket API availability
         client_status = self.binance_client.get_client_status()
         self.using_websocket = client_status["websocket_available"]
         
-        # Place grid orders (using unified method)
+        # Place grid orders using the unified method
         self._place_grid_orders()
     
     def _calculate_grid_levels(self):
