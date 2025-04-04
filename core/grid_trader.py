@@ -503,18 +503,27 @@ class GridTrader:
             self.current_market_price = current_price
             grid_range = current_price * self.grid_range_percent
             
-            # --- Step 2: Calculate trend-based offset ---
-            trend_offset = self._calculate_trend_offset(current_price)
+            # --- Step 2: Calculate trend-based offset and strength ---
+            trend_strength = self._calculate_trend_strength(current_price)
             
-            # --- Step 3: Define grid boundaries ---
-            # Overall grid boundaries
-            upper_bound = current_price + (grid_range / 2)
-            lower_bound = current_price - (grid_range / 2)
-            
-            # Core zone boundaries with trend offset
+            # --- Step 3: Define grid boundaries with asymmetric trend adaptation ---
+            # Overall grid boundaries adjusted by trend direction
+            trend_factor = 0.5 + (trend_strength * 0.3)  # Range 0.2-0.8 based on trend
+            upper_bound = current_price + (grid_range * trend_factor)
+            lower_bound = current_price - (grid_range * (1 - trend_factor))
+
+            # Core zone maintains proportional distance from current price
             core_range = grid_range * self.core_zone_percentage
-            core_upper = min(current_price + (core_range / 2) + trend_offset, upper_bound)
-            core_lower = max(current_price - (core_range / 2) + trend_offset, lower_bound)
+            core_upper = current_price + (core_range * trend_factor)
+            core_lower = current_price - (core_range * (1 - trend_factor))
+            
+            # Ensure core zone has valid width
+            if core_upper <= core_lower + (self.tick_size * 5):
+                # Maintain minimum core zone width
+                core_center = (core_upper + core_lower) / 2
+                min_width = core_range * 0.3  # At least 30% of original width
+                core_upper = core_center + (min_width / 2)
+                core_lower = core_center - (min_width / 2)
             
             # --- Step 4: Distribute grid levels ---
             # Determine number of levels for each zone
@@ -547,41 +556,37 @@ class GridTrader:
             self.logger.error(f"Error calculating grid levels: {e}", exc_info=True)
             return []
             
-    def _calculate_trend_offset(self, current_price):
+    def _calculate_trend_strength(self, current_price):
         """
-        Calculate trend-based price offset for grid positioning
+        Calculate trend strength for grid positioning
         
         Args:
             current_price: Current market price
             
         Returns:
-            float: Price offset value based on detected trend
+            float: trend_strength - Value between -1 and 1 indicating trend direction and strength
         """
         try:
             # Get klines for trend calculation
             klines = self.binance_client.get_historical_klines(
                 symbol=self.symbol,
                 interval="1h",
-                limit=self.atr_period + 20  # Add extra for trend calculation
+                limit=self.atr_period + 20
             )
             
             # Calculate trend strength (-1 to 1)
             trend_strength = self._calculate_trend_strength(klines)
             
-            # Get configurable trend multiplier with default fallback
-            trend_multiplier = getattr(config, 'TREND_MULTIPLIER', 0.05)  # Default to 5%
-            
-            # Calculate offset with clear log message
-            trend_offset = current_price * trend_strength * trend_multiplier
+            # Log for informational purposes
+            trend_multiplier = getattr(config, 'TREND_MULTIPLIER', 0.05)
             self.logger.info(
                 f"Detected trend strength: {trend_strength:.2f}, "
-                f"applying price offset: {trend_offset:.8f} USDT "
-                f"({(trend_strength*trend_multiplier*100):.1f}% of current price)"
+                f"effective adjustment: {(trend_strength*0.3*100):.1f}% of grid range"
             )
             
-            return trend_offset
+            return trend_strength
         except Exception as e:
-            self.logger.warning(f"Error calculating trend offset: {e}. Using 0 offset.")
+            self.logger.warning(f"Error calculating trend strength: {e}. Using 0.")
             return 0
     
     def _create_core_zone_grid(self, current_price, core_upper, core_lower, core_levels):
