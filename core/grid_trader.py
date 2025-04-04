@@ -529,10 +529,38 @@ class GridTrader:
                 core_lower = core_center - (min_width / 2)
             
             # --- Step 4: Distribute grid levels ---
-            # Determine number of levels for each zone
-            core_levels = max(int(self.grid_levels * self.core_grid_ratio), 2)  # At least 2
-            edge_levels = max(self.grid_levels - core_levels, 1)  # At least 1
-            
+            # Calculate actual width of core and edge zones
+            core_width = core_upper - core_lower
+            edge_width = (upper_bound - core_upper) + (core_lower - lower_bound)
+
+            # Determine volatility-adjusted grid spacing
+            # Use last known ATR or fallback to 1% of current price
+            atr_value = self.last_atr_value or (current_price * 0.01)
+            # Set ideal spacing to 20% of ATR, bounded between 0.5%-2% of price
+            ideal_spacing = max(current_price * 0.005, min(atr_value * 0.2, current_price * 0.02))
+
+            # Calculate required grid levels based on actual zone widths
+            # Ensure minimum of 2 levels in core zone for proper trading
+            core_levels_needed = max(int(core_width / ideal_spacing), 2)
+            # Use 20% wider spacing in edge zones for better capital efficiency
+            edge_levels_needed = max(int(edge_width / (ideal_spacing * 1.2)), 1)
+
+            # Adjust if total exceeds grid level limit
+            total_needed = core_levels_needed + edge_levels_needed
+            if total_needed > self.grid_levels:
+                # Scale down proportionally while preserving minimums
+                ratio = self.grid_levels / total_needed
+                core_levels = max(int(core_levels_needed * ratio), 2)
+                edge_levels = max(self.grid_levels - core_levels, 1)
+            else:
+                # Use calculated values directly
+                core_levels = core_levels_needed
+                edge_levels = edge_levels_needed
+
+            # Log the dynamic allocation details
+            self.logger.debug(f"Dynamic grid allocation: ideal spacing={ideal_spacing/current_price*100:.2f}%, "
+                             f"core zone={core_levels} points, edge zone={edge_levels} points")
+
             grid_levels = []
             
             # Create core zone grid levels
