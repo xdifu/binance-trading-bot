@@ -86,6 +86,9 @@ class GridTrader:
         # Add resource locking mechanism to prevent race conditions
         self.locked_balances = {}  # Tracks locked balances by asset
         self.balance_lock = threading.RLock()  # Thread-safe lock for balance operations
+        
+        # Initialize trend tracking attribute
+        self.trend_strength = 0
     
     def _get_symbol_info(self):
         """
@@ -468,9 +471,8 @@ class GridTrader:
             self.logger.warning("ATR calculation failed. Using fallback value of 0.01 for grid setup.")
             self.last_atr_value = 0.01  # Fallback value to ensure grid setup proceeds
         
-        # Store current trend strength for future reference
-        trend_strength = getattr(self, 'trend_strength', 0)
-        self.last_trend_strength = trend_strength
+        # Store current trend strength for change monitoring
+        self.last_trend_strength = self.trend_strength
         
         # Check WebSocket API availability
         client_status = self.binance_client.get_client_status()
@@ -627,6 +629,9 @@ class GridTrader:
             )
             self.logger.debug(f"Calculated trend strength: {trend_strength:.2f}")
             
+            # Store calculated trend strength as instance attribute for use in grid creation
+            self.trend_strength = trend_strength
+            
             return trend_strength
             
         except Exception as e:
@@ -662,7 +667,7 @@ class GridTrader:
             return []
         
         # Get trend strength to optimize buy/sell distribution
-        trend_strength = getattr(self, 'trend_strength', 0)
+        trend_strength = self.trend_strength  # Direct access instead of getattr
         
         # Adjust buy/sell ratio based on trend (more buys in downtrend, more sells in uptrend)
         # Range is 0.3 (strong uptrend) to 0.7 (strong downtrend)
