@@ -477,7 +477,7 @@ class GridTrader:
         self.using_websocket = client_status["websocket_available"]
         
         # Place grid orders using the unified method
-        self._place_grid_orders()
+        self._initialize_grid_orders()
     
     def _calculate_grid_levels(self):
         """
@@ -901,7 +901,7 @@ class GridTrader:
             self.logger.error(f"Error cancelling orders: {e}")
             return False
     
-    def _place_grid_orders(self):
+    def _initialize_grid_orders(self):
         """
         Place all grid orders with unified logic for both WebSocket and REST APIs.
         Processes all grid levels sequentially.
