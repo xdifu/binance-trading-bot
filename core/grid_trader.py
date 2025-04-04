@@ -1353,49 +1353,44 @@ class GridTrader:
     # OPTIMIZED: New helper method for capital calculation
     def _calculate_dynamic_capital_for_level(self, price):
         """
-        Calculate appropriate capital allocation based on price zone with optimized distribution
-        for small capital accounts ($64)
+        Calculate appropriate capital allocation based on price zone
         
         Args:
-            price: The price for the order
+            price: The price level for the order
             
         Returns:
-            float: The capital allocation for this price level
+            float: The capital allocation in USDT for this price level
         """
+        # Get current price and calculate zones properly each time
         current_price = self.current_market_price
         grid_range = current_price * self.grid_range_percent
         core_range = grid_range * self.core_zone_percentage
         core_upper = current_price + (core_range / 2)
         core_lower = current_price - (core_range / 2)
 
-        # Calculate minimum required capital for valid orders (usually 6 USDT for Binance)
-        min_required_capital = 6.0  # Minimum capital to ensure order meets exchange requirements
+        # Base capital from configuration - use full amount
+        base_capital = self.capital_per_level
         
-        # Determine capital based on price zone with enhanced concentration
+        # Calculate dynamic allocation based on price zone
         if core_lower <= price <= core_upper:
-            # Core zone orders - higher concentration near current price
-            # Calculate distance factor (0 at current price, 1 at zone edge)
+            # Core zone - enhanced capital allocation
             distance_factor = 1 - min(1, abs(price - current_price) / (core_range/2)) if core_range > 0 else 0
             
-            # Enhanced multiplier: 1.0 to 1.5 (increased from 0.3)
+            # Multiplier INCREASES capital by up to 50%
             capital_multiplier = 1 + (distance_factor * 0.5)
             
-            # Ensure allocation is at least minimum required
-            allocation = max(
-                min_required_capital,
-                self.capital_per_level * self.core_capital_ratio * capital_multiplier
-            )
-            return allocation
+            # Use full base capital with enhancement
+            allocation = base_capital * capital_multiplier
         else:
-            # Edge zone orders - reduced capital but still meeting minimums
-            edge_discount = 0.7  # Use 70% of standard allocation for edge levels
+            # Edge zone - slight reduction but still substantial
+            edge_discount = 0.9  # Use 90% of base capital (was 70%)
             
-            # Ensure allocation is at least minimum required
-            allocation = max(
-                min_required_capital,
-                self.capital_per_level * (1 - self.core_capital_ratio) * edge_discount
-            )
-            return allocation
+            # Still maintains significant capital
+            allocation = base_capital * edge_discount
+        
+        # Ensure we meet minimum notional value required by exchange
+        min_required_capital = config.MIN_NOTIONAL_VALUE
+        return max(min_required_capital, allocation)
     
     def _lock_funds(self, asset, amount):
         """
