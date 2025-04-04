@@ -22,19 +22,36 @@ class RiskManager:
         # Initialize logger first to enable logging
         self.logger = logging.getLogger(__name__)
         
-        # Enhanced strategy for small capital accounts - more conservative stop loss and take profit
+        # Check capital size setting from config
+        capital_size = getattr(config, 'CAPITAL_SIZE', 'standard').lower()
+        
+        # Get base risk values from config
         base_stop_loss = config.TRAILING_STOP_LOSS_PERCENT / 100
         base_take_profit = config.TRAILING_TAKE_PROFIT_PERCENT / 100
 
-        # For small capital accounts ($64), use tighter stops to protect capital
-        capital_adjustment_factor = 0.8  # 20% tighter stops for small accounts
-
-        # Adjust base values but ensure minimum safety distance
-        self.trailing_stop_loss_percent = max(0.015, base_stop_loss * capital_adjustment_factor)  # At least 1.5% stop loss
-        self.trailing_take_profit_percent = max(0.008, base_take_profit * capital_adjustment_factor)  # At least 0.8% take profit
-
-        self.logger.info(f"Using optimized risk parameters for small capital: Stop loss at {self.trailing_stop_loss_percent*100:.2f}%, Take profit at {self.trailing_take_profit_percent*100:.2f}%")
-
+        # Apply settings based on capital size
+        if capital_size == 'small':
+            # Small capital optimization mode
+            capital_adjustment_factor = 0.8  # 20% tighter stops for small accounts
+            self.trailing_stop_loss_percent = max(0.015, base_stop_loss * capital_adjustment_factor)
+            self.trailing_take_profit_percent = max(0.008, base_take_profit * capital_adjustment_factor)
+            self.logger.info(f"Using optimized risk parameters for small capital: Stop loss at {self.trailing_stop_loss_percent*100:.2f}%, Take profit at {self.trailing_take_profit_percent*100:.2f}%")
+            
+            # Optimized thresholds for small capital
+            self.min_update_threshold_percent = 0.003  # 0.3% minimum price movement
+            self.min_update_interval_seconds = 300    # 5 minutes minimum between updates
+            self.logger.info(f"Using optimized risk thresholds for small capital: {self.min_update_threshold_percent*100}% movement, {self.min_update_interval_seconds/60} minutes interval")
+        else:
+            # Standard mode (medium/large capital)
+            self.trailing_stop_loss_percent = base_stop_loss
+            self.trailing_take_profit_percent = base_take_profit
+            self.logger.info(f"Using standard risk parameters: Stop loss at {self.trailing_stop_loss_percent*100:.2f}%, Take profit at {self.trailing_take_profit_percent*100:.2f}%")
+            
+            # Standard thresholds
+            self.min_update_threshold_percent = 0.01  # 1% minimum price movement
+            self.min_update_interval_seconds = 600    # 10 minutes minimum between updates
+            self.logger.info(f"Using standard risk thresholds: {self.min_update_threshold_percent*100}% movement, {self.min_update_interval_seconds/60} minutes interval")
+        
         # Dynamic volatility tracking for adaptive risk management
         self.last_volatility_check = time.time()
         self.volatility_check_interval = 3600  # Check market volatility every hour
@@ -56,11 +73,6 @@ class RiskManager:
         self.take_profit_price = None
         self.oco_order_id = None
         self.is_active = False
-        
-        # Optimized thresholds for small capital accounts - more frequent updates and smaller movements
-        self.min_update_threshold_percent = 0.003  # 0.3% minimum price movement (reduced from 1%)
-        self.min_update_interval_seconds = 300    # 5 minutes minimum between updates (reduced from 10 minutes)
-        self.logger.info(f"Using optimized risk thresholds for small capital: {self.min_update_threshold_percent*100}% movement, {self.min_update_interval_seconds/60} minutes interval")
         
         # Track last update time
         self.last_update_time = 0

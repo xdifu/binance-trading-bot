@@ -39,6 +39,9 @@ CORE_ZONE_PERCENTAGE = float(os.getenv("CORE_ZONE_PERCENTAGE", "0.7"))  # 核心
 CORE_CAPITAL_RATIO = float(os.getenv("CORE_CAPITAL_RATIO", "0.7"))  # 核心区域资金比例，增大可增强中心区域交易能力
 CORE_GRID_RATIO = float(os.getenv("CORE_GRID_RATIO", "0.7"))  # 核心区域网格点比例，增大可在中心区域创建更多订单
 
+# 资金规模设置
+CAPITAL_SIZE = os.getenv("CAPITAL_SIZE", "standard")  # 资金规模，可选值："small"(小资金优化) 或 "standard"(标准资金)
+
 # 订单管理
 MAX_ORDER_AGE_HOURS = int(os.getenv("MAX_ORDER_AGE_HOURS", "4"))  # 订单最长存在时间(小时)，减小可更频繁更新长期未成交订单
 PRICE_DEVIATION_THRESHOLD = float(os.getenv("PRICE_DEVIATION_THRESHOLD", "0.015"))  # 过期订单距离当前价格阈值，减小可更激进地更新订单
