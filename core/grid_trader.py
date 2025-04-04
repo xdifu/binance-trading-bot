@@ -21,58 +21,12 @@ class GridTrader:
         self.telegram_bot = telegram_bot
         self.symbol = config.SYMBOL
         
-        # Apply optimized settings for small capital accounts ($64)
-        # Increase grid levels for more frequent trading opportunities
-        self.grid_levels = max(min(config.GRID_LEVELS, 10), 4)  # Enforce range of 4-10 grid levels for optimal capital distribution
-        
-        # Calculate dynamic grid spacing based on market volatility using ATR
-        initial_atr = self._get_current_atr()
-        if initial_atr:
-            # Use ATR_RATIO from config for spacing calculation - optimal for crypto volatility
-            atr_ratio = config.ATR_RATIO
-            atr_based_spacing = initial_atr / self.current_market_price * atr_ratio
-            
-            # Set minimum spacing to prevent overly dense grids
-            min_spacing = 0.001  # 0.1% minimum spacing for efficiency
-            
-            # Apply constraints using config values for maximum limits
-            self.grid_spacing = max(min_spacing, min(config.GRID_SPACING / 100, atr_based_spacing, config.MAX_GRID_SPACING))
-            
-            self.logger.info(f"Dynamic grid spacing set to {self.grid_spacing*100:.2f}% based on ATR={initial_atr:.6f}")
-        else:
-            # Fallback with configured maximum when ATR calculation fails
-            self.grid_spacing = min(config.GRID_SPACING / 100, config.MAX_GRID_SPACING)
-            self.logger.info(f"Using fallback grid spacing: {self.grid_spacing*100:.2f}%")
-
-        # Use configured maximum for grid range limit
-        self.grid_range_percent = min(config.GRID_RANGE_PERCENT / 100, config.MAX_GRID_RANGE)  # Max range based on config
-        
-        # Preserve original capital per level setting
-        self.capital_per_level = config.CAPITAL_PER_LEVEL
-        
-        # Keep original timing parameters
-        self.recalculation_period = config.RECALCULATION_PERIOD
-        self.atr_period = config.ATR_PERIOD
-        
-        # Enhanced non-symmetric grid parameters for better capital efficiency
-        # Concentrate more of the grid range in the core zone
-        self.core_zone_percentage = max(getattr(config, 'CORE_ZONE_PERCENTAGE', 0.5), 0.7)  # At least 70% of range in core
-        
-        # Allocate more capital to the core price zone
-        self.core_capital_ratio = max(getattr(config, 'CORE_CAPITAL_RATIO', 0.7), 0.8)  # At least 80% of capital in core
-        
-        # Place more grid points in the core zone for higher frequency trading
-        self.core_grid_ratio = max(getattr(config, 'CORE_GRID_RATIO', 0.6), 0.7)  # At least 70% of grid points in core
-        
-        # Store previous ATR value for volatility change detection
-        self.last_atr_value = None
-        
-        # Initialize logger
+        # Initialize logger first to enable logging throughout initialization
         self.logger = logging.getLogger(__name__)
         
-        # Log the optimized settings
-        self.logger.info(f"Using optimized grid settings for small capital: {self.grid_levels} levels, {self.grid_spacing*100:.2f}% spacing, {self.grid_range_percent*100:.2f}% range")
-        self.logger.info(f"Core zone optimized: {self.core_zone_percentage*100:.1f}% of range, {self.core_capital_ratio*100:.1f}% of capital, {self.core_grid_ratio*100:.1f}% of grid points")
+        # Initialize required parameters before they're used
+        self.recalculation_period = config.RECALCULATION_PERIOD
+        self.atr_period = config.ATR_PERIOD
         
         # Get symbol information and set precision
         self.symbol_info = self._get_symbol_info()
@@ -83,16 +37,53 @@ class GridTrader:
         self.price_precision = self._get_price_precision()
         self.quantity_precision = self._get_quantity_precision()
         
-        self.logger.info(f"Trading pair {self.symbol} price precision: {self.price_precision}, quantity precision: {self.quantity_precision}")
-        self.logger.info(f"Trading pair {self.symbol} tick size: {self.tick_size}, step size: {self.step_size}")
+        # Get current market price
+        self.current_market_price = self.binance_client.get_symbol_price(self.symbol)
         
-        # Track connection type for logging
-        self.using_websocket = self.binance_client.get_client_status()["websocket_available"]
-        self.logger.info(f"Using WebSocket API: {self.using_websocket}")
+        # Apply optimized settings for small capital accounts ($64)
+        # Increase grid levels for more frequent trading opportunities
+        self.grid_levels = max(min(config.GRID_LEVELS, 10), 4)  # Enforce range of 4-10 grid levels
         
+        # Calculate dynamic grid spacing based on market volatility using ATR
+        initial_atr = self._get_current_atr()
+        if initial_atr:
+            # Use ATR_RATIO from config for spacing calculation
+            atr_ratio = config.ATR_RATIO
+            atr_based_spacing = initial_atr / self.current_market_price * atr_ratio
+            
+            # Set minimum spacing to prevent overly dense grids
+            min_spacing = 0.001  # 0.1% minimum spacing
+            
+            # Apply constraints using config values for maximum limits
+            self.grid_spacing = max(min_spacing, min(config.GRID_SPACING / 100, atr_based_spacing, config.MAX_GRID_SPACING))
+            
+            self.logger.info(f"Dynamic grid spacing set to {self.grid_spacing*100:.2f}% based on ATR={initial_atr:.6f}")
+        else:
+            # Fallback with configured maximum when ATR calculation fails
+            self.grid_spacing = min(config.GRID_SPACING / 100, config.MAX_GRID_SPACING)
+            self.logger.info(f"Using fallback grid spacing: {self.grid_spacing*100:.2f}%")
+        
+        # Rest of the initialization remains unchanged
+        # Use configured maximum for grid range limit
+        self.grid_range_percent = min(config.GRID_RANGE_PERCENT / 100, config.MAX_GRID_RANGE)
+        
+        # Preserve original capital per level setting
+        self.capital_per_level = config.CAPITAL_PER_LEVEL
+        
+        # Enhanced non-symmetric grid parameters
+        self.core_zone_percentage = max(getattr(config, 'CORE_ZONE_PERCENTAGE', 0.5), 0.7)
+        self.core_capital_ratio = max(getattr(config, 'CORE_CAPITAL_RATIO', 0.7), 0.8)
+        self.core_grid_ratio = max(getattr(config, 'CORE_GRID_RATIO', 0.6), 0.7)
+        
+        # Store previous ATR value for volatility change detection
+        self.last_atr_value = None
+        
+        # Log the optimized settings
+        self.logger.info(f"Using optimized grid settings: {self.grid_levels} levels, {self.grid_spacing*100:.2f}% spacing")
+        
+        # Further initialization code...
         self.grid = []  # [{'price': float, 'order_id': int, 'side': str}]
         self.last_recalculation = None
-        self.current_market_price = 0
         self.is_running = False
         self.simulation_mode = False  # Add simulation mode flag
         
