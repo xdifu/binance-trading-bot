@@ -22,16 +22,16 @@ WS_RECONNECT_DELAY = int(os.getenv("WS_RECONNECT_DELAY", "5"))  # 重连间隔�
 
 # 交易设置
 SYMBOL = os.getenv("SYMBOL", "TRXUSDT")  # 默认交易对为"TRXUSDT"，可修改为其他如"BTCUSDT"或"ETHUSDT"等
-GRID_LEVELS = int(os.getenv("GRID_LEVELS", "5"))  # 网格数量，增加数值可提高交易频率但需要更多资金
+GRID_LEVELS = int(os.getenv("GRID_LEVELS", "10"))  # 网格数量，增加数值可提高交易频率但需要更多资金
 GRID_SPACING = float(os.getenv("GRID_SPACING", "0.15"))  # 网格间距(%)，增大可捕获更大波动，减小可提高交易频次
-CAPITAL_PER_LEVEL = float(os.getenv("CAPITAL_PER_LEVEL", "12"))  # 每个网格的资金(USDT)，增加可提高利润但需要更多总资金
-GRID_RANGE_PERCENT = float(os.getenv("GRID_RANGE_PERCENT", "1.0"))  # 总网格价格范围(%)，增大可覆盖更大波动，减小则集中在小范围
+CAPITAL_PER_LEVEL = float(os.getenv("CAPITAL_PER_LEVEL", "15"))  # 每个网格的资金(USDT)，增加可提高利润但需要更多总资金
+GRID_RANGE_PERCENT = float(os.getenv("GRID_RANGE_PERCENT", "2.0"))  # 总网格价格范围(%)，增大可覆盖更大波动，减小则集中在小范围
 RECALCULATION_PERIOD = int(os.getenv("RECALCULATION_PERIOD", "1"))  # 网格重新计算周期(天)，减小可更频繁更新网格位置
 ATR_PERIOD = int(os.getenv("ATR_PERIOD", "14"))  # ATR指标周期，增大可减少敏感度，减小可对短期波动更敏感
 
 # 非对称网格参数（核心区域优化）
 CORE_ZONE_PERCENTAGE = float(os.getenv("CORE_ZONE_PERCENTAGE", "0.7"))  # 核心区域占总范围的比例，增大可集中更多资金在中心价格附近
-CORE_CAPITAL_RATIO = float(os.getenv("CORE_CAPITAL_RATIO", "0.8"))  # 核心区域资金比例，增大可增强中心区域交易能力
+CORE_CAPITAL_RATIO = float(os.getenv("CORE_CAPITAL_RATIO", "0.7"))  # 核心区域资金比例，增大可增强中心区域交易能力
 CORE_GRID_RATIO = float(os.getenv("CORE_GRID_RATIO", "0.7"))  # 核心区域网格点比例，增大可在中心区域创建更多订单
 
 # 订单管理

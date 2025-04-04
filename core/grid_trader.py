@@ -23,7 +23,7 @@ class GridTrader:
         
         # Apply optimized settings for small capital accounts ($64)
         # Increase grid levels for more frequent trading opportunities
-        self.grid_levels = max(min(config.GRID_LEVELS, 5), 4)  # Enforce range of 4-5 grid levels for optimal capital distribution
+        self.grid_levels = max(min(config.GRID_LEVELS, 10), 4)  # Enforce range of 4-10 grid levels for optimal capital distribution
         
         # Reduce grid spacing for tighter price capture
         self.grid_spacing = min(config.GRID_SPACING / 100, 0.003)  # Max 0.3% spacing
