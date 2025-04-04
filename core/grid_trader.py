@@ -877,16 +877,6 @@ class GridTrader:
         except Exception as e:
             self.logger.error(f"Error cancelling orders: {e}")
             return False
-    def _place_grid_orders(self):
-        """Place all grid orders with unified logic for both WebSocket and REST APIs"""
-        for level in self.grid:
-            # Validate grid level data before placing the order
-            if 'price' not in level or 'side' not in level or level['price'] <= 0 or level['side'] not in ['BUY', 'SELL']:
-                self.logger.error(f"Invalid grid level data: {level}. Skipping order placement.")
-                continue
-            # Call the single order placement method for each level
-            self._place_grid_order(level)
-            return False
     
     # OPTIMIZED: Unified order placement method replacing both previous methods
     def _place_grid_orders(self):
