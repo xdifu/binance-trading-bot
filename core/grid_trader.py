@@ -150,7 +150,6 @@ class GridTrader:
         fallback_tick_size = self._get_fallback_tick_size()
         self.logger.warning(f"No PRICE_FILTER found for {self.symbol}, using fallback tick size {fallback_tick_size}")
         return fallback_tick_size  # Default if not found
-        return 0.00000001  # Default if not found
     
     def _get_step_size(self):
         """
