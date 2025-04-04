@@ -635,7 +635,7 @@ class GridTrader:
     
     def _create_core_zone_grid(self, current_price, core_upper, core_lower, core_levels):
         """
-        Create grid levels for the core price zone
+        Create grid levels for the core price zone with trend-adaptive buy/sell distribution
         
         Args:
             current_price: Current market price
@@ -649,8 +649,8 @@ class GridTrader:
         core_grid = []
         
         # Ensure core zone has valid width
-        if core_upper <= core_lower + (self.tick_size * 5):
-            core_upper = core_lower + (self.tick_size * 5)
+        if core_upper <= core_lower:
+            core_upper = core_lower + self.tick_size * 5  # Ensure minimum separation
             self.logger.warning(
                 f"Core zone has zero or negative width. "
                 f"Adjusted core_upper to {core_upper:.8f}, core_lower: {core_lower:.8f}"
@@ -661,31 +661,55 @@ class GridTrader:
             self.logger.error(f"Invalid core_levels value: {core_levels}. Must be at least 2.")
             return []
         
-        # Calculate step size between grid levels
-        core_step = (core_upper - core_lower) / (core_levels - 1)
+        # Get trend strength to optimize buy/sell distribution
+        trend_strength = getattr(self, 'trend_strength', 0)
         
-        # Validate step size
-        if core_step <= 0:
-            self.logger.error(
-                f"Core step size is invalid: {core_step}. "
-                f"core_upper: {core_upper:.8f}, core_lower: {core_lower:.8f}"
-            )
-            return []
-            
-        # Create grid levels
-        for i in range(core_levels):
-            level_price = core_lower + (i * core_step)
-            side = "SELL" if level_price >= current_price else "BUY"
+        # Adjust buy/sell ratio based on trend (more buys in downtrend, more sells in uptrend)
+        # Range is 0.3 (strong uptrend) to 0.7 (strong downtrend)
+        buy_ratio = 0.5 + (trend_strength * -0.2)
+        buy_ratio = max(0.3, min(0.7, buy_ratio))
+        
+        # Calculate number of buy and sell levels
+        buy_levels = max(int(core_levels * buy_ratio), 1)  # At least 1 buy level
+        sell_levels = core_levels - buy_levels
+        
+        # Ensure at least one level of each type
+        if sell_levels < 1:
+            sell_levels = 1
+            buy_levels = core_levels - 1
+        
+        self.logger.debug(f"Core zone distribution: {buy_levels} buy levels, {sell_levels} sell levels (trend strength: {trend_strength:.2f})")
+        
+        # Calculate step sizes for buy and sell zones
+        buy_step = (current_price - core_lower) / buy_levels if buy_levels > 0 else 0
+        sell_step = (core_upper - current_price) / sell_levels if sell_levels > 0 else 0
+        
+        # Create buy levels below current price
+        for i in range(buy_levels):
+            level_price = current_price - ((i + 1) * buy_step)
             capital = self._calculate_dynamic_capital_for_level(level_price)
             
             core_grid.append({
                 "price": level_price,
-                "side": side,
+                "side": "BUY",
                 "order_id": None,
                 "capital": capital,
                 "timestamp": None
             })
+        
+        # Create sell levels above current price
+        for i in range(sell_levels):
+            level_price = current_price + ((i + 1) * sell_step)
+            capital = self._calculate_dynamic_capital_for_level(level_price)
             
+            core_grid.append({
+                "price": level_price,
+                "side": "SELL",
+                "order_id": None,
+                "capital": capital,
+                "timestamp": None
+            })
+        
         return core_grid
     
     def _create_edge_zone_grid(self, current_price, core_upper, core_lower, upper_bound, lower_bound, edge_levels):
