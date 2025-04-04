@@ -504,7 +504,7 @@ class GridTrader:
             grid_range = current_price * self.grid_range_percent
             
             # --- Step 2: Calculate trend-based offset and strength ---
-            trend_strength = self._calculate_trend_strength(current_price)
+            trend_strength = self.calculate_trend_strength(current_price=current_price)
             
             # --- Step 3: Define grid boundaries with asymmetric trend adaptation ---
             # Overall grid boundaries adjusted by trend direction
@@ -556,38 +556,81 @@ class GridTrader:
             self.logger.error(f"Error calculating grid levels: {e}", exc_info=True)
             return []
             
-    def _calculate_trend_strength(self, current_price):
+    def calculate_trend_strength(self, current_price=None, klines=None, lookback=20):
         """
-        Calculate trend strength for grid positioning
+        Calculate market trend strength on a scale from -1 to 1
         
         Args:
-            current_price: Current market price
+            current_price: Optional current market price (will fetch data if klines not provided)
+            klines: Optional list of kline/candlestick data (will be fetched if not provided)
+            lookback: Number of periods to consider for trend calculation
             
         Returns:
             float: trend_strength - Value between -1 and 1 indicating trend direction and strength
         """
         try:
-            # Get klines for trend calculation
-            klines = self.binance_client.get_historical_klines(
-                symbol=self.symbol,
-                interval="1h",
-                limit=self.atr_period + 20
-            )
+            # Step 1: Get klines if not provided
+            if klines is None:
+                klines = self.binance_client.get_historical_klines(
+                    symbol=self.symbol,
+                    interval="1h",
+                    limit=self.atr_period + lookback
+                )
             
-            # Calculate trend strength (-1 to 1)
-            trend_strength = self._calculate_trend_strength(klines)
+            # Step 2: Ensure we have enough data
+            if not klines or len(klines) < lookback + 1:
+                self.logger.warning("Insufficient kline data for trend calculation")
+                return 0
             
-            # Log for informational purposes
+            # Step 3: Extract close prices
+            closes = []
+            for k in klines[-lookback-1:]:
+                # Handle both array format and dict format
+                if isinstance(k, list):
+                    closes.append(float(k[4]))  # Close price is at index 4
+                elif isinstance(k, dict) and 'close' in k:
+                    closes.append(float(k['close']))
+                    
+            if not closes or len(closes) < lookback + 1:
+                self.logger.warning("Could not extract enough close prices from kline data")
+                return 0
+                
+            # Step 4: Calculate price change momentum and direction
+            changes = []
+            for i in range(1, len(closes)):
+                change_pct = (closes[i] - closes[i-1]) / closes[i-1]
+                changes.append(change_pct)
+                
+            # Step 5: Get recent trend direction (last 5 periods)
+            short_trend = sum(changes[-5:]) if len(changes) >= 5 else 0
+            
+            # Step 6: Get overall trend momentum with time-weighted changes
+            weights = [0.5 + (i/lookback/2) for i in range(lookback)]  # Increasing weights
+            if len(changes) < len(weights):
+                weights = weights[-len(changes):]
+                
+            weighted_changes = [changes[i] * weights[i] for i in range(len(changes))]
+            overall_trend = sum(weighted_changes)
+            
+            # Step 7: Combine short and overall trend with more weight on recent
+            combined_trend = (short_trend * 0.7) + (overall_trend * 0.3)
+            
+            # Step 8: Normalize between -1 and 1 with proper scaling
+            trend_strength = max(min(combined_trend * 50, 1.0), -1.0)
+            
+            # Step 9: Log results
             trend_multiplier = getattr(config, 'TREND_MULTIPLIER', 0.05)
             self.logger.info(
                 f"Detected trend strength: {trend_strength:.2f}, "
                 f"effective adjustment: {(trend_strength*0.3*100):.1f}% of grid range"
             )
+            self.logger.debug(f"Calculated trend strength: {trend_strength:.2f}")
             
             return trend_strength
+            
         except Exception as e:
-            self.logger.warning(f"Error calculating trend strength: {e}. Using 0.")
-            return 0
+            self.logger.error(f"Error calculating trend strength: {e}")
+            return 0  # Default to no trend on error
     
     def _create_core_zone_grid(self, current_price, core_upper, core_lower, core_levels):
         """
@@ -1671,64 +1714,3 @@ class GridTrader:
                 self.telegram_bot.send_message(f"✅ Placed {orders_placed} new grid orders using newly available funds")
                 
         return orders_placed
-    
-    def _calculate_trend_strength(self, klines, lookback=20):
-        """
-        Calculate market trend strength on a scale from -1 to 1
-        -1: Strong downtrend
-         0: No trend
-        +1: Strong uptrend
-        
-        Args:
-            klines: List of kline/candlestick data
-            lookback: Number of periods to consider
-            
-        Returns:
-            float: Trend strength value between -1 and 1
-        """
-        try:
-            # Ensure we have enough data
-            if not klines or len(klines) < lookback + 1:
-                return 0
-            
-            # Extract close prices
-            closes = []
-            for k in klines[-lookback-1:]:
-                # Handle both array format and dict format
-                if isinstance(k, list):
-                    closes.append(float(k[4]))  # Close price is at index 4
-                elif isinstance(k, dict) and 'close' in k:
-                    closes.append(float(k['close']))
-                    
-            if not closes or len(closes) < lookback + 1:
-                return 0
-                
-            # Calculate price change momentum and direction
-            changes = []
-            for i in range(1, len(closes)):
-                change_pct = (closes[i] - closes[i-1]) / closes[i-1]
-                changes.append(change_pct)
-                
-            # Get recent trend direction
-            short_trend = sum(changes[-5:]) if len(changes) >= 5 else 0
-            
-            # Get overall trend momentum considering more weight on recent changes
-            weights = [0.5 + (i/lookback/2) for i in range(lookback)]  # Increasing weights
-            if len(changes) < len(weights):
-                weights = weights[-len(changes):]
-                
-            weighted_changes = [changes[i] * weights[i] for i in range(len(changes))]
-            overall_trend = sum(weighted_changes)
-            
-            # Combine short and overall trend with more weight on recent
-            combined_trend = (short_trend * 0.7) + (overall_trend * 0.3)
-            
-            # Normalize between -1 and 1 with proper scaling
-            normalized_trend = max(min(combined_trend * 50, 1.0), -1.0)
-            
-            self.logger.debug(f"Calculated trend strength: {normalized_trend:.2f}")
-            return normalized_trend
-            
-        except Exception as e:
-            self.logger.error(f"Error calculating trend strength: {e}")
-            return 0  # Default to no trend on error
