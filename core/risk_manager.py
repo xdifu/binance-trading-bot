@@ -492,10 +492,10 @@ class RiskManager:
                 self.logger.info(f"No available {asset} for risk management")
                 return
             
-            # Reserve portion of assets for grid trading
-            if self.grid_trader and hasattr(self.grid_trader, 'locked_balances'):
-                # Check if asset is locked by grid trader
-                locked_by_grid = self.grid_trader.locked_balances.get(asset, 0)
+            # Reserve portion of assets for grid trading - UPDATED TO USE pending_locks
+            if self.grid_trader and hasattr(self.grid_trader, 'pending_locks'):
+                # Check if asset has pending locks by grid trader
+                locked_by_grid = self.grid_trader.pending_locks.get(asset, 0)
                 
                 # Also reserve a portion for future grid orders
                 reserve_for_grid = 0.3  # Reserve 30% of available assets for grid trading

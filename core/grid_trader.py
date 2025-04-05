@@ -43,7 +43,7 @@ class GridTrader:
         
         # Apply optimized settings for small capital accounts ($64)
         # Increase grid levels for more frequent trading opportunities
-        self.grid_levels = max(min(config.GRID_LEVELS, 10), 5)  # Enforce range of 5-10 grid levels
+        self.grid_levels = max(min(config.GRID_LEVELS, 12), 5)  # Enforce range of 5-12 grid levels
         
         # Calculate dynamic grid spacing based on market volatility using ATR
         initial_atr = self._get_current_atr()
@@ -91,8 +91,8 @@ class GridTrader:
         # Track pending operations for better error handling
         self.pending_orders = {}  # Track orders waiting for WebSocket confirmation
         
-        # Add resource locking mechanism to prevent race conditions
-        self.locked_balances = {}  # Tracks locked balances by asset
+        # Replace locked_balances with pending_locks
+        self.pending_locks = {}  # Track temporarily locked funds before order submission
         self.balance_lock = threading.RLock()  # Thread-safe lock for balance operations
         
         # Initialize trend tracking attribute
@@ -304,21 +304,25 @@ class GridTrader:
         base_balance = self.binance_client.check_balance(base_asset)
         quote_balance = self.binance_client.check_balance(quote_asset)
         
-        insufficient_funds = False
-        warnings = []
-        
-        available_base = base_balance - self.locked_balances.get(base_asset, 0)
-        available_quote = quote_balance - self.locked_balances.get(quote_asset, 0)
+        available_base = base_balance - self.pending_locks.get(base_asset, 0)
+        available_quote = quote_balance - self.pending_locks.get(quote_asset, 0)
 
+        # Initialize warning collection and fund status flag
+        warnings = []
+        insufficient_funds = False
+
+        # Check if we have enough quote asset (USDT)
         tolerance = 1e-6  # Small tolerance to account for floating-point rounding issues
         if available_quote + tolerance < usdt_needed and not simulation:
             warnings.append(f"Insufficient {quote_asset}: Required {usdt_needed:.2f}, Available {available_quote:.2f}")
             insufficient_funds = True
-            
-        if insufficient_funds and not simulation:
-            warning_message = f"⚠️ Warning: {' '.join(warnings)}\nStarting in limited mode."
+
+        # Also check if we have enough base asset (e.g., BTC, ETH)
+        if available_base + tolerance < base_needed and not simulation:
+            warnings.append(f"Insufficient {base_asset}: Required {base_needed:.2f}, Available {available_base:.2f}")
             insufficient_funds = True
-        
+
+        # Single warning message block for all fund insufficiency issues
         if insufficient_funds and not simulation:
             warning_message = f"⚠️ Warning: {' '.join(warnings)}\nStarting in limited mode."
             self.logger.warning(warning_message)
@@ -968,7 +972,7 @@ class GridTrader:
                 orders_placed += 1
         
         # Check for additional funds that can be used for more buy orders
-        available_usdt = self.binance_client.check_balance('USDT') - self.locked_balances.get('USDT', 0)
+        available_usdt = self.binance_client.check_balance('USDT') - self.pending_locks.get('USDT', 0)
         additional_levels = int(available_usdt / (self.capital_per_level * 1.1))  # Use slightly higher capital requirement for safety
         
         if additional_levels > 0:
@@ -1059,6 +1063,10 @@ class GridTrader:
                         'asset': asset,
                         'required': required
                     }
+                
+                # IMPORTANT: Release the temporary lock since order is now placed
+                # and Binance has already accounted for these funds
+                self._release_funds(asset, required)
                 
                 self.logger.info(f"Order placed via {'WebSocket' if self.using_websocket else 'REST'}: "
                                 f"{side} {formatted_quantity} @ {formatted_price}, ID: {order['orderId']}")
@@ -1268,9 +1276,6 @@ class GridTrader:
             # Remove from pending orders
             pending_info = self.pending_orders.pop(str_order_id)
             self.logger.debug(f"Pending order {str_order_id} fulfilled from tracking")
-            
-            # Release locked funds for the fulfilled order
-            self._release_funds(pending_info['asset'], pending_info['required'])
         
         # Find matching grid level
         matching_level = None
@@ -1404,7 +1409,7 @@ class GridTrader:
         
         # Try to lock the funds
         if not self._lock_funds(asset, required):
-            message = f"⚠️ Cannot place opposite order: Insufficient {asset} balance. Required: {required}, Available: {self.binance_client.check_balance(asset) - self.locked_balances.get(asset, 0)}"
+            message = f"⚠️ Cannot place opposite order: Insufficient {asset} balance. Required: {required}, Available: {self.binance_client.check_balance(asset) - self.pending_locks.get(asset, 0)}"
             self.logger.warning(message)
             if self.telegram_bot:
                 self.telegram_bot.send_message(message)
@@ -1528,7 +1533,7 @@ class GridTrader:
     
     def _lock_funds(self, asset, amount):
         """
-        Lock funds for a particular asset to prevent race conditions
+        Temporarily lock funds for an order about to be submitted to Binance
         
         Args:
             asset: Asset symbol (e.g., 'BTC', 'USDT')
@@ -1538,59 +1543,48 @@ class GridTrader:
             bool: True if funds were successfully locked, False otherwise
         """
         with self.balance_lock:
-            # Get current balance
-            current_balance = self.binance_client.check_balance(asset)
-            
-            # Get current locked amount (default 0)
-            current_locked = self.locked_balances.get(asset, 0)
-            
-            # Calculate available balance
-            available = current_balance - current_locked
+            # Get directly available balance from Binance (already accounts for open orders)
+            available = self.binance_client.check_balance(asset)
             
             # Check if we have enough available balance
             if available < amount:
                 self.logger.warning(
-                    f"Insufficient {asset} balance for locking: "
-                    f"Required: {amount}, Available: {available} "
-                    f"(Total: {current_balance}, Already locked: {current_locked})"
+                    f"Insufficient {asset} balance for order: "
+                    f"Required: {amount}, Available: {available}"
                 )
                 return False
             
-            # Lock the funds
-            self.locked_balances[asset] = current_locked + amount
+            # Lock the funds temporarily until order is submitted
+            self.pending_locks[asset] = self.pending_locks.get(asset, 0) + amount
             self.logger.debug(
-                f"Locked {amount} {asset}, total locked now: {self.locked_balances[asset]}, "
-                f"remaining available: {current_balance - self.locked_balances[asset]}"
+                f"Temporarily locked {amount} {asset}, pending locks: {self.pending_locks[asset]}"
             )
             return True
     
     def _release_funds(self, asset, amount):
         """
-        Release previously locked funds
+        Release temporarily locked funds after order submission or failure
         
         Args:
             asset: Asset symbol (e.g., 'BTC', 'USDT')
             amount: Amount to release
-            
-        Returns:
-            None
         """
         with self.balance_lock:
-            current_locked = self.locked_balances.get(asset, 0)
+            current_pending = self.pending_locks.get(asset, 0)
             
-            # Ensure we don't release more than locked
-            release_amount = min(current_locked, amount)
+            # Ensure we don't release more than what's pending
+            release_amount = min(current_pending, amount)
             
             if release_amount > 0:
-                self.locked_balances[asset] = current_locked - release_amount
-                self.logger.debug(f"Released {release_amount} {asset}, remaining locked: {self.locked_balances[asset]}")
+                self.pending_locks[asset] = current_pending - release_amount
+                self.logger.debug(f"Released {release_amount} {asset} from pending locks, remaining: {self.pending_locks.get(asset, 0)}")
     
     def _reset_locks(self):
-        """Reset all fund locks when stopping grid or recalculating"""
+        """Reset all temporary fund locks when stopping grid or recalculating"""
         with self.balance_lock:
-            previous_locks = self.locked_balances.copy()
-            self.locked_balances = {}
-            self.logger.info(f"Reset all fund locks. Previous locks: {previous_locks}")
+            previous_locks = self.pending_locks.copy()
+            self.pending_locks = {}
+            self.logger.info(f"Reset all pending locks. Previous locks: {previous_locks}")
     
     def _check_for_stale_orders(self):
         """Cancel and reallocate orders that have been open too long without execution"""
@@ -1634,17 +1628,7 @@ class GridTrader:
                 self.binance_client.cancel_order(symbol=self.symbol, order_id=level['order_id'])
                 self.logger.info(f"Cancelled stale order ID {level['order_id']}")
                 
-                # Release locked funds
-                if level['side'] == 'BUY':
-                    asset = 'USDT'
-                    capital = level.get('capital', self.capital_per_level)
-                    self._release_funds(asset, capital)
-                else:
-                    asset = self.symbol.replace('USDT', '')
-                    quantity = level.get('capital', self.capital_per_level) / level['price']
-                    self._release_funds(asset, quantity)
-                    
-                # Mark for recreation with updated parameters
+                # Just mark for recreation with updated parameters
                 level['order_id'] = None
                 
             except Exception as e:
@@ -1767,8 +1751,8 @@ class GridTrader:
         
         # Account for locked balances
         with self.balance_lock:
-            available_base = base_balance - self.locked_balances.get(base_asset, 0)
-            available_quote = quote_balance - self.locked_balances.get(quote_asset, 0)
+            available_base = base_balance - self.pending_locks.get(base_asset, 0)
+            available_quote = quote_balance - self.pending_locks.get(quote_asset, 0)
         
         # Go through grid and find slots without orders
         for i, level in enumerate(self.grid):
