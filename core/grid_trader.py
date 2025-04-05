@@ -114,6 +114,14 @@ class GridTrader:
         
         # Initialize trend tracking attribute
         self.trend_strength = 0
+        
+        # Initialize market state related attributes
+        self.current_market_state = MarketState.RANGING
+        self.last_state_change_time = time.time()
+        self.state_cooldown_period = 900  # 15-minute cooldown to prevent frequent state changes
+        self.volume_history = []
+        self.price_history = []
+        self.history_max_size = 30  # Maximum length of historical data to maintain
     
     def _get_symbol_info(self):
         """
@@ -1914,3 +1922,210 @@ class GridTrader:
         self._place_grid_order(new_level)
         
         self.logger.info(f"Placed replacement grid order: {side} at price {price:.8f} to maintain grid density")
+    
+    def _calculate_volume_change(self, lookback=12):
+        """
+        Calculate recent volume change ratio compared to baseline period
+        
+        Args:
+            lookback: Number of periods to use as baseline reference
+            
+        Returns:
+            float: Volume change ratio, >1 means volume is increasing
+        """
+        try:
+            # Use 1-hour candles to reduce noise
+            klines = self.binance_client.get_historical_klines(
+                symbol=self.symbol,
+                interval="1h",
+                limit=lookback + 12  # Get extended history for comparison
+            )
+            
+            if not klines or len(klines) < lookback + 5:
+                self.logger.warning("Insufficient volume data for calculation")
+                return 1.0  # Default to no change
+            
+            # Extract volume data (volume is at index 5)
+            volumes = []
+            for k in klines:
+                if isinstance(k, list) and len(k) > 5:
+                    volumes.append(float(k[5]))
+                elif isinstance(k, dict) and 'volume' in k:
+                    volumes.append(float(k['volume']))
+            
+            if len(volumes) < lookback + 5:
+                return 1.0
+            
+            # Calculate recent average volume (last 5 hours) vs baseline
+            recent_avg_volume = sum(volumes[-5:]) / 5
+            baseline_avg_volume = sum(volumes[-(lookback+5):-5]) / lookback
+            
+            # Avoid division by zero
+            if baseline_avg_volume == 0:
+                return 1.0
+                
+            # Calculate change ratio
+            volume_change = recent_avg_volume / baseline_avg_volume
+            
+            # Update internal tracking
+            self.volume_history.append(volume_change)
+            if len(self.volume_history) > self.history_max_size:
+                self.volume_history.pop(0)  # Maintain history length
+                
+            return volume_change
+            
+        except Exception as e:
+            self.logger.error(f"Volume change calculation error: {e}")
+            return 1.0
+
+    def detect_market_state(self):
+        """
+        Detect current market state by analyzing price movement, volatility and volume
+        
+        Uses existing metrics like ATR and trend_strength plus additional volume analysis
+        to determine if the market is in a normal ranging state or exceptional states
+        that require adjusted trading parameters.
+        
+        Returns:
+            MarketState: Current market state enum value
+        """
+        try:
+            # 1. Use existing methods to get ATR and trend strength
+            atr_value, trend_strength = self.calculate_market_metrics()
+            
+            # 2. Calculate volume change (increasing volume can signal breakouts)
+            volume_change = self._calculate_volume_change(lookback=12)
+            
+            # 3. Get current price and calculate price deviation
+            current_price = self.binance_client.get_symbol_price(self.symbol)
+            
+            # Update price history
+            self.price_history.append(current_price)
+            if len(self.price_history) > self.history_max_size:
+                self.price_history.pop(0)
+            
+            # Calculate price deviation if we have enough history
+            price_deviation = 0
+            if len(self.price_history) > 10:
+                avg_price = sum(self.price_history[:-1]) / (len(self.price_history) - 1)
+                price_deviation = abs(current_price - avg_price) / avg_price
+            
+            # 4. Check if we're in cooldown period
+            current_time = time.time()
+            if (current_time - self.last_state_change_time) < self.state_cooldown_period:
+                # Stay in current state during cooldown to avoid flip-flopping
+                return self.current_market_state
+            
+            # 5. Determine market state based on combined metrics
+            
+            # PUMP state: Strong uptrend + volume surge
+            if trend_strength > 0.7 and volume_change > 1.8:
+                new_state = MarketState.PUMP
+                state_message = "PUMP detected - Strong uptrend with volume surge"
+            
+            # CRASH state: Strong downtrend + volume surge
+            elif trend_strength < -0.7 and volume_change > 1.8:
+                new_state = MarketState.CRASH
+                state_message = "CRASH detected - Strong downtrend with volume surge"
+            
+            # BREAKOUT state: Moderate trend + price deviation or volume increase
+            elif (abs(trend_strength) > 0.5 and (price_deviation > 0.02 or volume_change > 1.5)):
+                new_state = MarketState.BREAKOUT
+                state_message = "BREAKOUT detected - Clear directional movement forming"
+            
+            # Default RANGING state
+            else:
+                new_state = MarketState.RANGING
+                state_message = "RANGING market - Sideways movement suitable for grid trading"
+            
+            # 6. Handle state transition if state has changed
+            if new_state != self.current_market_state:
+                self.last_state_change_time = current_time
+                self.logger.info(f"Market state change: {self.current_market_state.name} → {new_state.name}. {state_message}")
+                
+                # Notify via Telegram if available
+                if self.telegram_bot:
+                    emoji_map = {
+                        MarketState.RANGING: "↔️",
+                        MarketState.BREAKOUT: "↗️",
+                        MarketState.CRASH: "🔻",
+                        MarketState.PUMP: "🚀"
+                    }
+                    emoji = emoji_map.get(new_state, "")
+                    self.telegram_bot.send_message(
+                        f"{emoji} Market state changed: {self.current_market_state.name} → {new_state.name}\n"
+                        f"Trend strength: {trend_strength:.2f}, Volume change: {volume_change:.2f}x\n"
+                        f"{state_message}"
+                    )
+                
+                self.current_market_state = new_state
+            
+            return self.current_market_state
+            
+        except Exception as e:
+            self.logger.error(f"Market state detection error: {e}")
+            return MarketState.RANGING  # Default to ranging when in doubt
+            
+    def _adjust_grid_based_on_market_state(self, state):
+        """
+        Dynamically adjust grid parameters based on detected market state
+        
+        Args:
+            state: MarketState enum value
+        """
+        if not self.is_running:
+            return
+            
+        # Save original settings before modification (if not already saved)
+        if not hasattr(self, '_original_grid_settings'):
+            self._original_grid_settings = {
+                'grid_spacing': self.grid_spacing,
+            }
+        
+        if state == MarketState.PUMP:
+            # PUMP state: Increase grid spacing to catch larger moves
+            self.grid_spacing = min(self.grid_spacing * 1.25, config.MAX_GRID_SPACING)
+            self.logger.info(f"PUMP state adjustment: Grid spacing increased to {self.grid_spacing*100:.2f}%")
+                
+        elif state == MarketState.CRASH:
+            # CRASH state: Increase grid spacing similar to PUMP
+            self.grid_spacing = min(self.grid_spacing * 1.25, config.MAX_GRID_SPACING)
+            self.logger.info(f"CRASH state adjustment: Grid spacing increased to {self.grid_spacing*100:.2f}%")
+                
+        elif state == MarketState.BREAKOUT:
+            # BREAKOUT state: Slightly increase spacing
+            self.grid_spacing = min(self.grid_spacing * 1.15, config.MAX_GRID_SPACING)
+            self.logger.info(f"BREAKOUT state adjustment: Grid spacing increased to {self.grid_spacing*100:.2f}%")
+                
+        elif state == MarketState.RANGING and hasattr(self, '_original_grid_settings'):
+            # Restore original settings in RANGING state
+            self.grid_spacing = self._original_grid_settings.get('grid_spacing', self.grid_spacing)
+            self.logger.info(f"RANGING state: Grid spacing restored to {self.grid_spacing*100:.2f}%")
+            
+            # Clear saved settings
+            delattr(self, '_original_grid_settings')
+
+    def get_market_state(self):
+        """
+        Get current market state information for external use
+        
+        Returns:
+            dict: Dictionary containing market state and related metrics
+        """
+        # Ensure market state exists
+        if not hasattr(self, 'current_market_state'):
+            self.current_market_state = MarketState.RANGING
+            
+        # Get current metrics
+        atr_value, trend_strength = self.calculate_market_metrics()
+        volume_change = self._calculate_volume_change() if hasattr(self, '_calculate_volume_change') else 1.0
+        
+        # Return comprehensive state information
+        return {
+            'state': self.current_market_state,
+            'state_name': self.current_market_state.name,
+            'trend_strength': trend_strength,
+            'volatility': atr_value,
+            'volume_change': volume_change,
+            'last_changed': self.last_state_change_time if hasattr(self, 'last_state_change_time') else 0
+        }
