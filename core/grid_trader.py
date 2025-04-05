@@ -385,15 +385,18 @@ class GridTrader:
             target_base_value = total_value_in_usdt * target_base_ratio
             needed_base_value = target_base_value - base_value_in_usdt
             
-            # Apply safety constraints to purchase amount:
-            # 1. No more than 80% of available USDT to preserve some buying power
-            # 2. Minimum 5 USDT purchase to avoid dust
-            # 3. At least 10% gap from target to avoid unnecessary small trades
-            min_purchase = 5  # Minimum USDT purchase to avoid dust
+            # Apply safety constraints to purchase amount
+            min_purchase = float(getattr(config, 'MIN_NOTIONAL_VALUE', 6))  # Get minimum from config or default to 6
             
             if needed_base_value > (total_value_in_usdt * 0.05) and usdt_balance >= min_purchase:
                 # Calculate purchase amount with safety cap
-                max_purchase = usdt_balance * 0.8  # Safety cap: use at most 80% of USDT
+                # We use 80% as upper limit to ensure:
+                # 1. Reserve some USDT for trading fees and slippage
+                # 2. Keep buffer for market price fluctuations between calculation and execution
+                # 3. Maintain some USDT for initial buy orders in the grid setup
+                # 4. In practice, needed_base_value will almost always be the limiting factor
+                safety_cap = 0.8
+                max_purchase = usdt_balance * safety_cap
                 purchase_usdt = min(needed_base_value, max_purchase)
                 purchase_usdt = max(purchase_usdt, min_purchase)  # Ensure minimum purchase size
                 
