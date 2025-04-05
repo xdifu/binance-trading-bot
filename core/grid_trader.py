@@ -343,6 +343,80 @@ class GridTrader:
         
         return message
     
+    def start_balanced_grid(self, simulation=False):
+        """
+        Start grid trading with initial asset balance optimization.
+        Ensures sufficient base asset by performing an initial purchase if necessary.
+        
+        Args:
+            simulation: Whether to run in simulation mode (no real orders)
+            
+        Returns:
+            str: Status message
+        """
+        if self.is_running:
+            return "System already running"
+        
+        # Get current market price
+        current_price = self.binance_client.get_symbol_price(self.symbol)
+        if not current_price or current_price <= 0:
+            error_msg = f"Failed to get valid market price for {self.symbol}"
+            self.logger.error(error_msg)
+            return f"Error: {error_msg}"
+        
+        # Check asset balances
+        base_asset = self.symbol.replace('USDT', '')
+        base_balance = self.binance_client.check_balance(base_asset)
+        usdt_balance = self.binance_client.check_balance('USDT')
+        
+        # Check if base asset is severely lacking (< 10% of portfolio)
+        base_value_in_usdt = base_balance * current_price
+        total_value_in_usdt = base_value_in_usdt + usdt_balance
+        
+        # Only proceed with balance adjustment if needed and not in simulation mode
+        initial_purchase_made = False
+        if base_value_in_usdt < (total_value_in_usdt * 0.1) and not simulation:
+            # Use 40% of available USDT to purchase base asset
+            purchase_usdt = usdt_balance * 0.4
+            quantity_to_buy = purchase_usdt / current_price
+            
+            # Format quantity according to exchange requirements
+            formatted_quantity = self._adjust_quantity_precision(quantity_to_buy)
+            
+            # Notify about the planned purchase
+            message = f"Balancing portfolio: Converting {purchase_usdt:.4f} USDT to ~{formatted_quantity} {base_asset}"
+            self.logger.info(message)
+            
+            if self.telegram_bot:
+                self.telegram_bot.send_message(f"⚙️ {message}")
+            
+            try:
+                # Execute the market order
+                order = self.binance_client.place_market_order(
+                    self.symbol, 
+                    "BUY", 
+                    formatted_quantity
+                )
+                initial_purchase_made = True
+                
+                # Log the successful purchase
+                self.logger.info(f"Initial balance purchase complete. New {base_asset} balance: {self.binance_client.check_balance(base_asset)}")
+                
+                # Allow time for balances to update
+                time.sleep(2)
+                
+            except Exception as e:
+                self.logger.error(f"Failed to execute initial balance purchase: {e}")
+                if self.telegram_bot:
+                    self.telegram_bot.send_message(f"⚠️ Failed to execute initial balance purchase: {e}")
+        
+        # Start the normal grid trading process
+        start_result = self.start(simulation)
+        
+        if initial_purchase_made:
+            return f"Initial balance adjusted. {start_result}"
+        return start_result
+    
     def stop(self):
         """Stop grid trading system"""
         if not self.is_running:
