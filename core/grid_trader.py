@@ -641,13 +641,13 @@ class GridTrader:
     
     def _calculate_grid_levels(self):
         """
-        Calculate asymmetric grid price levels with funds concentrated near current price.
-        Optimized for small capital accounts with trend adaptation.
+        Calculate asymmetric grid price levels with funds concentrated near the optimal center.
+        Uses mean reversion principles to find the ideal grid center for oscillating markets.
         
         The grid is structured with:
-        - A core zone with higher density near the current price
+        - A core zone with higher density near the calculated optimal price center
         - Edge zones with fewer levels at the extremes
-        - Dynamic capital allocation based on distance from current price
+        - Dynamic capital allocation based on distance from center price
         - Trend-based positioning to adapt to market direction
         
         Returns:
@@ -661,15 +661,18 @@ class GridTrader:
             if adjusted_grid_levels != self.grid_levels:
                 self.logger.info(f"Adjusted grid levels from {self.grid_levels} to {adjusted_grid_levels} based on available funds: {total_available_usdt} USDT")
                 self.grid_levels = max(adjusted_grid_levels, 3)  # Ensure at least 3 grid levels
-
-            # Get current market price 
-            current_price = self.binance_client.get_symbol_price(self.symbol)
+    
+            # Use mean reversion optimized center instead of current market price
+            grid_center, grid_range_percent = self.calculate_optimal_grid_center()
+            current_price = grid_center  # Replace current price with calculated center
+            
+            # Check validity of calculated center
             if current_price <= 0:
-                self.logger.error(f"Invalid current price: {current_price}")
+                self.logger.error(f"Invalid grid center price: {current_price}")
                 return []
                 
             self.current_market_price = current_price
-            grid_range = current_price * self.grid_range_percent
+            grid_range = current_price * grid_range_percent
             
             # --- Step 2: Calculate trend-based offset and strength ---
             atr_value, trend_strength = self.calculate_market_metrics()
@@ -681,7 +684,7 @@ class GridTrader:
             trend_factor = 0.5 + (trend_strength * 0.3)  # Range 0.2-0.8 based on trend
             upper_bound = current_price + (grid_range * trend_factor)
             lower_bound = current_price - (grid_range * (1 - trend_factor))
-
+    
             # Core zone maintains proportional distance from current price
             core_range = grid_range * self.core_zone_percentage
             core_upper = current_price + (core_range * trend_factor)
@@ -699,19 +702,19 @@ class GridTrader:
             # Calculate actual width of core and edge zones
             core_width = core_upper - core_lower
             edge_width = (upper_bound - core_upper) + (core_lower - lower_bound)
-
+    
             # Determine volatility-adjusted grid spacing
             # Use last known ATR or fallback to 1% of current price
             atr_value = self.last_atr_value or (current_price * 0.01)
             # Set ideal spacing to 20% of ATR, bounded between 0.5%-2% of price
             ideal_spacing = max(current_price * 0.005, min(atr_value * 0.2, current_price * 0.02))
-
+    
             # Calculate required grid levels based on actual zone widths
             # Ensure minimum of 2 levels in core zone for proper trading
             core_levels_needed = max(int(core_width / ideal_spacing), 2)
             # Use 20% wider spacing in edge zones for better capital efficiency
             edge_levels_needed = max(int(edge_width / (ideal_spacing * 1.2)), 1)
-
+    
             # Adjust if total exceeds grid level limit
             total_needed = core_levels_needed + edge_levels_needed
             if total_needed > self.grid_levels:
@@ -723,11 +726,11 @@ class GridTrader:
                 # Use calculated values directly
                 core_levels = core_levels_needed
                 edge_levels = edge_levels_needed
-
+    
             # Log the dynamic allocation details
             self.logger.debug(f"Dynamic grid allocation: ideal spacing={ideal_spacing/current_price*100:.2f}%, "
                              f"core zone={core_levels} points, edge zone={edge_levels} points")
-
+    
             grid_levels = []
             
             # Create core zone grid levels
