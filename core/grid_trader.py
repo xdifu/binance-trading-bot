@@ -640,7 +640,9 @@ class GridTrader:
             grid_range = current_price * self.grid_range_percent
             
             # --- Step 2: Calculate trend-based offset and strength ---
-            trend_strength = self.calculate_trend_strength(current_price=current_price)
+            atr_value, trend_strength = self.calculate_market_metrics()
+            if atr_value is not None:
+                self.last_atr_value = atr_value  # Update stored ATR value
             
             # --- Step 3: Define grid boundaries with asymmetric trend adaptation ---
             # Overall grid boundaries adjusted by trend direction
