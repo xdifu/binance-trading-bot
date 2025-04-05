@@ -1824,17 +1824,19 @@ class GridTrader:
         existing_prices = [level['price'] for level in self.grid]
         if existing_prices:
             lowest_price = min(existing_prices)
+            # Start placing new levels below the lowest existing level
+            start_price = lowest_price * (1 - self.grid_spacing)
         else:
-            lowest_price = current_price * 0.98  # Default if grid is empty
+            # If no existing grid, start below current price
+            start_price = current_price * (1 - self.grid_spacing)
         
         # Create new levels below the lowest existing level
         new_levels = []
         step = self.grid_spacing * current_price  # Calculate absolute step size
         
         for i in range(count):
-            # Each new level is placed below the previous one
-            price = lowest_price * (1 - (i + 1) * self.grid_spacing)
-            
+            # Calculate new price level
+            price = start_price - (i * step)
             # Create the new grid level
             new_level = {
                 "price": price,
@@ -1844,18 +1846,18 @@ class GridTrader:
                 "timestamp": None
             }
             new_levels.append(new_level)
-            
+        
         # Place orders for new levels
         orders_placed = 0
         for level in new_levels:
             if self._place_grid_order(level):
-                # Add successful orders to the grid
+                # Add successful orders to the grid - THIS IS THE KEY FIX
                 self.grid.append(level)
                 orders_placed += 1
         
         if orders_placed > 0:
             self.logger.info(f"Added {orders_placed} additional buy levels to utilize remaining USDT")
-            
+        
         return orders_placed
     
     def _create_additional_buy_grids(self, available_usdt):
