@@ -1299,7 +1299,7 @@ class GridTrader:
         # Check for volatility-based recalculation
         volatility_based_recalc = False
         partial_adjustment = False
-        current_atr = self._get_current_atr()
+        current_atr, current_trend = self.calculate_market_metrics()
         
         if current_atr and self.last_atr_value:
             atr_change = abs(current_atr - self.last_atr_value) / self.last_atr_value
@@ -1311,6 +1311,12 @@ class GridTrader:
             elif atr_change > 0.1:  # Moderate volatility change (10-20%)
                 self.logger.info(f"Moderate volatility change detected: ATR changed by {atr_change*100:.2f}%, performing partial grid adjustment")
                 partial_adjustment = True
+            
+            # Additional trend change check
+            trend_change = abs(current_trend - self.last_trend_strength) if self.last_trend_strength else 0
+            if trend_change > 0.5:  # Check if trend changed significantly (50% of the -1 to 1 range)
+                self.logger.info(f"Significant trend change detected: {trend_change:.2f}, considering grid adjustment")
+                # Either trigger partial adjustment or consider in the volatility assessment
         
         # Handle full grid recalculation
         if time_based_recalc or volatility_based_recalc:
