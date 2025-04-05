@@ -2147,3 +2147,126 @@ class GridTrader:
             'volume_change': volume_change,
             'last_changed': self.last_state_change_time if hasattr(self, 'last_state_change_time') else 0
         }
+    
+    def calculate_optimal_grid_center(self):
+        """
+        Calculate optimal grid center using mean reversion properties of historical data.
+        
+        Balances historical average prices with current price based on trend strength.
+        Uses existing trend and volatility metrics when possible.
+        
+        Returns:
+            tuple: (grid_center, grid_range_value) - Optimized grid center and range
+        """
+        try:
+            # 1. Use existing methods to get market metrics
+            atr_value, trend_strength = self.calculate_market_metrics()
+            
+            # 2. Get historical data for mean reversion analysis
+            historical_klines = self.binance_client.get_historical_klines(
+                symbol=self.symbol, 
+                interval="4h",  # 4-hour candles balance detail and noise reduction
+                limit=360       # ~60 days for statistical significance
+            )
+            
+            if not historical_klines or len(historical_klines) < 120:  # Need at least 20 days
+                self.logger.warning("Insufficient historical data for mean reversion analysis")
+                current_price = self.binance_client.get_symbol_price(self.symbol)
+                return current_price, self.grid_range_percent
+            
+            # 3. Segment data into time periods
+            recent_data = historical_klines[-42:]     # Last 7 days (most important)
+            medium_data = historical_klines[-126:-42] # 7-21 days ago
+            long_data = historical_klines[:-126]      # 21-60 days ago
+            
+            # 4. Calculate time-weighted average prices
+            def calculate_weighted_avg(klines):
+                total_weight = 0
+                weighted_sum = 0
+                
+                # Weight more recent candles higher within each segment
+                for i, k in enumerate(klines):
+                    if isinstance(k, list) and len(k) > 4:
+                        # Simple linear weight - newer data gets higher weight
+                        weight = (i + 1) / len(klines)
+                        close_price = float(k[4])  # Close price
+                        weighted_sum += close_price * weight
+                        total_weight += weight
+                
+                return weighted_sum / total_weight if total_weight > 0 else 0
+                
+            recent_avg = calculate_weighted_avg(recent_data)
+            medium_avg = calculate_weighted_avg(medium_data)
+            long_avg = calculate_weighted_avg(long_data)
+            
+            # 5. Calculate oscillation degree from trend strength (reuse existing trend data)
+            # Transform trend_strength (-1 to 1) into oscillation index (0 to 1)
+            # Strong trends (trend_strength near -1 or 1) mean low oscillation
+            # Neutral trends (trend_strength near 0) mean high oscillation
+            oscillation_index = 1 - abs(trend_strength)
+            
+            # 6. Dynamic time weights based on oscillation strength
+            # More oscillation = more weight on recent data
+            recent_weight = 0.45 + (oscillation_index * 0.1)  # 0.45-0.55 range
+            medium_weight = 0.30
+            long_weight = 0.25 - (oscillation_index * 0.1)    # 0.15-0.25 range
+            
+            # 7. Calculate historical weighted center
+            historical_center = (
+                recent_avg * recent_weight + 
+                medium_avg * medium_weight + 
+                long_avg * long_weight
+            )
+            
+            # 8. Get current price
+            current_price = self.binance_client.get_symbol_price(self.symbol)
+            
+            # 9. Calculate price deviation to dynamically adjust weights
+            price_deviation = abs(current_price - historical_center) / historical_center
+            
+            # 10. Determine final weights based on price deviation and oscillation
+            if price_deviation > 0.15:
+                # Large deviation - possible market structure change, more weight to current price
+                current_weight = 0.35
+            elif price_deviation > 0.08:
+                # Moderate deviation
+                current_weight = 0.25
+            else:
+                # Small deviation - rely more on historical center
+                current_weight = 0.15 + (0.1 * (1 - oscillation_index))  # 0.15-0.25 range
+                
+            # 11. Calculate final grid center
+            grid_center = (historical_center * (1 - current_weight) + 
+                          current_price * current_weight)
+            
+            # 12. Use ATR for grid range calculation if available
+            grid_range_value = self.grid_range_percent  # Default to config value
+            
+            if atr_value:
+                # Use ATR to determine appropriate range (as percentage of center)
+                normalized_atr = atr_value / grid_center
+                
+                # Oscillation-adjusted range multiplier
+                range_multiplier = 2.2 + (oscillation_index * 0.8)  # 2.2-3.0 range
+                
+                # Calculate and constrain grid range
+                grid_range_value = min(
+                    normalized_atr * range_multiplier,
+                    self.grid_range_percent,
+                    config.MAX_GRID_RANGE
+                )
+            
+            self.logger.info(
+                f"Optimal grid center: {grid_center:.8f} "
+                f"(historical weight: {(1-current_weight)*100:.1f}%, "
+                f"current weight: {current_weight*100:.1f}%, "
+                f"oscillation: {oscillation_index:.2f})"
+            )
+            
+            return grid_center, grid_range_value
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating optimal grid center: {e}")
+            # Fallback to current price on error
+            current_price = self.binance_client.get_symbol_price(self.symbol)
+            return current_price, self.grid_range_percent
