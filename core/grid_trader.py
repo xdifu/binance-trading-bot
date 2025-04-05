@@ -346,7 +346,7 @@ class GridTrader:
     def start_balanced_grid(self, simulation=False):
         """
         Start grid trading with optimal asset balance for symmetric grid trading.
-        Dynamically calculates required base asset purchase to reach target allocation.
+        Cancels all existing orders first to ensure accurate balance assessment.
         
         Args:
             simulation: Whether to run in simulation mode (no real orders)
@@ -357,6 +357,14 @@ class GridTrader:
         if self.is_running:
             return "System already running"
         
+        # CRITICAL FIX: First cancel all existing orders to release locked assets
+        if not simulation:
+            self.logger.info("Canceling all open orders before balance assessment")
+            self._cancel_all_open_orders()
+            
+            # Wait briefly for balances to update in Binance's system
+            time.sleep(2)
+        
         # Get current market price
         current_price = self.binance_client.get_symbol_price(self.symbol)
         if not current_price or current_price <= 0:
@@ -364,7 +372,7 @@ class GridTrader:
             self.logger.error(error_msg)
             return f"Error: {error_msg}"
         
-        # Check asset balances
+        # Check asset balances AFTER canceling orders to get true available funds
         base_asset = self.symbol.replace('USDT', '')
         base_balance = self.binance_client.check_balance(base_asset)
         usdt_balance = self.binance_client.check_balance('USDT')
@@ -377,6 +385,10 @@ class GridTrader:
         target_base_ratio = 0.4
         current_base_ratio = base_value_in_usdt / total_value_in_usdt if total_value_in_usdt > 0 else 0
         
+        # Log the accurate asset balance after canceling orders
+        self.logger.info(f"Portfolio assessment after canceling orders: {base_balance} {base_asset} " 
+                       f"({current_base_ratio*100:.1f}% of portfolio, target: {target_base_ratio*100:.1f}%)")
+        
         # Determine if and how much to purchase - only if we're below target and not in simulation
         initial_purchase_made = False
         
@@ -386,15 +398,10 @@ class GridTrader:
             needed_base_value = target_base_value - base_value_in_usdt
             
             # Apply safety constraints to purchase amount
-            min_purchase = float(getattr(config, 'MIN_NOTIONAL_VALUE', 6))  # Get minimum from config or default to 6
+            min_purchase = float(getattr(config, 'MIN_NOTIONAL_VALUE', 6))
             
             if needed_base_value > (total_value_in_usdt * 0.05) and usdt_balance >= min_purchase:
                 # Calculate purchase amount with safety cap
-                # We use 80% as upper limit to ensure:
-                # 1. Reserve some USDT for trading fees and slippage
-                # 2. Keep buffer for market price fluctuations between calculation and execution
-                # 3. Maintain some USDT for initial buy orders in the grid setup
-                # 4. In practice, needed_base_value will almost always be the limiting factor
                 safety_cap = 0.8
                 max_purchase = usdt_balance * safety_cap
                 purchase_usdt = min(needed_base_value, max_purchase)
