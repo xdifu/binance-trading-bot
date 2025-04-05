@@ -796,6 +796,43 @@ class GridTrader:
             self.logger.error(f"Error calculating trend strength: {e}")
             return 0  # Default to no trend on error
     
+    def calculate_market_metrics(self):
+        """
+        Calculate market metrics using optimal timeframes:
+        - Volatility (ATR): 15m candles for better short-term precision
+        - Trend strength: 1h candles for more reliable direction signals
+        
+        Returns:
+            tuple: (atr_value, trend_strength) - Current market volatility and trend indicators
+        """
+        try:
+            # Calculate volatility using 15-minute timeframe for better precision
+            volatility_klines = self.binance_client.get_historical_klines(
+                symbol=self.symbol, 
+                interval="15m", 
+                limit=self.atr_period + 10
+            )
+            atr = calculate_atr(volatility_klines, period=self.atr_period) if volatility_klines else None
+            
+            # Calculate trend using 1-hour timeframe for better stability
+            trend_klines = self.binance_client.get_historical_klines(
+                symbol=self.symbol, 
+                interval="1h", 
+                limit=24  # Use 24 hours for reliable trend assessment
+            )
+            trend = self.calculate_trend_strength(klines=trend_klines, lookback=15)  # Reduced lookback for better responsiveness
+            
+            self.logger.info(f"Market metrics calculated using mixed timeframes - ATR: {atr:.8f}, Trend: {trend:.2f}")
+            return atr, trend
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating market metrics using mixed timeframes: {e}")
+            # Fall back to original methods if the mixed approach fails
+            atr = self._get_current_atr()
+            trend = self.calculate_trend_strength()
+            self.logger.warning("Fell back to single timeframe metrics due to error in mixed calculation")
+            return atr, trend
+    
     def _create_core_zone_grid(self, current_price, core_upper, core_lower, core_levels):
         """
         Create grid levels for the core price zone with trend-adaptive buy/sell distribution
