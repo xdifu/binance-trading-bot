@@ -585,8 +585,10 @@ class GridTrader:
             self.logger.error("Grid levels calculation returned an empty list. Aborting grid setup.")
             return
         
-        # Update ATR value for volatility tracking
-        atr_value = self._get_current_atr()
+        # Update ATR value and trend strength using optimized mixed timeframes
+        atr_value, trend_strength = self.calculate_market_metrics()
+        
+        # Update stored values for future reference
         if atr_value is not None:
             self.last_atr_value = atr_value
         elif self.last_atr_value is None:
@@ -595,7 +597,8 @@ class GridTrader:
             self.last_atr_value = 0.01  # Fallback value to ensure grid setup proceeds
         
         # Store current trend strength for change monitoring
-        self.last_trend_strength = self.trend_strength
+        self.trend_strength = trend_strength
+        self.last_trend_strength = trend_strength
         
         # Check WebSocket API availability
         client_status = self.binance_client.get_client_status()
