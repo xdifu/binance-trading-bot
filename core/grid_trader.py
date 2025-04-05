@@ -4,6 +4,7 @@ import time
 import threading
 from datetime import datetime, timedelta
 from binance_api.client import BinanceClient
+from binance.exceptions import BinanceAPIException  # 需添加此导入
 from utils.indicators import calculate_atr
 from utils.format_utils import format_price, format_quantity, get_precision_from_filters
 import config
@@ -915,35 +916,37 @@ class GridTrader:
         return minimal_grid
     
     def _cancel_all_open_orders(self):
-        """
-        Cancel all open orders for the trading pair
-        
-        Returns:
-            bool: True if successful, False otherwise
-        """
+        """Cancel all open orders with comprehensive error handling"""
         try:
-            # Use WebSocket if available, otherwise REST
-            client_status = self.binance_client.get_client_status()
-            self.using_websocket = client_status["websocket_available"]
-            
-            # Log which API is being used
-            self.logger.info(f"Cancelling all open orders via {'WebSocket' if self.using_websocket else 'REST'} API")
-            
-            # Get all open orders
+            # Get all open orders for the symbol
             open_orders = self.binance_client.get_open_orders(self.symbol)
             
             for order in open_orders:
-                if self.simulation_mode:
-                    self.logger.info(f"Simulation - Would cancel order {order['orderId']}")
-                    continue
+                try:
+                    # Attempt to cancel each order
+                    self.binance_client.cancel_order(
+                        symbol=self.symbol, 
+                        order_id=order['orderId']
+                    )
+                    self.logger.info(f"Cancelled order {order['orderId']}")
                     
-                self.binance_client.cancel_order(
-                    symbol=self.symbol,
-                    order_id=order['orderId']
-                )
-                self.logger.info(f"Cancelled order {order['orderId']}")
-            
+                except Exception as e:
+                    # Handle specific Binance error codes
+                    if isinstance(e, BinanceAPIException):
+                        # -2011: CANCEL_REJECTED (order doesn't exist/already filled)
+                        # -2011: "Unknown order sent" (legacy code)
+                        if e.code == -2011 or "Unknown order sent" in str(e):  # 修正重复的错误码
+                            self.logger.warning(
+                                f"Order {order['orderId']} cancellation rejected. "
+                                "Likely already filled or expired. Skipping."
+                            )
+                            continue  # Skip to next order instead of failing
+                            
+                    # Re-raise unexpected errors
+                    raise e
+                    
             return True
+            
         except Exception as e:
             self.logger.error(f"Error cancelling orders: {e}")
             return False
@@ -1816,48 +1819,66 @@ class GridTrader:
         """
         if count <= 0:
             return 0
-            
-        # Get current price and calculate appropriate spacing
+        
+        # Get current market price
         current_price = self.binance_client.get_symbol_price(self.symbol)
         
         # Find the lowest price in the current grid
-        existing_prices = [level['price'] for level in self.grid]
-        if existing_prices:
-            lowest_price = min(existing_prices)
-            # Start placing new levels below the lowest existing level
+        existing_buy_prices = [level['price'] for level in self.grid if level['side'] == 'BUY']
+        
+        # Determine starting price for additional levels
+        if existing_buy_prices:
+            # Start below the lowest existing buy level
+            lowest_price = min(existing_buy_prices)
             start_price = lowest_price * (1 - self.grid_spacing)
         else:
-            # If no existing grid, start below current price
+            # If no buy levels exist, start below current price
             start_price = current_price * (1 - self.grid_spacing)
         
-        # Create new levels below the lowest existing level
+        # Create new grid levels with descending prices
         new_levels = []
-        step = self.grid_spacing * current_price  # Calculate absolute step size
+        step = current_price * self.grid_spacing  # Calculate absolute step size
         
         for i in range(count):
-            # Calculate new price level
+            # Calculate new price level with progressive spacing
             price = start_price - (i * step)
-            # Create the new grid level
+            
+            # Format price to comply with exchange rules
+            formatted_price = float(self._adjust_price_precision(price))
+            
+            # Create the new grid level with all required fields
             new_level = {
-                "price": price,
-                "side": "BUY",
-                "order_id": None,
-                "capital": self._calculate_dynamic_capital_for_level(price),
-                "timestamp": None
+                "price": formatted_price,
+                "side": "BUY",  # Additional levels are always buy orders
+                "order_id": None,  # Will be filled after order placement
+                "capital": self._calculate_dynamic_capital_for_level(formatted_price),
+                "timestamp": None  # Will be filled with creation time
             }
             new_levels.append(new_level)
         
-        # Place orders for new levels
+        # Log the calculated levels
+        self.logger.debug(f"Generated {len(new_levels)} additional buy levels from price {start_price} downward")
+        
+        # Add each level to the grid BEFORE placing the order
+        # This ensures the level exists in the grid when _place_grid_order is called
         orders_placed = 0
         for level in new_levels:
-            if self._place_grid_order(level):
-                # Add successful orders to the grid - THIS IS THE KEY FIX
-                self.grid.append(level)
+            # First add to grid
+            grid_copy = level.copy()  # Create a copy to avoid reference issues
+            self.grid.append(grid_copy)
+            
+            # Then place order
+            if self._place_grid_order(grid_copy):
                 orders_placed += 1
+            else:
+                # If order placement fails, remove from grid
+                self.grid.remove(grid_copy)
         
         if orders_placed > 0:
-            self.logger.info(f"Added {orders_placed} additional buy levels to utilize remaining USDT")
-        
+            self.logger.info(f"Successfully added {orders_placed} additional buy levels to utilize remaining USDT")
+        else:
+            self.logger.warning("Failed to create any additional buy levels")
+            
         return orders_placed
     
     def _create_additional_buy_grids(self, available_usdt):
@@ -1872,15 +1893,20 @@ class GridTrader:
             int: Number of additional orders placed
         """
         # Calculate how many additional grids we can create
-        max_additional_grids = int(available_usdt / self.capital_per_level)
+        # Account for fees and slippage with a 10% buffer
+        effective_capital = self.capital_per_level * 1.1
+        max_additional_grids = int(available_usdt / effective_capital)
         
         # Limit to a reasonable number to avoid creating too many small orders
-        additional_grids = min(max_additional_grids, 5)  # Max 5 additional grids at once
+        # But ensure we use at least 85% of available funds
+        min_grids_for_efficiency = max(1, int(available_usdt * 0.85 / effective_capital))
+        additional_grids = max(min(max_additional_grids, 7), min_grids_for_efficiency)
         
         if additional_grids <= 0:
             return 0
-            
+        
+        # Log before attempting creation
         self.logger.info(f"Creating {additional_grids} additional buy grids with {available_usdt:.2f} excess USDT")
         
-        # Use existing method to create the additional levels
+        # Use the fixed implementation to create the additional levels
         return self._add_additional_buy_levels(additional_grids)
