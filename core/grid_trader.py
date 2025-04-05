@@ -1309,7 +1309,7 @@ class GridTrader:
     
     def check_grid_recalculation(self):
         """
-        Check if grid needs recalculation based on time or volatility change
+        Check if grid needs recalculation based on time, volatility or market state changes
         
         Returns:
             bool: True if grid was recalculated or adjusted, False otherwise
@@ -1320,7 +1320,20 @@ class GridTrader:
             
         now = datetime.now()
         
-        # Check if recalculation period has passed
+        # NEW: Detect market state and apply appropriate adjustments
+        current_state = self.detect_market_state()
+        
+        # Trigger recalculation for extreme market states if not already adjusted
+        volatility_based_recalc = False
+        if current_state in [MarketState.PUMP, MarketState.CRASH] and not hasattr(self, '_state_adjusted'):
+            self.logger.info(f"Extreme market state ({current_state.name}) triggered grid recalculation")
+            volatility_based_recalc = True
+            self._state_adjusted = True  # Mark as adjusted for this state change
+        elif current_state == MarketState.RANGING and hasattr(self, '_state_adjusted'):
+            # Clear adjustment flag when returning to ranging state
+            delattr(self, '_state_adjusted')
+        
+        # Existing time-based recalculation check
         time_based_recalc = False
         if self.last_recalculation:
             days_passed = (now - self.last_recalculation).days
@@ -1345,12 +1358,14 @@ class GridTrader:
                 partial_adjustment = True
             
             # Additional trend change check
-            trend_change = abs(current_trend - self.last_trend_strength) if self.last_trend_strength else 0
+            trend_change = abs(current_trend - self.last_trend_strength) if hasattr(self, 'last_trend_strength') else 0
             if trend_change > 0.5:  # Check if trend changed significantly (50% of the -1 to 1 range)
                 self.logger.info(f"Significant trend change detected: {trend_change:.2f}, considering grid adjustment")
-                # Either trigger partial adjustment or consider in the volatility assessment
         
-        # Handle full grid recalculation
+        # NEW: Apply market state-based adjustments to grid parameters
+        self._adjust_grid_based_on_market_state(current_state)
+        
+        # Handle full grid recalculation (unchanged from original)
         if time_based_recalc or volatility_based_recalc:
             try:
                 # Cancel all orders
@@ -1362,8 +1377,12 @@ class GridTrader:
                 # Update last recalculation timestamp
                 self.last_recalculation = now
                 
+                # Build message with reason and state info
                 message = "Grid trading levels recalculated due to "
-                message += "scheduled recalculation" if time_based_recalc else "significant volatility change"
+                if time_based_recalc:
+                    message += "scheduled recalculation"
+                else:
+                    message += f"significant market change (state: {current_state.name})"
                 
                 self.logger.info(message)
                 if self.telegram_bot:
