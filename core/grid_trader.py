@@ -1341,26 +1341,25 @@ class GridTrader:
                 self.logger.info(f"Time-based grid recalculation triggered: {days_passed} days since last recalculation")
                 time_based_recalc = True
         
-        # Check for volatility-based recalculation
-        volatility_based_recalc = False
+        # 检查基于波动性的重新计算 - 不要重置 volatility_based_recalc!
         partial_adjustment = False
         current_atr, current_trend = self.calculate_market_metrics()
-        
+
         if current_atr and self.last_atr_value:
             atr_change = abs(current_atr - self.last_atr_value) / self.last_atr_value
             
-            # Multi-level volatility response with different actions
-            if atr_change > 0.2:  # Major volatility change (>20%)
+            # 仅在尚未触发重新计算时检查
+            if not volatility_based_recalc and atr_change > 0.2:
                 self.logger.info(f"Major volatility change detected: ATR changed by {atr_change*100:.2f}%, performing full grid recalculation")
                 volatility_based_recalc = True
-            elif atr_change > 0.1:  # Moderate volatility change (10-20%)
+            elif atr_change > 0.1:
                 self.logger.info(f"Moderate volatility change detected: ATR changed by {atr_change*100:.2f}%, performing partial grid adjustment")
                 partial_adjustment = True
-            
-            # Additional trend change check
-            trend_change = abs(current_trend - self.last_trend_strength) if hasattr(self, 'last_trend_strength') else 0
-            if trend_change > 0.5:  # Check if trend changed significantly (50% of the -1 to 1 range)
-                self.logger.info(f"Significant trend change detected: {trend_change:.2f}, considering grid adjustment")
+        
+        # Additional trend change check
+        trend_change = abs(current_trend - self.last_trend_strength) if hasattr(self, 'last_trend_strength') else 0
+        if trend_change > 0.5:  # Check if trend changed significantly (50% of the -1 to 1 range)
+            self.logger.info(f"Significant trend change detected: {trend_change:.2f}, considering grid adjustment")
         
         # NEW: Apply market state-based adjustments to grid parameters
         self._adjust_grid_based_on_market_state(current_state)
