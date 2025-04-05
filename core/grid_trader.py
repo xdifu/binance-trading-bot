@@ -1341,14 +1341,14 @@ class GridTrader:
                 self.logger.info(f"Time-based grid recalculation triggered: {days_passed} days since last recalculation")
                 time_based_recalc = True
         
-        # 检查基于波动性的重新计算 - 不要重置 volatility_based_recalc!
+        # Check volatility-based recalculation - do not reset volatility_based_recalc!
         partial_adjustment = False
         current_atr, current_trend = self.calculate_market_metrics()
 
         if current_atr and self.last_atr_value:
             atr_change = abs(current_atr - self.last_atr_value) / self.last_atr_value
             
-            # 仅在尚未触发重新计算时检查
+            # Only check if recalculation not yet triggered
             if not volatility_based_recalc and atr_change > 0.2:
                 self.logger.info(f"Major volatility change detected: ATR changed by {atr_change*100:.2f}%, performing full grid recalculation")
                 volatility_based_recalc = True
