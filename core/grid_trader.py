@@ -8,6 +8,23 @@ from binance.exceptions import BinanceAPIException  # 需添加此导入
 from utils.indicators import calculate_atr
 from utils.format_utils import format_price, format_quantity, get_precision_from_filters
 import config
+from enum import Enum
+import numpy as np
+
+class MarketState(Enum):
+    """
+    Enum representing different market states that affect grid trading behavior
+    
+    States:
+    - RANGING: Normal sideways market, ideal for grid trading
+    - BREAKOUT: Early trend formation with increased directional movement
+    - CRASH: Rapid downward price movement
+    - PUMP: Rapid upward price movement
+    """
+    RANGING = 1     # Sideways market, ideal for grid trading
+    BREAKOUT = 2    # Early trend formation, requires caution
+    CRASH = 3       # Sudden downward price movement
+    PUMP = 4        # Sudden upward price movement
 
 class GridTrader:
     def __init__(self, binance_client, telegram_bot=None):
