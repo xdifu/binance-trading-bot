@@ -52,21 +52,21 @@ class GridTrader:
             atr_ratio = config.ATR_RATIO
             atr_based_spacing = initial_atr / self.current_market_price * atr_ratio
             
-            # Set minimum spacing to prevent overly dense grids
-            min_spacing = 0.001  # 0.1% minimum spacing
+            # Set minimum spacing to prevent overly dense grids (0.1% minimum)
+            min_spacing = 0.001
             
             # Apply constraints using config values for maximum limits
-            self.grid_spacing = max(min_spacing, min(config.GRID_SPACING / 100, atr_based_spacing, config.MAX_GRID_SPACING))
+            # Note: All values are already decimal, so no division needed
+            self.grid_spacing = max(min_spacing, min(config.GRID_SPACING, atr_based_spacing, config.MAX_GRID_SPACING))
             
             self.logger.info(f"Dynamic grid spacing set to {self.grid_spacing*100:.2f}% based on ATR={initial_atr:.6f}")
         else:
-            # Fallback with configured maximum when ATR calculation fails
-            self.grid_spacing = min(config.GRID_SPACING / 100, config.MAX_GRID_SPACING)
+            # Fallback with configured values when ATR calculation fails
+            self.grid_spacing = min(config.GRID_SPACING, config.MAX_GRID_SPACING)
             self.logger.info(f"Using fallback grid spacing: {self.grid_spacing*100:.2f}%")
         
-        # Rest of the initialization remains unchanged
-        # Use configured maximum for grid range limit
-        self.grid_range_percent = min(config.GRID_RANGE_PERCENT / 100, config.MAX_GRID_RANGE)
+        # Use grid range directly since values are already decimal
+        self.grid_range_percent = min(config.GRID_RANGE_PERCENT, config.MAX_GRID_RANGE)
         
         # Preserve original capital per level setting
         self.capital_per_level = config.CAPITAL_PER_LEVEL
@@ -1510,20 +1510,32 @@ class GridTrader:
             new_price = price * (1 - buy_sell_spread)
             formatted_price = self._adjust_price_precision(new_price)
         
-        # Calculate expected profit and trading fees using config parameters
-        expected_profit = abs(float(new_price) - float(price)) / float(price) * 100
-        trading_fee = config.TRADING_FEE_RATE * 2  # Round-trip fee (buy + sell)
+        # Calculate expected profit as a decimal (not percentage)
+        expected_profit_decimal = abs(float(new_price) - float(price)) / float(price)
         
-        # Only create reverse order if profit exceeds fees by configured margin
-        if expected_profit <= trading_fee * config.PROFIT_MARGIN_MULTIPLIER:
-            self.logger.info(f"Skipping reverse order - insufficient profit margin: {expected_profit:.4f}% vs required: {trading_fee * config.PROFIT_MARGIN_MULTIPLIER:.4f}%")
+        # Calculate round-trip trading fee (as decimal)
+        round_trip_fee = config.TRADING_FEE_RATE * 2
+        
+        # Calculate minimum required profit with margin multiplier (as decimal)
+        min_required_profit = round_trip_fee * config.PROFIT_MARGIN_MULTIPLIER
+        
+        # Compare using consistent decimal units
+        if expected_profit_decimal <= min_required_profit:
+            # Convert to percentage only for logging purposes
+            expected_profit_pct = expected_profit_decimal * 100
+            min_required_profit_pct = min_required_profit * 100
             
-            # IMPORTANT: Place a replacement grid order to maintain grid density
+            self.logger.info(
+                f"Skipping reverse order - insufficient profit margin: "
+                f"{expected_profit_pct:.4f}% vs required: {min_required_profit_pct:.4f}%"
+            )
+            
+            # Place a replacement grid order to maintain grid density
             self._place_replacement_grid_order(level_index, float(price))
             return False
         
         # Use config value for minimum order check
-        min_order_value = config.MIN_NOTIONAL_VALUE  # Use configured minimum notional value
+        min_order_value = config.MIN_NOTIONAL_VALUE
         order_value = float(formatted_quantity) * float(formatted_price)
         if order_value < min_order_value:
             self.logger.info(f"Skipping small order - value too low: {order_value:.2f} USDT < {min_order_value} USDT")

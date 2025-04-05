@@ -25,9 +25,9 @@ WS_RECONNECT_DELAY = 5  # 重连间隔时间(秒)，增大可避免频繁重连�
 # 交易设置
 SYMBOL = "TRXUSDT"  # 默认交易对为"TRXUSDT"，可修改为其他如"BTCUSDT"或"ETHUSDT"等
 GRID_LEVELS = 12  # 网格数量，增加数值可提高交易频率但需要更多资金
-GRID_SPACING = 0.15  # 网格间距(%)，增大可捕获更大波动，减小可提高交易频次
+GRID_SPACING = 0.0015  # 网格间距 (0.15%)
 CAPITAL_PER_LEVEL = 15  # 每个网格的资金(USDT)，增加可提高利润但需要更多总资金
-GRID_RANGE_PERCENT = 2.0  # 总网格价格范围(%)，增大可覆盖更大波动，减小则集中在小范围
+GRID_RANGE_PERCENT = 0.02  # 总网格价格范围 (2.0%)
 RECALCULATION_PERIOD = 1  # 网格重新计算周期(天)，减小可更频繁更新网格位置
 ATR_PERIOD = 14  # ATR指标周期，增大可减少敏感度，减小可对短期波动更敏感
 
@@ -47,7 +47,7 @@ CAPITAL_SIZE = "standard"  # 资金规模，可选值："small"(小资金优化)
 # 订单管理
 MAX_ORDER_AGE_HOURS = 4  # 订单最长存在时间(小时)，减小可更频繁更新长期未成交订单
 PRICE_DEVIATION_THRESHOLD = 0.015  # 过期订单距离当前价格阈值，减小可更激进地更新订单
-PROFIT_MARGIN_MULTIPLIER = 1.2  # 利润与手续费比率要求，增大可提高每笔交易利润要求
+PROFIT_MARGIN_MULTIPLIER = 1.2  # 利润必须是交易费用的倍数
 BUY_SELL_SPREAD = 0.25  # 买卖差价百分比，增大可提高利润但降低成交概率
 
 # 风险管理设置
@@ -57,7 +57,7 @@ RISK_UPDATE_THRESHOLD_PERCENT = 0.0025  # 风险阈值更新百分比，减小�
 RISK_UPDATE_INTERVAL_MINUTES = 5  # 风险更新间隔(分钟)，减小可更频繁更新止损止盈
 
 # 高级交易设置
-TRADING_FEE_RATE = 0.06  # 交易手续费率(%)，根据实际费率调整，影响利润计算
+TRADING_FEE_RATE = 0.0006  # 单向交易手续费率 (0.06%)
 MIN_NOTIONAL_VALUE = 6   # 最小订单价值(USDT)，低于此值的订单将被跳过
 
 # Telegram设置
