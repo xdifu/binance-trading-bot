@@ -423,8 +423,8 @@ class GridTradingBot:
     
     def _auto_start_grid_trading(self):
         """
-        Automatically start grid trading without requiring Telegram command.
-        This ensures the bot can start trading immediately after system startup or restart.
+        Automatically start grid trading with balanced assets without requiring Telegram command.
+        Ensures proper asset distribution before initiating grid trading.
         """
         try:
             if not self.grid_trader:
@@ -436,15 +436,15 @@ class GridTradingBot:
                 logger.info("Grid trading already running, skipping auto-start")
                 return
             
-            logger.info("Auto-starting grid trading")
+            logger.info("Auto-starting grid trading with balanced assets")
             
-            # Start grid trading (same process as when /startgrid is called)
-            result = self.grid_trader.start()
+            # Use balanced grid start method to ensure proper asset distribution
+            result = self.grid_trader.start_balanced_grid()
             
             # Log and notify about the auto-start
             logger.info(f"Auto-start grid trading result: {result}")
             if self.telegram_bot:
-                self.telegram_bot.send_message(f"🤖 Grid trading auto-started on system initialization: {result}")
+                self.telegram_bot.send_message(f"🤖 Grid trading auto-started with balanced assets: {result}")
             
             # If grid trader is running and risk manager exists, activate it
             if self.grid_trader.is_running and self.risk_manager:
