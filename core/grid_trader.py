@@ -345,8 +345,8 @@ class GridTrader:
     
     def start_balanced_grid(self, simulation=False):
         """
-        Start grid trading with initial asset balance optimization.
-        Ensures sufficient base asset by performing an initial purchase if necessary.
+        Start grid trading with optimal asset balance for symmetric grid trading.
+        Dynamically calculates required base asset purchase to reach target allocation.
         
         Args:
             simulation: Whether to run in simulation mode (no real orders)
@@ -369,52 +369,86 @@ class GridTrader:
         base_balance = self.binance_client.check_balance(base_asset)
         usdt_balance = self.binance_client.check_balance('USDT')
         
-        # Check if base asset is severely lacking (< 10% of portfolio)
+        # Calculate current portfolio value and distribution
         base_value_in_usdt = base_balance * current_price
         total_value_in_usdt = base_value_in_usdt + usdt_balance
         
-        # Only proceed with balance adjustment if needed and not in simulation mode
+        # Target ratio: 40% base asset, 60% USDT - optimal for most grid setups
+        target_base_ratio = 0.4
+        current_base_ratio = base_value_in_usdt / total_value_in_usdt if total_value_in_usdt > 0 else 0
+        
+        # Determine if and how much to purchase - only if we're below target and not in simulation
         initial_purchase_made = False
-        if base_value_in_usdt < (total_value_in_usdt * 0.1) and not simulation:
-            # Use 40% of available USDT to purchase base asset
-            purchase_usdt = usdt_balance * 0.4
-            quantity_to_buy = purchase_usdt / current_price
+        
+        if not simulation and current_base_ratio < target_base_ratio:
+            # Calculate required USDT to reach target ratio
+            target_base_value = total_value_in_usdt * target_base_ratio
+            needed_base_value = target_base_value - base_value_in_usdt
             
-            # Format quantity according to exchange requirements
-            formatted_quantity = self._adjust_quantity_precision(quantity_to_buy)
+            # Apply safety constraints to purchase amount:
+            # 1. No more than 80% of available USDT to preserve some buying power
+            # 2. Minimum 5 USDT purchase to avoid dust
+            # 3. At least 10% gap from target to avoid unnecessary small trades
+            min_purchase = 5  # Minimum USDT purchase to avoid dust
             
-            # Notify about the planned purchase
-            message = f"Balancing portfolio: Converting {purchase_usdt:.4f} USDT to ~{formatted_quantity} {base_asset}"
-            self.logger.info(message)
-            
-            if self.telegram_bot:
-                self.telegram_bot.send_message(f"⚙️ {message}")
-            
-            try:
-                # Execute the market order
-                order = self.binance_client.place_market_order(
-                    self.symbol, 
-                    "BUY", 
-                    formatted_quantity
-                )
-                initial_purchase_made = True
+            if needed_base_value > (total_value_in_usdt * 0.05) and usdt_balance >= min_purchase:
+                # Calculate purchase amount with safety cap
+                max_purchase = usdt_balance * 0.8  # Safety cap: use at most 80% of USDT
+                purchase_usdt = min(needed_base_value, max_purchase)
+                purchase_usdt = max(purchase_usdt, min_purchase)  # Ensure minimum purchase size
                 
-                # Log the successful purchase
-                self.logger.info(f"Initial balance purchase complete. New {base_asset} balance: {self.binance_client.check_balance(base_asset)}")
+                # Calculate quantity to buy
+                quantity_to_buy = purchase_usdt / current_price
                 
-                # Allow time for balances to update
-                time.sleep(2)
+                # Format quantity according to exchange requirements
+                formatted_quantity = self._adjust_quantity_precision(quantity_to_buy)
                 
-            except Exception as e:
-                self.logger.error(f"Failed to execute initial balance purchase: {e}")
+                # Notify about the planned purchase
+                message = (f"Balancing portfolio for grid trading: "
+                          f"Current base ratio: {current_base_ratio*100:.1f}%, "
+                          f"Target: {target_base_ratio*100:.1f}%. "
+                          f"Converting {purchase_usdt:.4f} USDT to ~{formatted_quantity} {base_asset}")
+                self.logger.info(message)
+                
                 if self.telegram_bot:
-                    self.telegram_bot.send_message(f"⚠️ Failed to execute initial balance purchase: {e}")
+                    self.telegram_bot.send_message(f"⚙️ {message}")
+                
+                try:
+                    # Execute the market order
+                    order = self.binance_client.place_market_order(
+                        self.symbol, 
+                        "BUY", 
+                        formatted_quantity
+                    )
+                    initial_purchase_made = True
+                    
+                    # Calculate new ratio after purchase
+                    new_base_balance = self.binance_client.check_balance(base_asset)
+                    new_usdt_balance = self.binance_client.check_balance('USDT')
+                    new_ratio = (new_base_balance * current_price) / ((new_base_balance * current_price) + new_usdt_balance)
+                    
+                    # Log the successful purchase
+                    self.logger.info(f"Initial balance purchase complete. " 
+                                   f"New {base_asset} balance: {new_base_balance}, "
+                                   f"New base ratio: {new_ratio*100:.1f}%")
+                    
+                    # Allow time for balances to update
+                    time.sleep(2)
+                    
+                except Exception as e:
+                    self.logger.error(f"Failed to execute initial balance purchase: {e}")
+                    if self.telegram_bot:
+                        self.telegram_bot.send_message(f"⚠️ Failed to execute initial balance purchase: {e}")
+            else:
+                self.logger.info(f"No initial balance adjustment needed. "
+                              f"Current base asset ratio: {current_base_ratio*100:.1f}%, "
+                              f"Target: {target_base_ratio*100:.1f}%")
         
         # Start the normal grid trading process
         start_result = self.start(simulation)
         
         if initial_purchase_made:
-            return f"Initial balance adjusted. {start_result}"
+            return f"Initial balance adjusted for optimal grid trading. {start_result}"
         return start_result
     
     def stop(self):
