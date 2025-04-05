@@ -1082,15 +1082,6 @@ class GridTrader:
             if self._place_grid_order(level):
                 orders_placed += 1
         
-        # Check for additional funds that can be used for more buy orders
-        available_usdt = self.binance_client.check_balance('USDT') - self.pending_locks.get('USDT', 0)
-        additional_levels = int(available_usdt / (self.capital_per_level * 1.1))  # Use slightly higher capital requirement for safety
-        
-        if additional_levels > 0:
-            self.logger.info(f"Found unused USDT: {available_usdt}, creating {additional_levels} additional buy levels")
-            added_orders = self._add_additional_buy_levels(additional_levels)
-            orders_placed += added_orders
-        
         self.logger.info(f"Grid setup complete: {orders_placed} orders placed out of {len(self.grid)} grid levels")
         return orders_placed > 0
     
