@@ -28,7 +28,7 @@ WS_RECONNECT_DELAY = 5  # 重连间隔时间(秒)，增大可避免频繁重连�
 # 交易基本设置
 #############################################
 
-SYMBOL = "TSTUSDT"  # 默认交易对为"TRXUSDT"，可修改为其他如"BTCUSDT"或"ETHUSDT"等
+SYMBOL = "GUNUSDT"  # 默认交易对为"GUNUSDT"，可修改为其他如"BTCUSDT"或"ETHUSDT"等
 CAPITAL_PER_LEVEL = 15  # 每个网格的资金(USDT)，增加可提高利润但需要更多总资金
 CAPITAL_SIZE = "standard"  # 资金规模，可选值："small"(小资金优化) 或 "standard"(标准资金)
 
