@@ -60,7 +60,9 @@ class GridTrader:
         
         # Apply optimized settings for small capital accounts ($64)
         # Increase grid levels for more frequent trading opportunities
-        self.grid_levels = max(min(config.GRID_LEVELS, 12), 5)  # Enforce range of 5-12 grid levels
+        self.config_grid_levels = max(min(config.GRID_LEVELS, 12), 5)  # Preserve configured grid level target
+        self.current_grid_levels = self.config_grid_levels  # Track live grid level usage without modifying the target
+        self.grid_levels = self.config_grid_levels  # Backward compatibility alias for external references
         
         # Calculate dynamic grid spacing based on market volatility using ATR
         initial_atr = self._get_current_atr()
@@ -97,7 +99,7 @@ class GridTrader:
         self.last_atr_value = None
         
         # Log the optimized settings
-        self.logger.info(f"Using optimized grid settings: {self.grid_levels} levels, {self.grid_spacing*100:.2f}% spacing")
+        self.logger.info(f"Using optimized grid settings: {self.config_grid_levels} levels, {self.grid_spacing*100:.2f}% spacing")
         
         # Further initialization code...
         self.grid = []  # [{'price': float, 'order_id': int, 'side': str}]
@@ -605,7 +607,7 @@ class GridTrader:
     def _setup_grid(self):
         """
         Set up grid levels and place initial orders.
-        
+
         This method calculates grid levels based on current market price and ATR.
         It includes fallback mechanisms for ATR calculation failures.
         """
@@ -638,7 +640,37 @@ class GridTrader:
         
         # Place grid orders using the unified method
         self._initialize_grid_orders()
-    
+
+    def _determine_available_grid_levels(self, total_available_usdt):
+        """Calculate the number of grid levels supported by available capital."""
+        configured_levels = self.config_grid_levels
+        min_levels = 3
+
+        if total_available_usdt is None:
+            self.logger.warning("Available balance is unknown; defaulting to configured grid levels")
+            return configured_levels
+
+        try:
+            effective_funds = max(float(total_available_usdt), 0.0)
+        except (TypeError, ValueError):
+            self.logger.warning("Invalid balance value received; defaulting to configured grid levels")
+            return configured_levels
+
+        level_cost = self.capital_per_level * 0.8
+        if level_cost <= 0:
+            return configured_levels
+
+        affordable_levels = int(effective_funds / level_cost)
+        available_levels = max(min_levels, min(configured_levels, affordable_levels))
+
+        if affordable_levels < min_levels and configured_levels >= min_levels:
+            self.logger.warning(
+                "Available funds support fewer than minimum grid levels; using safety minimum of %s",
+                min_levels,
+            )
+
+        return available_levels
+
     def _calculate_grid_levels(self):
         """
         Calculate asymmetric grid price levels with funds concentrated near the optimal center.
@@ -657,15 +689,35 @@ class GridTrader:
         try:
             # Calculate maximum possible grid count based on available funds
             total_available_usdt = self.binance_client.check_balance('USDT')
-            adjusted_grid_levels = min(self.grid_levels, int(total_available_usdt / (self.capital_per_level * 0.8)))
-            if adjusted_grid_levels != self.grid_levels:
-                self.logger.info(f"Adjusted grid levels from {self.grid_levels} to {adjusted_grid_levels} based on available funds: {total_available_usdt} USDT")
-                self.grid_levels = max(adjusted_grid_levels, 3)  # Ensure at least 3 grid levels
-    
+            available_grid_levels = self._determine_available_grid_levels(total_available_usdt)
+            previous_grid_levels = getattr(self, "current_grid_levels", self.config_grid_levels)
+
+            if available_grid_levels < self.config_grid_levels:
+                self.logger.info(
+                    "Adjusted grid levels from %s to %s based on available funds: %s USDT",
+                    self.config_grid_levels,
+                    available_grid_levels,
+                    total_available_usdt,
+                )
+            elif previous_grid_levels < self.config_grid_levels and available_grid_levels == self.config_grid_levels:
+                self.logger.info(
+                    "Available funds recovered; restoring configured grid level target of %s",
+                    self.config_grid_levels,
+                )
+
+            grid_level_limit = available_grid_levels
+
+            self.logger.debug(
+                "Using %s grid levels (configured target %s) with %s USDT available",
+                grid_level_limit,
+                self.config_grid_levels,
+                total_available_usdt,
+            )
+
             # Use mean reversion optimized center instead of current market price
             grid_center, grid_range_percent = self.calculate_optimal_grid_center()
             current_price = grid_center  # Replace current price with calculated center
-            
+
             # Check validity of calculated center
             if current_price <= 0:
                 self.logger.error(f"Invalid grid center price: {current_price}")
@@ -717,11 +769,11 @@ class GridTrader:
     
             # Adjust if total exceeds grid level limit
             total_needed = core_levels_needed + edge_levels_needed
-            if total_needed > self.grid_levels:
+            if total_needed > grid_level_limit:
                 # Scale down proportionally while preserving minimums
-                ratio = self.grid_levels / total_needed
+                ratio = grid_level_limit / total_needed
                 core_levels = max(int(core_levels_needed * ratio), 2)
-                edge_levels = max(self.grid_levels - core_levels, 1)
+                edge_levels = max(grid_level_limit - core_levels, 1)
             else:
                 # Use calculated values directly
                 core_levels = core_levels_needed
@@ -750,9 +802,18 @@ class GridTrader:
             # --- Step 5: Sort and validate the grid ---
             grid_levels.sort(key=lambda x: x["price"])
             grid_levels = self._ensure_balanced_grid(grid_levels, upper_bound, lower_bound)
-            
+
+            actual_grid_levels = len(grid_levels)
+            if actual_grid_levels != grid_level_limit:
+                self.logger.debug(
+                    "Generated %s grid levels after balancing (target limit %s)",
+                    actual_grid_levels,
+                    grid_level_limit,
+                )
+
+            self.current_grid_levels = actual_grid_levels
             return grid_levels
-            
+
         except Exception as e:
             self.logger.error(f"Error calculating grid levels: {e}", exc_info=True)
             return []
