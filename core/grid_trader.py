@@ -1535,174 +1535,188 @@ class GridTrader:
     def _process_filled_order(self, matching_level, level_index, side, quantity, price):
         """
         Process a filled order and place the opposite order
-        
+
         Args:
             matching_level: Grid level that was filled
             level_index: Index of the level in the grid
             side: Order side (BUY/SELL)
             quantity: Order quantity
             price: Order price
-            
+
         Returns:
             bool: True if successful, False otherwise
         """
-        # Create opposite order
-        new_side = "SELL" if side == "BUY" else "BUY"
-        
-        # Adjust quantity precision
-        formatted_quantity = self._adjust_quantity_precision(quantity)
-        
-        # Set price with increased spread for new order using config parameter
-        buy_sell_spread = config.BUY_SELL_SPREAD  # Already stored as decimal fraction
-        if new_side == "SELL":
-            # For SELL orders after BUY executed
-            new_price = price * (1 + buy_sell_spread)
-            formatted_price = self._adjust_price_precision(new_price)
-        else:
-            # For BUY orders after SELL executed
-            new_price = price * (1 - buy_sell_spread)
-            formatted_price = self._adjust_price_precision(new_price)
-        
-        # Calculate expected profit as a decimal (not percentage)
-        expected_profit_decimal = abs(float(new_price) - float(price)) / float(price)
-        
-        # Calculate round-trip trading fee (as decimal)
-        round_trip_fee = config.TRADING_FEE_RATE * 2
-        
-        # Calculate minimum required profit with margin multiplier (as decimal)
-        min_required_profit = round_trip_fee * config.PROFIT_MARGIN_MULTIPLIER
-        
-        # Compare using consistent decimal units
-        if expected_profit_decimal <= min_required_profit:
-            # Convert to percentage only for logging purposes
-            expected_profit_pct = expected_profit_decimal * 100
-            min_required_profit_pct = min_required_profit * 100
-            
-            self.logger.info(
-                f"Skipping reverse order - insufficient profit margin: "
-                f"{expected_profit_pct:.4f}% vs required: {min_required_profit_pct:.4f}%"
-            )
-            
-            # Place a replacement grid order to maintain grid density
-            self._place_replacement_grid_order(level_index, float(price))
-            return False
-        
-        # Use config value for minimum order check
-        min_order_value = config.MIN_NOTIONAL_VALUE
-        order_value = float(formatted_quantity) * float(formatted_price)
-        if order_value < min_order_value:
-            self.logger.info(f"Skipping small order - value too low: {order_value:.2f} USDT < {min_order_value} USDT")
-            # Place replacement grid order to maintain grid density
-            self._place_replacement_grid_order(level_index, float(price))
-            return False
-        
-        # Double-check price formatting
-        if formatted_price == "0" or float(formatted_price) <= 0:
-            self.logger.error(f"Invalid formatted price: {formatted_price} for {price}, using minimum valid price")
-            formatted_price = self._adjust_price_precision(self.tick_size)  # Use minimum valid price
-        
-        # Determine capital for dynamic allocation
-        capital = self._calculate_dynamic_capital_for_level(float(formatted_price))
-        
-        # Now place the order using the regular order placement logic
-        if self.simulation_mode:
-            self.logger.info(f"Simulation - Would place opposite order: {new_side} {formatted_quantity} @ {formatted_price}")
-            matching_level['side'] = new_side
-            matching_level['order_id'] = f"sim_{int(time.time())}_{new_side}_{formatted_price}"
-            message = f"Grid trade executed (simulation): {side} {formatted_quantity} @ {price}\nOpposite order would be: {new_side} {formatted_quantity} @ {formatted_price}"
-            if self.telegram_bot:
-                self.telegram_bot.send_message(message)
-            return True
-        
-        # Check and lock funds - prevents race conditions
-        if new_side == 'BUY':
-            asset = 'USDT'
-            required = float(formatted_quantity) * float(formatted_price)
-        else:  # SELL
-            asset = self.symbol.replace('USDT', '')
-            required = float(formatted_quantity)
-        
-        # Try to lock the funds
-        if not self._lock_funds(asset, required):
-            message = f"⚠️ Cannot place opposite order: Insufficient {asset} balance. Required: {required}, Available: {self.binance_client.check_balance(asset) - self.pending_locks.get(asset, 0)}"
-            self.logger.warning(message)
-            if self.telegram_bot:
-                self.telegram_bot.send_message(message)
-            return False
-        
-        # Place the order with error handling
+        result = False
+        risk_manager = None
+        if side == "SELL" and self.telegram_bot and hasattr(self.telegram_bot, 'risk_manager'):
+            potential_manager = self.telegram_bot.risk_manager
+            if potential_manager and getattr(potential_manager, 'is_active', False):
+                risk_manager = potential_manager
+
         try:
-            order = self.binance_client.place_limit_order(
-                self.symbol, 
-                new_side, 
-                formatted_quantity, 
-                formatted_price
-            )
-            
-            # Update grid level
-            matching_level['side'] = new_side
-            matching_level['order_id'] = order['orderId']
-            
-            # Add to pending orders tracking if using WebSocket
-            if self.using_websocket:
-                self.pending_orders[str(order['orderId'])] = {
-                    'grid_index': level_index,
-                    'side': new_side,
-                    'price': float(formatted_price),
-                    'quantity': float(formatted_quantity),
-                    'timestamp': int(time.time()),
-                    'asset': asset,
-                    'required': required
-                }
-            
-            message = f"Grid trade executed: {side} {formatted_quantity} @ {price}\nOpposite order placed: {new_side} {formatted_quantity} @ {formatted_price}"
-            self.logger.info(message)
-            if self.telegram_bot:
-                self.telegram_bot.send_message(message)
-            return True
-            
-        except Exception as e:
-            # Release locked funds if order placement fails
-            self._release_funds(asset, required)
-            self.logger.error(f"Failed to place opposite order: {e}")
-            
-            # If WebSocket connection error, try with REST API
-            if "connection" in str(e).lower() and self.using_websocket:
+            while True:
+                # Create opposite order
+                new_side = "SELL" if side == "BUY" else "BUY"
+
+                # Adjust quantity precision
+                formatted_quantity = self._adjust_quantity_precision(quantity)
+
+                # Set price with increased spread for new order using config parameter
+                buy_sell_spread = config.BUY_SELL_SPREAD  # Already stored as decimal fraction
+                if new_side == "SELL":
+                    # For SELL orders after BUY executed
+                    new_price = price * (1 + buy_sell_spread)
+                    formatted_price = self._adjust_price_precision(new_price)
+                else:
+                    # For BUY orders after SELL executed
+                    new_price = price * (1 - buy_sell_spread)
+                    formatted_price = self._adjust_price_precision(new_price)
+
+                # Calculate expected profit as a decimal (not percentage)
+                expected_profit_decimal = abs(float(new_price) - float(price)) / float(price)
+
+                # Calculate round-trip trading fee (as decimal)
+                round_trip_fee = config.TRADING_FEE_RATE * 2
+
+                # Calculate minimum required profit with margin multiplier (as decimal)
+                min_required_profit = round_trip_fee * config.PROFIT_MARGIN_MULTIPLIER
+
+                # Compare using consistent decimal units
+                if expected_profit_decimal <= min_required_profit:
+                    # Convert to percentage only for logging purposes
+                    expected_profit_pct = expected_profit_decimal * 100
+                    min_required_profit_pct = min_required_profit * 100
+
+                    self.logger.info(
+                        f"Skipping reverse order - insufficient profit margin: "
+                        f"{expected_profit_pct:.4f}% vs required: {min_required_profit_pct:.4f}%"
+                    )
+
+                    # Place a replacement grid order to maintain grid density
+                    self._place_replacement_grid_order(level_index, float(price))
+                    result = False
+                    break
+
+                # Use config value for minimum order check
+                min_order_value = config.MIN_NOTIONAL_VALUE
+                order_value = float(formatted_quantity) * float(formatted_price)
+                if order_value < min_order_value:
+                    self.logger.info(f"Skipping small order - value too low: {order_value:.2f} USDT < {min_order_value} USDT")
+                    # Place replacement grid order to maintain grid density
+                    self._place_replacement_grid_order(level_index, float(price))
+                    result = False
+                    break
+
+                # Double-check price formatting
+                if formatted_price == "0" or float(formatted_price) <= 0:
+                    self.logger.error(f"Invalid formatted price: {formatted_price} for {price}, using minimum valid price")
+                    formatted_price = self._adjust_price_precision(self.tick_size)  # Use minimum valid price
+
+                # Determine capital for dynamic allocation
+                capital = self._calculate_dynamic_capital_for_level(float(formatted_price))
+
+                # Now place the order using the regular order placement logic
+                if self.simulation_mode:
+                    self.logger.info(f"Simulation - Would place opposite order: {new_side} {formatted_quantity} @ {formatted_price}")
+                    matching_level['side'] = new_side
+                    matching_level['order_id'] = f"sim_{int(time.time())}_{new_side}_{formatted_price}"
+                    message = f"Grid trade executed (simulation): {side} {formatted_quantity} @ {price}\nOpposite order would be: {new_side} {formatted_quantity} @ {formatted_price}"
+                    if self.telegram_bot:
+                        self.telegram_bot.send_message(message)
+                    result = True
+                    break
+
+                # Check and lock funds - prevents race conditions
+                if new_side == 'BUY':
+                    asset = 'USDT'
+                    required = float(formatted_quantity) * float(formatted_price)
+                else:  # SELL
+                    asset = self.symbol.replace('USDT', '')
+                    required = float(formatted_quantity)
+
+                # Try to lock the funds
+                if not self._lock_funds(asset, required):
+                    message = f"⚠️ Cannot place opposite order: Insufficient {asset} balance. Required: {required}, Available: {self.binance_client.check_balance(asset) - self.pending_locks.get(asset, 0)}"
+                    self.logger.warning(message)
+                    if self.telegram_bot:
+                        self.telegram_bot.send_message(message)
+                    result = False
+                    break
+
+                # Place the order with error handling
                 try:
-                    self.logger.warning("Connection error - falling back to REST API for opposite order")
-                    
-                    # Force update of client status
-                    client_status = self.binance_client.get_client_status()
-                    self.using_websocket = False  # Force REST for fallback
-                    
-                    # Try again with REST
                     order = self.binance_client.place_limit_order(
-                        self.symbol, 
-                        new_side, 
-                        formatted_quantity, 
+                        self.symbol,
+                        new_side,
+                        formatted_quantity,
                         formatted_price
                     )
-                    
-                    # Update grid
+
+                    # Update grid level
                     matching_level['side'] = new_side
                     matching_level['order_id'] = order['orderId']
-                    
-                    message = f"Grid trade executed: {side} {formatted_quantity} @ {price}\nOpposite order placed via fallback: {new_side} {formatted_quantity} @ {formatted_price}"
+
+                    # Add to pending orders tracking if using WebSocket
+                    if self.using_websocket:
+                        self.pending_orders[str(order['orderId'])] = {
+                            'grid_index': level_index,
+                            'side': new_side,
+                            'price': float(formatted_price),
+                            'quantity': float(formatted_quantity),
+                            'timestamp': int(time.time()),
+                            'asset': asset,
+                            'required': required
+                        }
+
+                    message = f"Grid trade executed: {side} {formatted_quantity} @ {price}\nOpposite order placed: {new_side} {formatted_quantity} @ {formatted_price}"
                     self.logger.info(message)
                     if self.telegram_bot:
                         self.telegram_bot.send_message(message)
-                    return True
-                except Exception as retry_error:
-                    self._release_funds(asset, required)  # Make sure to release funds on retry failure
-                    self.logger.error(f"Fallback order placement also failed: {retry_error}")
-            return False
-        
-        # Notify risk manager to update OCO orders after SELL order fills (creates base asset)
-        if side == "SELL" and self.telegram_bot and hasattr(self.telegram_bot, 'risk_manager') and self.telegram_bot.risk_manager:
-            risk_manager = self.telegram_bot.risk_manager
-            if risk_manager.is_active:
-                self.logger.info(f"SELL order filled, triggering OCO order update")
+                    result = True
+                except Exception as e:
+                    # Release locked funds if order placement fails
+                    self._release_funds(asset, required)
+                    self.logger.error(f"Failed to place opposite order: {e}")
+
+                    # If WebSocket connection error, try with REST API
+                    if "connection" in str(e).lower() and self.using_websocket:
+                        try:
+                            self.logger.warning("Connection error - falling back to REST API for opposite order")
+
+                            # Force update of client status
+                            client_status = self.binance_client.get_client_status()
+                            self.using_websocket = False  # Force REST for fallback
+
+                            # Try again with REST
+                            order = self.binance_client.place_limit_order(
+                                self.symbol,
+                                new_side,
+                                formatted_quantity,
+                                formatted_price
+                            )
+
+                            # Update grid
+                            matching_level['side'] = new_side
+                            matching_level['order_id'] = order['orderId']
+
+                            message = f"Grid trade executed: {side} {formatted_quantity} @ {price}\nOpposite order placed via fallback: {new_side} {formatted_quantity} @ {formatted_price}"
+                            self.logger.info(message)
+                            if self.telegram_bot:
+                                self.telegram_bot.send_message(message)
+                            result = True
+                        except Exception as retry_error:
+                            self._release_funds(asset, required)  # Make sure to release funds on retry failure
+                            self.logger.error(f"Fallback order placement also failed: {retry_error}")
+                            result = False
+                    else:
+                        result = False
+                break
+        finally:
+            if risk_manager:
+                self.logger.info("SELL order filled, triggering OCO order update")
                 risk_manager._check_for_missing_oco_orders()
+
+        return result
 
     # OPTIMIZED: New helper method for capital calculation
     def _calculate_dynamic_capital_for_level(self, price):
