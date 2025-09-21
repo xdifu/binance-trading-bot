@@ -177,23 +177,37 @@ class BinanceClient:
     def _execute_with_fallback(self, ws_method_name, rest_method_name, *args, **kwargs):
         """
         Execute a method with WebSocket API first, falling back to REST API if needed
-        
+
         Args:
             ws_method_name: Method name to call on the WebSocket client
             rest_method_name: Method name to call on the REST client
             *args, **kwargs: Arguments to pass to both methods
-        
+
         Returns:
             Result from either WebSocket or REST API
         """
+        ws_specific_kwargs = kwargs.pop('_ws_kwargs', None)
+        rest_specific_kwargs = kwargs.pop('_rest_kwargs', None)
+
+        base_kwargs = dict(kwargs)
+        rest_kwargs = dict(base_kwargs)
+        if rest_specific_kwargs:
+            rest_kwargs.update(rest_specific_kwargs)
+
+        if ws_specific_kwargs:
+            ws_kwargs = dict(base_kwargs)
+            ws_kwargs.update(ws_specific_kwargs)
+        else:
+            ws_kwargs = dict(rest_kwargs)
+
         # Periodically re-sync time
         current_time = int(time.time())
         if current_time - self.last_time_sync > self.time_sync_interval:
             self._sync_time()
-            
+
         # For methods that require signed requests, add adjusted timestamp
         if any(keyword in rest_method_name for keyword in ['account', 'order', 'oco', 'myTrades', 'openOrders']):
-            if 'timestamp' not in kwargs:
+            if 'timestamp' not in rest_kwargs:
                 # Calculate adaptive safety offset based on current time offset
                 # If already behind (negative offset), use smaller safety margin
                 # If ahead (positive offset), use larger safety margin
@@ -205,16 +219,19 @@ class BinanceClient:
                     # Local time is behind server time, use standard safety offset
                     safety_offset = -500  # Standard 500ms behind
 
-                kwargs['timestamp'] = self._get_timestamp() + safety_offset
-                self.logger.debug(f"Added timestamp with adaptive safety offset {safety_offset}ms: {kwargs['timestamp']} to {rest_method_name}")
-                
+                timestamp_value = self._get_timestamp() + safety_offset
+                rest_kwargs['timestamp'] = timestamp_value
+                if 'timestamp' not in ws_kwargs:
+                    ws_kwargs['timestamp'] = timestamp_value
+                self.logger.debug(f"Added timestamp with adaptive safety offset {safety_offset}ms: {rest_kwargs['timestamp']} to {rest_method_name}")
+
         # Try WebSocket API first if available
         if self.websocket_available and self.ws_client:
             try:
                 # Get the method from WebSocket client
                 ws_method = getattr(self.ws_client, ws_method_name, None)
                 if ws_method:
-                    return ws_method(*args, **kwargs)
+                    return ws_method(*args, **ws_kwargs)
                 else:
                     self.logger.debug(f"Method {ws_method_name} not found in WebSocket client")
             except Exception as e:
@@ -223,18 +240,18 @@ class BinanceClient:
                 if "connection" in str(e).lower() or "websocket" in str(e).lower():
                     self.websocket_available = False
                     self.logger.warning("WebSocket API marked as unavailable, switching to REST fallback")
-                
+
         # Fall back to REST API
         if self.rest_client:
             try:
                 rest_method = getattr(self.rest_client, rest_method_name)
                 self.logger.debug(f"Using REST API fallback for {rest_method_name}")
-                return rest_method(*args, **kwargs)
+                return rest_method(*args, **rest_kwargs)
             except ClientError as e:
                 # Enhanced handling for timestamp errors
                 if hasattr(e, 'error_code') and e.error_code == -1021:
                     self.logger.warning(f"Timestamp error detected ({e}), performing emergency time sync")
-                    
+
                     # Force immediate time sync with multiple attempts
                     sync_success = False
                     for attempt in range(3):
@@ -243,20 +260,23 @@ class BinanceClient:
                             self.logger.info(f"Emergency time sync successful on attempt {attempt+1}")
                             break
                         time.sleep(1)
-                    
+
                     if not sync_success:
                         self.logger.error("All emergency time sync attempts failed")
                         raise
-                    
+
                     # Retry the request with newly synced timestamp
-                    if 'timestamp' in kwargs:
+                    if 'timestamp' in rest_kwargs:
                         # Use a conservative (far behind) timestamp to ensure success
-                        kwargs['timestamp'] = self._get_timestamp() + (self.time_offset - 1000)  # Full offset plus 1000ms safety
-                        self.logger.info(f"Retrying with adjusted timestamp: {kwargs['timestamp']}")
-                    
+                        adjusted_timestamp = self._get_timestamp() + (self.time_offset - 1000)  # Full offset plus 1000ms safety
+                        rest_kwargs['timestamp'] = adjusted_timestamp
+                        if 'timestamp' in ws_kwargs:
+                            ws_kwargs['timestamp'] = adjusted_timestamp
+                        self.logger.info(f"Retrying with adjusted timestamp: {rest_kwargs['timestamp']}")
+
                     # Retry the request
                     rest_method = getattr(self.rest_client, rest_method_name)
-                    return rest_method(*args, **kwargs)
+                    return rest_method(*args, **rest_kwargs)
                 else:
                     # For other errors, just log and re-raise
                     self.logger.error(f"REST API fallback call failed for {rest_method_name}: {e}")
@@ -506,39 +526,49 @@ class BinanceClient:
             **kwargs: Additional parameters to pass to the API
         """
         try:
-            # Create params dictionary with all parameters
-            all_params = {
+            base_params = {
                 "symbol": symbol,
                 "side": side,
                 "quantity": quantity,
                 "price": price,
                 "stopPrice": stopPrice
             }
-            
-            # Add optional parameters
+
             if stopLimitPrice:
-                all_params["stopLimitPrice"] = stopLimitPrice
-                all_params["stopLimitTimeInForce"] = stopLimitTimeInForce
-            
-            # Handle aboveType and belowType parameters (for REST API only)
-            # These parameters are ignored by WebSocket API
+                base_params["stopLimitPrice"] = stopLimitPrice
+                base_params["stopLimitTimeInForce"] = stopLimitTimeInForce
+
+            rest_params = dict(base_params)
+            ws_params = dict(base_params)
+            ws_only_params = {}
+
+            for key, value in kwargs.items():
+                if key in ("aboveType", "belowType"):
+                    ws_only_params[key] = value
+                elif key not in rest_params:
+                    rest_params[key] = value
+                    ws_params[key] = value
+
             if aboveType is not None:
-                all_params["aboveType"] = aboveType
-            elif "aboveType" not in kwargs:
-                all_params["aboveType"] = "LIMIT_MAKER"  # Default value
-                
+                ws_params["aboveType"] = aboveType
+            elif "aboveType" in ws_only_params:
+                ws_params["aboveType"] = ws_only_params["aboveType"]
+            else:
+                ws_params.setdefault("aboveType", "LIMIT_MAKER")
+
             if belowType is not None:
-                all_params["belowType"] = belowType
-            elif "belowType" not in kwargs:
-                all_params["belowType"] = "LIMIT_MAKER"  # Default value
-            
-            # Merge other parameters
-            for k, v in kwargs.items():
-                if k not in all_params:
-                    all_params[k] = v
-            
-            # Call WebSocket or REST API
-            response = self._execute_with_fallback("new_oco_order", "new_oco_order", **all_params)
+                ws_params["belowType"] = belowType
+            elif "belowType" in ws_only_params:
+                ws_params["belowType"] = ws_only_params["belowType"]
+            else:
+                ws_params.setdefault("belowType", "LIMIT_MAKER")
+
+            response = self._execute_with_fallback(
+                "new_oco_order",
+                "new_oco_order",
+                _ws_kwargs=ws_params,
+                **rest_params
+            )
                 
             # Check if response contains error information
             if isinstance(response, dict) and 'error' in response:
