@@ -1800,7 +1800,44 @@ class GridTrader:
             previous_locks = self.pending_locks.copy()
             self.pending_locks = {}
             self.logger.info(f"Reset all pending locks. Previous locks: {previous_locks}")
-    
+
+    def _check_for_unfilled_grid_slots(self):
+        """Ensure each grid level has an active order and place replacements when needed"""
+        if not self.is_running or self.simulation_mode:
+            return 0
+
+        replacements = 0
+
+        for index, level in enumerate(self.grid):
+            order_id = level.get('order_id')
+
+            if order_id:
+                continue
+
+            if 'price' not in level or 'side' not in level:
+                self.logger.warning(
+                    f"Grid level {index} missing required data for replacement order: {level}"
+                )
+                continue
+
+            try:
+                if self._place_grid_order(level):
+                    replacements += 1
+                else:
+                    self.logger.warning(
+                        f"Failed to place replacement order for grid level {index} at price {level.get('price')}"
+                    )
+            except BinanceAPIException as api_error:
+                self.logger.error(
+                    f"Binance API error while replacing missing order at grid level {index}: {api_error}"
+                )
+            except Exception as error:
+                self.logger.error(
+                    f"Unexpected error while replacing missing order at grid level {index}: {error}"
+                )
+
+        return replacements
+
     def _check_for_stale_orders(self):
         """Cancel and reallocate orders that have been open too long without execution"""
         if not self.is_running or self.simulation_mode:
