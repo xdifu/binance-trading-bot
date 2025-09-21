@@ -1,4 +1,3 @@
-import math
 import decimal
 from decimal import Decimal, ROUND_FLOOR, ROUND_HALF_UP, getcontext
 
@@ -101,8 +100,8 @@ def format_quantity(quantity, precision):
     # Binance要求数量必须向下取整到step_size的倍数
     # 使用ROUND_FLOOR确保总是向下取整
     factor = decimal_quantity / step_size
-    whole_factor = Decimal(math.floor(factor))  # 向下取整
-    floored_quantity = whole_factor * step_size
+    whole_factor = factor.to_integral_value(rounding=ROUND_FLOOR)
+    floored_quantity = (whole_factor * step_size).quantize(step_size, rounding=ROUND_FLOOR)
     
     # 格式化为正确的小数位数
     formatted = f"{floored_quantity:.{precision}f}"
