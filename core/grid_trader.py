@@ -111,6 +111,7 @@ class GridTrader:
         # Replace locked_balances with pending_locks
         self.pending_locks = {}  # Track temporarily locked funds before order submission
         self.balance_lock = threading.RLock()  # Thread-safe lock for balance operations
+        self.grid_lock = threading.RLock()  # Protect grid structure during concurrent access
         
         # Initialize trend tracking attribute
         self.trend_strength = 0
@@ -1427,7 +1428,11 @@ class GridTrader:
         stale_orders_count = self._check_for_stale_orders()
         if stale_orders_count > 0:
             self.logger.info(f"Rebalanced {stale_orders_count} stale orders")
-        
+
+        unfilled_orders = self._check_for_unfilled_grid_slots()
+        if unfilled_orders > 0:
+            self.logger.info(f"Recreated {unfilled_orders} missing grid orders")
+
         return False
     
     def _reconcile_grid_with_open_orders(self):
@@ -1800,12 +1805,81 @@ class GridTrader:
             previous_locks = self.pending_locks.copy()
             self.pending_locks = {}
             self.logger.info(f"Reset all pending locks. Previous locks: {previous_locks}")
-    
+
+    def _check_for_unfilled_grid_slots(self):
+        """Ensure each grid level has an active order on the exchange."""
+        if not self.is_running:
+            return 0
+
+        if self.simulation_mode:
+            self.logger.debug("Skipping unfilled grid slot check while running in simulation mode")
+            return 0
+
+        try:
+            open_orders = self.binance_client.get_open_orders(symbol=self.symbol)
+        except Exception as fetch_error:
+            self.logger.error(f"Failed to fetch open orders during grid slot check: {fetch_error}")
+            return 0
+
+        open_order_ids = {
+            str(order.get('orderId'))
+            for order in open_orders
+            if order and order.get('orderId') is not None
+        }
+
+        replacements = 0
+
+        try:
+            with self.grid_lock:
+                for index, level in enumerate(self.grid):
+                    try:
+                        order_id = level.get('order_id')
+                        if not order_id:
+                            self.logger.warning(
+                                f"Grid level {index} at price {level.get('price')} is missing an order; submitting replacement"
+                            )
+                            level['timestamp'] = None
+                            if self._place_grid_order(level):
+                                replacements += 1
+                            else:
+                                self.logger.warning(
+                                    f"Failed to submit replacement order for grid level {index} at price {level.get('price')}"
+                                )
+                            continue
+
+                        str_order_id = str(order_id)
+                        if str_order_id not in open_order_ids:
+                            self.logger.warning(
+                                f"Grid level {index} order {str_order_id} missing from exchange open orders; re-submitting"
+                            )
+                            level['order_id'] = None
+                            level['timestamp'] = None
+                            if str_order_id in self.pending_orders:
+                                self.pending_orders.pop(str_order_id, None)
+                            if self._place_grid_order(level):
+                                replacements += 1
+                            else:
+                                self.logger.warning(
+                                    f"Failed to submit replacement order for grid level {index} at price {level.get('price')}"
+                                )
+                    except Exception as level_error:
+                        self.logger.error(
+                            f"Unexpected error while validating grid level {index} for missing orders: {level_error}"
+                        )
+
+            if replacements > 0:
+                self.logger.info(f"Submitted {replacements} replacement orders for unfilled grid levels")
+
+            return replacements
+        except Exception as grid_error:
+            self.logger.error(f"Failed to complete unfilled grid slot check: {grid_error}")
+            return replacements
+
     def _check_for_stale_orders(self):
         """Cancel and reallocate orders that have been open too long without execution"""
         if not self.is_running or self.simulation_mode:
             return 0
-            
+
         current_time = int(time.time())
         max_order_age = 2 * 3600  # 2 hours in seconds
         
