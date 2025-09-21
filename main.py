@@ -90,49 +90,78 @@ class GridTradingBot:
 
     def _handle_websocket_message(self, message):
         """Process WebSocket messages with focus on business logic only"""
+        def _process_dict_message(msg):
+            if ('e' in msg and msg['e'] == 'kline' and
+                'k' in msg and 'c' in msg.get('k', {}) and
+                's' in msg):  # Added check for 's' key
+
+                symbol = msg['s']
+                price = float(msg['k']['c'])
+
+                if symbol == config.SYMBOL:
+                    if self.risk_manager and self.risk_manager.is_active:
+                        self.risk_manager.check_price(price)
+
+            elif 'e' in msg and msg['e'] == 'executionReport':
+                self.grid_trader.handle_order_update(msg)
+
+            elif 'e' in msg and msg['e'] == 'listStatus':
+                self._handle_oco_update(msg)
+
+            elif 'e' in msg and msg['e'] in (
+                'outboundAccountPosition',
+                'outboundAccountInfo',
+                'balanceUpdate'
+            ):
+                if self._handle_account_position_update(msg):
+                    self.logger.info(f"Account update event handled: {msg['e']}")
+
+        handled = False
         try:
             # Handle kline events for price updates
-            if (hasattr(message, 'e') and message.e == 'kline' and 
-                hasattr(message, 'k') and hasattr(message.k, 'c') and 
+            if (hasattr(message, 'e') and message.e == 'kline' and
+                hasattr(message, 'k') and hasattr(message.k, 'c') and
                 hasattr(message, 's')):  # Added check for 's' attribute
-                
+
                 symbol = message.s
                 price = float(message.k.c)
-                
+
                 if symbol == config.SYMBOL:
                     # Check risk management conditions if active
                     if self.risk_manager and self.risk_manager.is_active:
                         self.risk_manager.check_price(price)
-            
+                handled = True
+
             # Handle execution reports for order updates
             elif hasattr(message, 'e') and message.e == 'executionReport':
                 self.grid_trader.handle_order_update(message)
-                
+                handled = True
+
             # Handle order list status updates (OCO orders)
             elif hasattr(message, 'e') and message.e == 'listStatus':
                 self._handle_oco_update(message)
-                
+                handled = True
+
+            elif (
+                hasattr(message, 'e') and message.e in (
+                    'outboundAccountPosition',
+                    'outboundAccountInfo',
+                    'balanceUpdate'
+                )
+            ):
+                if self._handle_account_position_update(message):
+                    self.logger.info(f"Account update event handled: {message.e}")
+                handled = True
+
         except AttributeError:
             # Handle dict-format messages as fallback
             if isinstance(message, dict):
-                if ('e' in message and message['e'] == 'kline' and 
-                    'k' in message and 'c' in message.get('k', {}) and
-                    's' in message):  # Added check for 's' key
-                    
-                    symbol = message['s']
-                    price = float(message['k']['c'])
-                    
-                    if symbol == config.SYMBOL:
-                        if self.risk_manager and self.risk_manager.is_active:
-                            self.risk_manager.check_price(price)
-                
-                elif 'e' in message and message['e'] == 'executionReport':
-                    self.grid_trader.handle_order_update(message)
-                    
-                elif 'e' in message and message['e'] == 'listStatus':
-                    self._handle_oco_update(message)
+                _process_dict_message(message)
         except Exception as e:
             self.logger.error(f"Failed to process WebSocket message: {e}")
+        else:
+            if not handled and isinstance(message, dict):
+                _process_dict_message(message)
         
     def _handle_oco_update(self, message):
         """Handle OCO order updates with standardized access pattern"""
@@ -173,26 +202,30 @@ class GridTradingBot:
         """
         Handle account position updates from WebSocket stream.
         Detects when balances exceed thresholds and triggers grid/OCO order checks.
-        
+
         Args:
             message: Account position update message from WebSocket
         """
         try:
+            if not self.grid_trader or not getattr(self.grid_trader, 'symbol', None):
+                self.logger.warning("Account position update received but grid trader is not ready")
+                return False
+
             # Extract trading pair assets
             base_asset = self.grid_trader.symbol.replace('USDT', '')
             quote_asset = 'USDT'
-            
+
             # Extract balances from message (handling both object and dict formats)
             balances = []
             if hasattr(message, 'B'):
                 balances = message.B
             elif isinstance(message, dict) and 'B' in message:
                 balances = message['B']
-            
+
             # Track if relevant assets exceed threshold
             check_grid = False
             check_oco = False
-            
+
             # Process each balance update
             for balance_item in balances:
                 # Extract asset and free amount (with object/dict format handling)
@@ -215,19 +248,28 @@ class GridTradingBot:
             
             # Use separate threads to avoid blocking WebSocket processing
             if check_grid and self.grid_trader and self.grid_trader.is_running:
-                threading.Thread(
+                grid_thread = threading.Thread(
                     target=self.grid_trader._check_for_unfilled_grid_slots,
                     daemon=True
-                ).start()
-                
+                )
+                grid_thread.start()
+                if grid_thread.is_alive():
+                    self.logger.info("Started grid maintenance thread after balance update")
+
             if check_oco and self.risk_manager and self.risk_manager.is_active:
-                threading.Thread(
+                oco_thread = threading.Thread(
                     target=self.risk_manager._check_for_missing_oco_orders,
                     daemon=True
-                ).start()
-                
+                )
+                oco_thread.start()
+                if oco_thread.is_alive():
+                    self.logger.info("Started OCO maintenance thread after balance update")
+
+            return True
+
         except Exception as e:
             self.logger.error(f"Error processing account position update: {e}")
+            return False
 
     def _websocket_error_handler(self, error):
         """Handle WebSocket errors"""
