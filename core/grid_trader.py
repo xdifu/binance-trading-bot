@@ -1553,7 +1553,7 @@ class GridTrader:
         formatted_quantity = self._adjust_quantity_precision(quantity)
         
         # Set price with increased spread for new order using config parameter
-        buy_sell_spread = config.BUY_SELL_SPREAD / 100  # Convert percentage to decimal
+        buy_sell_spread = config.BUY_SELL_SPREAD  # Already stored as decimal fraction
         if new_side == "SELL":
             # For SELL orders after BUY executed
             new_price = price * (1 + buy_sell_spread)
