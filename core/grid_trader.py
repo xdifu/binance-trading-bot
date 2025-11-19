@@ -314,15 +314,16 @@ class GridTrader:
         
         for level in temp_grid:
             price = level['price']
-            if price > 0:
-                quantity = self.capital_per_level / price
-            else:
+            capital = level.get('capital', self.capital_per_level)
+            if price <= 0:
                 self.logger.error(f"Invalid price value: {price}. Skipping grid level.")
                 continue
             
+            quantity = capital / price
+            
             if level['side'] == 'BUY':
                 # Buy orders need USDT
-                usdt_needed += self.capital_per_level
+                usdt_needed += capital
             else:
                 # Sell orders need base asset
                 base_needed += quantity
@@ -591,18 +592,22 @@ class GridTrader:
         Format quantity with appropriate precision for LOT_SIZE filter compliance
         
         Args:
-        # Validate that quantity is a valid number
-        if not isinstance(quantity, (int, float)) or quantity <= 0:
-            self.logger.error(f"Invalid quantity value: {quantity}")
-            raise ValueError(f"Invalid quantity value: {quantity}")
-        
-        # Directly use format_quantity from utils
-        return format_quantity(quantity, self.quantity_precision)
+            quantity (float|str): Original quantity value
+            
         Returns:
             str: Formatted quantity string
         """
-        # Directly use format_quantity from utils
-        return format_quantity(quantity, self.quantity_precision)
+        try:
+            numeric_quantity = float(quantity)
+        except (TypeError, ValueError):
+            self.logger.error(f"Invalid quantity value: {quantity}")
+            raise ValueError(f"Invalid quantity value: {quantity}")
+        
+        if numeric_quantity <= 0:
+            self.logger.error(f"Quantity must be positive: {quantity}")
+            raise ValueError(f"Quantity must be positive: {quantity}")
+        
+        return format_quantity(numeric_quantity, self.quantity_precision)
     
     def _setup_grid(self):
         """
@@ -922,8 +927,10 @@ class GridTrader:
                 limit=24  # Use 24 hours for reliable trend assessment
             )
             trend = self.calculate_trend_strength(klines=trend_klines, lookback=15)  # Reduced lookback for better responsiveness
-            
-            self.logger.info(f"Market metrics calculated using mixed timeframes - ATR: {atr:.8f}, Trend: {trend:.2f}")
+
+            atr_display = f"{atr:.8f}" if isinstance(atr, (int, float, np.floating)) else "N/A"
+            trend_display = f"{trend:.2f}" if isinstance(trend, (int, float, np.floating)) else "N/A"
+            self.logger.info(f"Market metrics calculated using mixed timeframes - ATR: {atr_display}, Trend: {trend_display}")
             return atr, trend
             
         except Exception as e:
@@ -1728,6 +1735,9 @@ class GridTrader:
                             'asset': asset,
                             'required': required
                         }
+                    
+                    # Release local lock once Binance has accepted the order
+                    self._release_funds(asset, required)
 
                     message = f"Grid trade executed: {side} {formatted_quantity} @ {price}\nOpposite order placed: {new_side} {formatted_quantity} @ {formatted_price}"
                     self.logger.info(message)
@@ -1759,6 +1769,7 @@ class GridTrader:
                             # Update grid
                             matching_level['side'] = new_side
                             matching_level['order_id'] = order['orderId']
+                            self._release_funds(asset, required)
 
                             message = f"Grid trade executed: {side} {formatted_quantity} @ {price}\nOpposite order placed via fallback: {new_side} {formatted_quantity} @ {formatted_price}"
                             self.logger.info(message)
@@ -1835,19 +1846,23 @@ class GridTrader:
         with self.balance_lock:
             # Get directly available balance from Binance (already accounts for open orders)
             available = self.binance_client.check_balance(asset)
+            locked_amount = self.pending_locks.get(asset, 0.0)
+            effective_available = max(available - locked_amount, 0.0)
             
             # Check if we have enough available balance
-            if available < amount:
+            if effective_available < amount:
                 self.logger.warning(
                     f"Insufficient {asset} balance for order: "
-                    f"Required: {amount}, Available: {available}"
+                    f"Required: {amount}, Available: {available}, "
+                    f"Locked: {locked_amount}"
                 )
                 return False
             
             # Lock the funds temporarily until order is submitted
-            self.pending_locks[asset] = self.pending_locks.get(asset, 0) + amount
+            self.pending_locks[asset] = locked_amount + amount
             self.logger.debug(
-                f"Temporarily locked {amount} {asset}, pending locks: {self.pending_locks[asset]}"
+                f"Temporarily locked {amount} {asset}, effective free: {effective_available}, "
+                f"pending locks: {self.pending_locks[asset]}"
             )
             return True
     
@@ -1919,13 +1934,17 @@ class GridTrader:
             return 0
             
         current_time = int(time.time())
-        max_order_age = 2 * 3600  # 2 hours in seconds
+        max_order_age_hours = max(1, getattr(config, "MAX_ORDER_AGE_HOURS", 4))
+        max_order_age = max_order_age_hours * 3600
+        base_deviation_threshold = max(0.0005, getattr(config, "PRICE_DEVIATION_THRESHOLD", 0.015))
         
         # Track orders to cancel
         orders_to_cancel = []
         
         # Get current market price
         current_price = self.binance_client.get_symbol_price(self.symbol)
+        if not current_price:
+            return 0
         
         # First identify stale orders far from current price
         for i, level in enumerate(self.grid):
@@ -1936,7 +1955,7 @@ class GridTrader:
                 # Dynamic price deviation threshold based on order age
                 # The longer an order exists, the smaller the price deviation needed to cancel
                 time_factor = min(1, order_age / max_order_age)
-                deviation_threshold = 0.01 + (0.01 * (1 - time_factor))  
+                deviation_threshold = base_deviation_threshold * (1 + (1 - time_factor))
                 
                 # Calculate distance from current price
                 price_distance = abs(level['price'] - current_price) / current_price

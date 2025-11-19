@@ -111,6 +111,10 @@ class GridTradingBot:
             # Handle order list status updates (OCO orders)
             elif hasattr(message, 'e') and message.e == 'listStatus':
                 self._handle_oco_update(message)
+            
+            # Handle account balance/position updates
+            elif hasattr(message, 'e') and message.e in ('outboundAccountPosition', 'outboundAccountInfo'):
+                self._handle_account_position_update(message)
                 
         except AttributeError:
             # Handle dict-format messages as fallback
@@ -131,41 +135,71 @@ class GridTradingBot:
                     
                 elif 'e' in message and message['e'] == 'listStatus':
                     self._handle_oco_update(message)
+                
+                elif 'e' in message and message['e'] in ('outboundAccountPosition', 'outboundAccountInfo'):
+                    self._handle_account_position_update(message)
         except Exception as e:
             self.logger.error(f"Failed to process WebSocket message: {e}")
         
     def _handle_oco_update(self, message):
         """Handle OCO order updates with standardized access pattern"""
         try:
-            # Extract properties safely regardless of object or dict format
-            status = getattr(message, 'L', None) if hasattr(message, 'L') else message.get('L')
-            order_list_id = getattr(message, 'i', None) if hasattr(message, 'i') else message.get('i')
-            list_type = getattr(message, 'l', None) if hasattr(message, 'l') else message.get('l')
-                
-            if status in ('EXECUTING', 'ALL_DONE'):
-                # Check if this is our risk management OCO order
-                if (self.risk_manager and self.risk_manager.is_active and 
-                    self.risk_manager.oco_order_id == order_list_id):
-                    
-                    if status == 'ALL_DONE':
-                        logger.info(f"Risk management OCO order executed: {order_list_id}")
-                        
-                        # Check which side was executed and take appropriate action
-                        if list_type == 'STOP_LOSS_LIMIT':
-                            logger.info("Stop loss order executed")
-                            if self.telegram_bot:
-                                self.telegram_bot.send_message("Stop loss order executed, grid trading stopped")
-                            # Stop grid trading
-                            self.grid_trader.stop()
-                        elif list_type == 'LIMIT_MAKER':
-                            logger.info("Take profit order executed")
-                            if self.telegram_bot:
-                                self.telegram_bot.send_message("Take profit order executed, grid trading stopped")
-                            # Stop grid trading
-                            self.grid_trader.stop()
-                        
-                        # Reset OCO order ID
-                        self.risk_manager.oco_order_id = None
+            def _get_attr(obj, key, default=None):
+                if hasattr(obj, key):
+                    return getattr(obj, key)
+                if isinstance(obj, dict):
+                    return obj.get(key, default)
+                if hasattr(obj, "get"):
+                    try:
+                        return obj.get(key, default)
+                    except Exception:
+                        return default
+                return default
+            
+            status_type = _get_attr(message, 'l')
+            order_list_status = _get_attr(message, 'L')
+            order_list_id = _get_attr(message, 'g') or _get_attr(message, 'i')
+            
+            if not self.risk_manager or not self.risk_manager.is_active or not self.risk_manager.oco_order_id:
+                return
+            
+            if order_list_id is None or str(order_list_id) != str(self.risk_manager.oco_order_id):
+                return
+            
+            is_final = status_type == 'ALL_DONE' or order_list_status == 'ALL_DONE'
+            if not is_final:
+                return
+            
+            logger.info(f"Risk management OCO order executed: {order_list_id}")
+            orders = _get_attr(message, 'O', []) or []
+            filled_type = None
+            for order in orders:
+                order_status = _get_attr(order, 'X') or _get_attr(order, 'x')
+                order_type = _get_attr(order, 'o') or _get_attr(order, 'O')
+                if order_status == 'FILLED':
+                    filled_type = order_type
+                    break
+            
+            event_type = None
+            if filled_type in ('STOP_LOSS', 'STOP_LOSS_LIMIT'):
+                event_type = 'stop_loss'
+            elif filled_type in ('LIMIT_MAKER', 'TAKE_PROFIT', 'TAKE_PROFIT_LIMIT', 'LIMIT'):
+                event_type = 'take_profit'
+            
+            if event_type == 'stop_loss':
+                logger.info("Stop loss leg filled, halting grid trading")
+                if self.telegram_bot:
+                    self.telegram_bot.send_message("Stop loss order executed, grid trading stopped")
+                self.grid_trader.stop()
+            elif event_type == 'take_profit':
+                logger.info("Take profit leg filled, halting grid trading")
+                if self.telegram_bot:
+                    self.telegram_bot.send_message("Take profit order executed, grid trading stopped")
+                self.grid_trader.stop()
+            else:
+                logger.info("OCO order completed but filled leg could not be determined")
+            
+            self.risk_manager.oco_order_id = None
         except Exception as e:
             logger.error(f"Failed to process OCO order update: {e}")
 
