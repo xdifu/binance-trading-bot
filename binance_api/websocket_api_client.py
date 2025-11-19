@@ -943,3 +943,53 @@ class BinanceWSClient:
         except Exception as e:
             self.logger.error(f"Connectivity check failed: {e}")
             return False
+
+    def new_oco_order(self, symbol, side, quantity, price, stopPrice, stopLimitPrice=None, 
+                     stopLimitTimeInForce="GTC", aboveType=None, belowType=None, **kwargs):
+        """
+        Create an OCO order via WebSocket API
+        
+        For SELL orders (risk management):
+        - above leg: LIMIT_MAKER (take profit - executed when price rises)
+        - below leg: STOP_LOSS (stop loss - triggered when price drops)
+        
+        For BUY orders:
+        - above leg: STOP_LOSS (stop loss - triggered when price rises)
+        - below leg: LIMIT_MAKER (take profit - executed when price drops)
+        """
+        try:
+            # Create core parameters
+            params = {
+                "symbol": symbol,
+                "side": side,
+                "quantity": str(quantity)  # Ensure string format
+            }
+            
+            if side == "SELL":  # Risk management OCO for selling
+                # Above leg is LIMIT_MAKER (take profit - executed when price rises)
+                params["aboveType"] = "LIMIT_MAKER"
+                params["abovePrice"] = str(price)  # Take profit price
+                
+                # Below leg is STOP_LOSS (stop loss - triggered when price drops)
+                params["belowType"] = "STOP_LOSS"
+                params["belowStopPrice"] = str(stopPrice)  # Stop loss trigger price
+            
+            else:  # BUY order OCO
+                # Above leg is STOP_LOSS (stop loss - triggered when price rises)
+                params["aboveType"] = "STOP_LOSS"
+                params["aboveStopPrice"] = str(stopPrice)  # Stop loss trigger price
+                
+                # Below leg is LIMIT_MAKER (take profit - executed when price drops)
+                params["belowType"] = "LIMIT_MAKER"
+                params["belowPrice"] = str(price)  # Take profit price
+            
+            # Log the parameters for debugging
+            self.logger.debug(f"Sending OCO order via WebSocket: {params}")
+            
+            # Send the request using the orderList.place.oco endpoint
+            request_id = self.client._send_signed_request("orderList.place.oco", params)
+            return self.client._wait_for_response(request_id)
+            
+        except Exception as e:
+            self.logger.error(f"Error creating OCO order via WebSocket API: {e}")
+            raise

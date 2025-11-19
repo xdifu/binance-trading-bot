@@ -1,5 +1,6 @@
 import logging
 import time
+import threading
 from threading import Thread, RLock
 from datetime import datetime
 import sys
@@ -77,7 +78,8 @@ class GridTradingBot:
         # Initialize risk management
         self.risk_manager = RiskManager(
             binance_client=self.binance_client,
-            telegram_bot=self.telegram_bot
+            telegram_bot=self.telegram_bot,
+            grid_trader=self.grid_trader  # Add reference to grid_trader
         )
         logger.info("Risk management module initialized successfully")
         
@@ -166,6 +168,66 @@ class GridTradingBot:
                         self.risk_manager.oco_order_id = None
         except Exception as e:
             logger.error(f"Failed to process OCO order update: {e}")
+
+    def _handle_account_position_update(self, message):
+        """
+        Handle account position updates from WebSocket stream.
+        Detects when balances exceed thresholds and triggers grid/OCO order checks.
+        
+        Args:
+            message: Account position update message from WebSocket
+        """
+        try:
+            # Extract trading pair assets
+            base_asset = self.grid_trader.symbol.replace('USDT', '')
+            quote_asset = 'USDT'
+            
+            # Extract balances from message (handling both object and dict formats)
+            balances = []
+            if hasattr(message, 'B'):
+                balances = message.B
+            elif isinstance(message, dict) and 'B' in message:
+                balances = message['B']
+            
+            # Track if relevant assets exceed threshold
+            check_grid = False
+            check_oco = False
+            
+            # Process each balance update
+            for balance_item in balances:
+                # Extract asset and free amount (with object/dict format handling)
+                asset = getattr(balance_item, 'a', None) if hasattr(balance_item, 'a') else balance_item.get('a')
+                free_amount = 0
+                if hasattr(balance_item, 'f'):
+                    free_amount = float(balance_item.f)
+                elif isinstance(balance_item, dict) and 'f' in balance_item:
+                    free_amount = float(balance_item['f'])
+                
+                # Check USDT for grid orders
+                if asset == quote_asset and free_amount >= config.CAPITAL_PER_LEVEL:
+                    self.logger.info(f"Balance update: Detected {free_amount} {quote_asset}, checking for unfilled grid slots")
+                    check_grid = True
+                
+                # Check base asset for OCO orders
+                elif asset == base_asset and free_amount > 0:
+                    self.logger.info(f"Balance update: Detected {free_amount} {base_asset}, checking for missing OCO orders")
+                    check_oco = True
+            
+            # Use separate threads to avoid blocking WebSocket processing
+            if check_grid and self.grid_trader and self.grid_trader.is_running:
+                threading.Thread(
+                    target=self.grid_trader._check_for_unfilled_grid_slots,
+                    daemon=True
+                ).start()
+                
+            if check_oco and self.risk_manager and self.risk_manager.is_active:
+                threading.Thread(
+                    target=self.risk_manager._check_for_missing_oco_orders,
+                    daemon=True
+                ).start()
+                
+        except Exception as e:
+            self.logger.error(f"Error processing account position update: {e}")
 
     def _websocket_error_handler(self, error):
         """Handle WebSocket errors"""
@@ -323,8 +385,10 @@ class GridTradingBot:
                     time.sleep(60)  # Wait longer before next attempt
     
     def _grid_maintenance_thread(self):
-        """Grid maintenance thread with improved timing precision"""
-        last_check = datetime.now()
+        """Grid maintenance thread with improved timing precision and unfilled slot checking"""
+        last_grid_check = datetime.now()
+        last_unfilled_check = datetime.now()
+        last_oco_check = datetime.now()  # Add new timestamp for OCO checks
         
         while True:
             try:
@@ -336,9 +400,20 @@ class GridTradingBot:
                 now = datetime.now()
                 
                 # Check grid recalculation using configuration constant
-                if (now - last_check).total_seconds() > GRID_RECALCULATION_INTERVAL:
+                if (now - last_grid_check).total_seconds() > GRID_RECALCULATION_INTERVAL:
                     self.grid_trader.check_grid_recalculation()
-                    last_check = now
+                    last_grid_check = now
+                
+                # Check for unfilled grid slots every 15 minutes
+                if (now - last_unfilled_check).total_seconds() > 15 * 60:  # 15 minutes
+                    self.grid_trader._check_for_unfilled_grid_slots()
+                    last_unfilled_check = now
+                
+                # Check for missing OCO orders every 5 minutes
+                if (now - last_oco_check).total_seconds() > 5 * 60:  # 5 minutes
+                    if self.risk_manager and self.risk_manager.is_active:
+                        self.risk_manager._check_for_missing_oco_orders()
+                    last_oco_check = now
                 
                 # Short sleep to allow for timely shutdown
                 time.sleep(MAINTENANCE_THREAD_SLEEP)
@@ -346,6 +421,49 @@ class GridTradingBot:
                 logger.error(f"Grid maintenance failed: {e}")
                 time.sleep(MAINTENANCE_THREAD_SLEEP)
     
+    def _auto_start_grid_trading(self):
+        """
+        Automatically start grid trading with balanced assets without requiring Telegram command.
+        Ensures proper asset distribution before initiating grid trading.
+        """
+        try:
+            if not self.grid_trader:
+                logger.error("Cannot auto-start trading: Grid trader not initialized")
+                return
+            
+            # Check if grid trading is already running
+            if self.grid_trader.is_running:
+                logger.info("Grid trading already running, skipping auto-start")
+                return
+            
+            logger.info("Auto-starting grid trading with balanced assets")
+            
+            # Use balanced grid start method to ensure proper asset distribution
+            result = self.grid_trader.start_balanced_grid()
+            
+            # Log and notify about the auto-start
+            logger.info(f"Auto-start grid trading result: {result}")
+            if self.telegram_bot:
+                self.telegram_bot.send_message(f"🤖 Grid trading auto-started with balanced assets: {result}")
+            
+            # If grid trader is running and risk manager exists, activate it
+            if self.grid_trader.is_running and self.risk_manager:
+                # Ensure grid has prices before activating risk manager
+                if hasattr(self.grid_trader, 'grid') and self.grid_trader.grid and len(self.grid_trader.grid) > 0:
+                    grid_prices = [level['price'] for level in self.grid_trader.grid]
+                    if grid_prices:  # Double-check that we have prices
+                        self.risk_manager.activate(min(grid_prices), max(grid_prices))
+                        logger.info("Risk manager activated with grid price range")
+                    else:
+                        logger.warning("Cannot activate risk manager: No grid prices available")
+                else:
+                    logger.warning("Cannot activate risk manager: Grid is empty")
+        except Exception as e:
+            # Log any errors but don't crash the bot
+            logger.error(f"Error during auto-start of grid trading: {e}")
+            if self.telegram_bot:
+                self.telegram_bot.send_message(f"⚠️ Error during auto-start of grid trading: {str(e)}")
+
     def start(self):
         """Start the bot with proper state management"""
         with self.state_lock:
@@ -364,6 +482,9 @@ class GridTradingBot:
         
         # Set up WebSocket connection
         self._setup_websocket()
+        
+        # Auto-start grid trading - this will automatically start trading without manual intervention
+        self._auto_start_grid_trading()
         
         # Start grid maintenance thread
         maintenance_thread = Thread(target=self._grid_maintenance_thread, daemon=True)

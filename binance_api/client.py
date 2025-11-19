@@ -104,49 +104,62 @@ class BinanceClient:
                 raise
     
     def _sync_time(self):
-        """Synchronize local time with Binance server time with RTT compensation"""
+        """Synchronize local time with Binance server time with enhanced accuracy"""
         try:
-            # Record request start time
-            request_start_ms = int(time.time() * 1000)
-            
-            # Get server time
-            server_time = self.rest_client.time()
-            
-            # Record response received time
-            request_end_ms = int(time.time() * 1000)
-            
-            if server_time and 'serverTime' in server_time:
-                server_time_ms = server_time['serverTime']
-                
-                # Calculate RTT (Round Trip Time)
-                rtt_ms = request_end_ms - request_start_ms
-                
-                # Estimate one-way network delay (assuming symmetric path)
-                one_way_delay_ms = rtt_ms / 2
-                
-                # Calculate time offset with one-way delay compensation
-                # server_time - (local_time_at_request + one_way_delay)
-                self.time_offset = server_time_ms - (request_start_ms + one_way_delay_ms)
-                
-                # Log detailed information
-                time_diff_sec = abs(self.time_offset) / 1000
-                self.logger.info(f"Time sync with {self.base_url}: offset={self.time_offset:.2f}ms, RTT={rtt_ms:.2f}ms ({time_diff_sec:.2f}s)")
-                
-                # Record last sync time
-                self.last_time_sync = int(time.time())
-                
-                # Check if time difference is significant
-                if time_diff_sec > 1:
-                    self.logger.warning(f"Local time is {'ahead of' if self.time_offset < 0 else 'behind'} server by {time_diff_sec:.2f}s")
+            # Take multiple samples to improve accuracy
+            samples = []
+            for i in range(3):  # Take 3 samples
+                try:
+                    # Record request start time
+                    request_start_ms = int(time.time() * 1000)
                     
-                    # Attempt system clock sync if running as root and time diff is large
-                    if time_diff_sec > 1 and os.geteuid() == 0:
-                        self.logger.info("Attempting to sync system clock with Binance server time")
-                        # System clock synchronization code would go here
-                
-                return True
-                
-            return False
+                    # Get server time
+                    server_time = self.rest_client.time()
+                    
+                    # Record response received time
+                    request_end_ms = int(time.time() * 1000)
+                    
+                    if server_time and 'serverTime' in server_time:
+                        server_time_ms = server_time['serverTime']
+                        
+                        # Calculate RTT (Round Trip Time)
+                        rtt_ms = request_end_ms - request_start_ms
+                        
+                        # Estimate one-way network delay (assuming symmetric path)
+                        one_way_delay_ms = rtt_ms / 2
+                        
+                        # Calculate time offset with one-way delay compensation
+                        offset = server_time_ms - (request_start_ms + one_way_delay_ms)
+                        
+                        # Store sample with its RTT
+                        samples.append((offset, rtt_ms))
+                    
+                    # Small delay between samples
+                    time.sleep(0.5)
+                except Exception as e:
+                    self.logger.warning(f"Time sync sample {i+1} failed: {e}")
+            
+            if not samples:
+                self.logger.error("All time synchronization samples failed")
+                return False
+            
+            # Use the sample with the lowest RTT for best accuracy
+            samples.sort(key=lambda x: x[1])  # Sort by RTT
+            self.time_offset = samples[0][0]  # Use offset from lowest RTT sample
+            
+            # Log detailed information
+            rtt_ms = samples[0][1]
+            time_diff_sec = abs(self.time_offset) / 1000
+            self.logger.info(f"Time sync with {self.base_url}: offset={self.time_offset:.2f}ms, RTT={rtt_ms:.2f}ms ({time_diff_sec:.2f}s)")
+            
+            # Record last sync time
+            self.last_time_sync = int(time.time())
+            
+            # Check if time difference is significant
+            if time_diff_sec > 1:
+                self.logger.warning(f"Local time is {'ahead of' if self.time_offset < 0 else 'behind'} server by {time_diff_sec:.2f}s")
+            
+            return True
         except Exception as e:
             self.logger.error(f"Time synchronization failed: {e}")
             return False
@@ -164,43 +177,61 @@ class BinanceClient:
     def _execute_with_fallback(self, ws_method_name, rest_method_name, *args, **kwargs):
         """
         Execute a method with WebSocket API first, falling back to REST API if needed
-        
+
         Args:
             ws_method_name: Method name to call on the WebSocket client
             rest_method_name: Method name to call on the REST client
             *args, **kwargs: Arguments to pass to both methods
-        
+
         Returns:
             Result from either WebSocket or REST API
         """
+        ws_specific_kwargs = kwargs.pop('_ws_kwargs', None)
+        rest_specific_kwargs = kwargs.pop('_rest_kwargs', None)
+
+        base_kwargs = dict(kwargs)
+        rest_kwargs = dict(base_kwargs)
+        if rest_specific_kwargs:
+            rest_kwargs.update(rest_specific_kwargs)
+
+        if ws_specific_kwargs:
+            ws_kwargs = dict(base_kwargs)
+            ws_kwargs.update(ws_specific_kwargs)
+        else:
+            ws_kwargs = dict(rest_kwargs)
+
         # Periodically re-sync time
         current_time = int(time.time())
         if current_time - self.last_time_sync > self.time_sync_interval:
             self._sync_time()
-            
+
         # For methods that require signed requests, add adjusted timestamp
         if any(keyword in rest_method_name for keyword in ['account', 'order', 'oco', 'myTrades', 'openOrders']):
-            if 'timestamp' not in kwargs:
+            if 'timestamp' not in rest_kwargs:
                 # Calculate adaptive safety offset based on current time offset
                 # If already behind (negative offset), use smaller safety margin
                 # If ahead (positive offset), use larger safety margin
                 if self.time_offset < 0:
-                    # Already behind server time, use smaller safety offset
-                    safety_offset = min(-100, int(self.time_offset / 10))  # At most -100ms or 10% of existing lag
+                    # Local time is ahead of server time - use full offset plus safety margin
+                    # This ensures we compensate for the entire time difference plus extra
+                    safety_offset = self.time_offset - 500  # Full offset plus 500ms safety margin
                 else:
-                    # At or ahead of server time, use standard safety offset
-                    safety_offset = -1000  # Standard 1 second behind
+                    # Local time is behind server time, use standard safety offset
+                    safety_offset = -500  # Standard 500ms behind
 
-                kwargs['timestamp'] = self._get_timestamp() + safety_offset
-                self.logger.debug(f"Added timestamp with adaptive safety offset {safety_offset}ms: {kwargs['timestamp']} to {rest_method_name}")
-                
+                timestamp_value = self._get_timestamp() + safety_offset
+                rest_kwargs['timestamp'] = timestamp_value
+                if 'timestamp' not in ws_kwargs:
+                    ws_kwargs['timestamp'] = timestamp_value
+                self.logger.debug(f"Added timestamp with adaptive safety offset {safety_offset}ms: {rest_kwargs['timestamp']} to {rest_method_name}")
+
         # Try WebSocket API first if available
         if self.websocket_available and self.ws_client:
             try:
                 # Get the method from WebSocket client
                 ws_method = getattr(self.ws_client, ws_method_name, None)
                 if ws_method:
-                    return ws_method(*args, **kwargs)
+                    return ws_method(*args, **ws_kwargs)
                 else:
                     self.logger.debug(f"Method {ws_method_name} not found in WebSocket client")
             except Exception as e:
@@ -209,34 +240,47 @@ class BinanceClient:
                 if "connection" in str(e).lower() or "websocket" in str(e).lower():
                     self.websocket_available = False
                     self.logger.warning("WebSocket API marked as unavailable, switching to REST fallback")
-                
+
         # Fall back to REST API
         if self.rest_client:
             try:
-                # For timestamp errors, try to re-sync and retry once
-                try:
-                    rest_method = getattr(self.rest_client, rest_method_name)
-                    self.logger.debug(f"Using REST API fallback for {rest_method_name}")
-                    return rest_method(*args, **kwargs)
-                except ClientError as e:
-                    # Check for timestamp error and retry once with fresh sync
-                    if hasattr(e, 'error_code') and e.error_code == -1021:
-                        self.logger.warning("Timestamp error detected, re-syncing time and retrying...")
-                        self._sync_time()
-                        
-                        # Update timestamp in kwargs if it was a signed request
-                        if 'timestamp' in kwargs:
-                            kwargs['timestamp'] = self._get_timestamp()
-                            
-                        # Retry with updated timestamp
-                        rest_method = getattr(self.rest_client, rest_method_name)
-                        return rest_method(*args, **kwargs)
-                    else:
-                        # If not a timestamp error, re-raise
+                rest_method = getattr(self.rest_client, rest_method_name)
+                self.logger.debug(f"Using REST API fallback for {rest_method_name}")
+                return rest_method(*args, **rest_kwargs)
+            except ClientError as e:
+                # Enhanced handling for timestamp errors
+                if hasattr(e, 'error_code') and e.error_code == -1021:
+                    self.logger.warning(f"Timestamp error detected ({e}), performing emergency time sync")
+
+                    # Force immediate time sync with multiple attempts
+                    sync_success = False
+                    for attempt in range(3):
+                        if self._sync_time():
+                            sync_success = True
+                            self.logger.info(f"Emergency time sync successful on attempt {attempt+1}")
+                            break
+                        time.sleep(1)
+
+                    if not sync_success:
+                        self.logger.error("All emergency time sync attempts failed")
                         raise
-            except Exception as e:
-                self.logger.error(f"REST API fallback call failed for {rest_method_name}: {e}")
-                raise
+
+                    # Retry the request with newly synced timestamp
+                    if 'timestamp' in rest_kwargs:
+                        # Use a conservative (far behind) timestamp to ensure success
+                        adjusted_timestamp = self._get_timestamp() + (self.time_offset - 1000)  # Full offset plus 1000ms safety
+                        rest_kwargs['timestamp'] = adjusted_timestamp
+                        if 'timestamp' in ws_kwargs:
+                            ws_kwargs['timestamp'] = adjusted_timestamp
+                        self.logger.info(f"Retrying with adjusted timestamp: {rest_kwargs['timestamp']}")
+
+                    # Retry the request
+                    rest_method = getattr(self.rest_client, rest_method_name)
+                    return rest_method(*args, **rest_kwargs)
+                else:
+                    # For other errors, just log and re-raise
+                    self.logger.error(f"REST API fallback call failed for {rest_method_name}: {e}")
+                    raise
         else:
             raise RuntimeError("Neither WebSocket nor REST API client is available")
     
@@ -477,67 +521,81 @@ class BinanceClient:
             stopPrice: Stop price
             stopLimitPrice: Stop limit price (optional)
             stopLimitTimeInForce: Time in force for stop limit order (default: GTC)
-            aboveType: Legacy parameter (not used in current API)
-            belowType: Legacy parameter (not used in current API)
+            aboveType: Above leg order type (optional)
+            belowType: Below leg order type (optional)
             **kwargs: Additional parameters to pass to the API
-            
-        Returns:
-            dict: Order response
         """
         try:
-            # Validate and format all prices
-            try:
-                price_float = float(price)
-                stop_price_float = float(stopPrice)
-                
-                if price_float <= 0 or stop_price_float <= 0:
-                    self.logger.error(f"Invalid prices for OCO order: price={price}, stopPrice={stopPrice}")
-                    raise ValueError(f"Invalid prices for OCO order")
-            except (ValueError, TypeError):
-                self.logger.error(f"Non-numeric prices for OCO order: price={price}, stopPrice={stopPrice}")
-                raise ValueError(f"Non-numeric prices for OCO order")
-            
-            # Format all prices properly
-            formatted_price = self._adjust_price_precision(price_float)
-            formatted_stop_price = self._adjust_price_precision(stop_price_float)
-                
-            # Build base parameters
-            params = {
-                'symbol': symbol,
-                'side': side,
-                'quantity': str(quantity),
-                'price': formatted_price,
-                'stopPrice': formatted_stop_price,
-                'stopLimitTimeInForce': stopLimitTimeInForce
+            base_params = {
+                "symbol": symbol,
+                "side": side,
+                "quantity": quantity,
+                "price": price,
+                "stopPrice": stopPrice
             }
-            
-            # Handle stopLimitPrice with validation
+
             if stopLimitPrice:
-                try:
-                    stop_limit_price_float = float(stopLimitPrice)
-                    if stop_limit_price_float <= 0:
-                        self.logger.warning(f"Invalid stopLimitPrice: {stopLimitPrice}, calculating based on stopPrice")
-                        stop_limit_price_float = stop_price_float * 0.99  # 1% below stop price
-                except (ValueError, TypeError):
-                    self.logger.warning(f"Non-numeric stopLimitPrice: {stopLimitPrice}, calculating based on stopPrice")
-                    stop_limit_price_float = stop_price_float * 0.99  # 1% below stop price
-                    
-                params['stopLimitPrice'] = self._adjust_price_precision(stop_limit_price_float)
+                base_params["stopLimitPrice"] = stopLimitPrice
+                base_params["stopLimitTimeInForce"] = stopLimitTimeInForce
+
+            rest_params = dict(base_params)
+            ws_params = dict(base_params)
+            ws_only_params = {}
+
+            for key, value in kwargs.items():
+                if key in ("aboveType", "belowType"):
+                    ws_only_params[key] = value
+                elif key not in rest_params:
+                    rest_params[key] = value
+                    ws_params[key] = value
+
+            if aboveType is not None:
+                ws_params["aboveType"] = aboveType
+            elif "aboveType" in ws_only_params:
+                ws_params["aboveType"] = ws_only_params["aboveType"]
             else:
-                # If not provided, use a default value slightly below stopPrice
-                stop_limit_price_float = stop_price_float * 0.99  # 1% below stop price
-                params['stopLimitPrice'] = self._adjust_price_precision(stop_limit_price_float)
+                ws_params.setdefault("aboveType", "LIMIT_MAKER")
+
+            if belowType is not None:
+                ws_params["belowType"] = belowType
+            elif "belowType" in ws_only_params:
+                ws_params["belowType"] = ws_only_params["belowType"]
+            else:
+                ws_params.setdefault("belowType", "LIMIT_MAKER")
+
+            response = self._execute_with_fallback(
+                "new_oco_order",
+                "new_oco_order",
+                _ws_kwargs=ws_params,
+                **rest_params
+            )
                 
-            # Add other optional parameters
-            params.update(kwargs)
+            # Check if response contains error information
+            if isinstance(response, dict) and 'error' in response:
+                error_code = response.get('error', {}).get('code')
+                error_msg = response.get('error', {}).get('msg', 'Unknown error')
+                self.logger.error(f"OCO order failed with error {error_code}: {error_msg}")
+                # Return response with error info so caller knows order failed
+                return {"result": None, "error": response.get('error'), "success": False}
             
-            # Log the parameters for debugging
-            self.logger.debug(f"Sending OCO order with parameters: {params}")
-            
-            return self._execute_with_fallback("new_oco_order", "new_oco_order", **params)
+            # If using WebSocket API, also check status field
+            if isinstance(response, dict) and response.get('status', 200) != 200:
+                error_code = response.get('status')
+                error_msg = "Non-success status code"
+                self.logger.error(f"OCO order failed with status {error_code}")
+                return {"result": None, "error": {"code": error_code, "msg": error_msg}, "success": False}
+                
+            # Standardize response format and add success flag
+            standardized_response = self._standardize_oco_response(response)
+            if "result" in standardized_response and standardized_response["result"]:
+                standardized_response["success"] = True
+            else:
+                standardized_response["success"] = False
+                
+            return standardized_response
         except Exception as e:
             self.logger.error(f"Failed to create OCO order: {e}")
-            raise
+            return {"result": None, "error": {"code": -1000, "msg": str(e)}, "success": False}
             
     def check_balance(self, asset):
         """Check if balance is sufficient for an asset"""
@@ -609,3 +667,60 @@ class BinanceClient:
         Returns: bool - Whether the synchronization was successful
         """
         return self._sync_time()
+    
+    def _standardize_oco_response(self, response):
+        """Standardize OCO order response format to ensure dict-like access"""
+        
+        # Handle StandardizedMessage objects - convert them to dictionaries
+        if hasattr(response, '__class__') and response.__class__.__name__ == 'StandardizedMessage':
+            # Convert StandardizedMessage to dictionary
+            response_dict = {}
+            for attr in dir(response):
+                # Skip private attributes and methods
+                if not attr.startswith('_') and not callable(getattr(response, attr)):
+                    value = getattr(response, attr)
+                    # Recursively convert nested StandardizedMessage objects
+                    if hasattr(value, '__class__') and value.__class__.__name__ == 'StandardizedMessage':
+                        value = self._standardize_oco_response(value)
+                    response_dict[attr] = value
+            return {"result": response_dict}
+        
+        # If not a dict or StandardizedMessage, wrap in a dict with 'result' key
+        if not isinstance(response, dict):
+            return {"result": response}
+            
+        # If it's WebSocket API response format (contains result field)
+        if 'result' in response and isinstance(response['result'], dict):
+            return response
+        
+        # If it's REST API response format, wrap it
+        return {"result": response}
+    
+    def _adjust_sync_interval(self):
+        """Dynamically adjust time sync interval based on network conditions"""
+        try:
+            # Perform a quick RTT test to Binance
+            import socket
+            import time
+            
+            # Use TCP connection timing to measure network latency
+            host = "api.binance.com"
+            start = time.time()
+            s = socket.create_connection((host, 443), timeout=5)
+            s.close()
+            rtt_ms = (time.time() - start) * 1000
+            
+            # Adjust interval based on RTT
+            if rtt_ms > 300:  # High latency (Perth)
+                interval = 60 * 5  # Sync every 5 minutes
+                self.logger.info(f"High latency detected ({rtt_ms:.1f}ms), setting time sync interval to 5 minutes")
+            else:  # Low latency (Tokyo)
+                interval = 60 * 15  # Sync every 15 minutes
+                self.logger.info(f"Low latency detected ({rtt_ms:.1f}ms), setting time sync interval to 15 minutes")
+            
+            self.time_sync_interval = interval
+            return interval
+        except Exception as e:
+            # Default to 10 minutes if measurement fails
+            self.logger.warning(f"Failed to measure network latency: {e}, using default interval")
+            return 60 * 10  # Default 10 minute interval
