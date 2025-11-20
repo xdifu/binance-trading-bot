@@ -117,6 +117,8 @@ class BinanceWebSocketAPIClient:
         # Track user data stream subscription for reconnection recovery
         self.user_stream_active = False
         self.user_stream_subscription_id: Optional[int] = None
+        self._user_stream_keepalive_thread: Optional[threading.Thread] = None
+        self._user_stream_keepalive_stop = threading.Event()
         
         # Time synchronization variables
         self.time_offset = 0  # Time difference between local and server time in ms
@@ -423,6 +425,7 @@ class BinanceWebSocketAPIClient:
         self.logger.warning("Connection lost, cleaning up...")
         self.ws_connected = False
         self.session_authenticated = False
+        self._stop_user_stream_keepalive()
         
         if self.ws:
             try:
@@ -464,6 +467,7 @@ class BinanceWebSocketAPIClient:
         self.logger.info("Closing WebSocket connection...")
         self.is_closed_by_user = True
         self._running = False
+        self._stop_user_stream_keepalive()
         
         # Clear all pending requests
         with self.lock:
@@ -534,8 +538,9 @@ class BinanceWebSocketAPIClient:
                             callback(data)
                 self.response_queue.put(data)
             # Handle push events (e.g., user data stream events)
-            elif 'event' in data:
-                event_payload = data.get('event')
+            elif 'event' in data or 'e' in data:
+                # Some WS-API payloads wrap events under "event", others deliver raw user-data events with "e".
+                event_payload = data.get('event') if 'event' in data else data
                 subscription_id = data.get('subscriptionId')
                 if self.event_callback:
                     try:
@@ -873,6 +878,7 @@ class BinanceWebSocketAPIClient:
             sub_id = response.get("result", {}).get("subscriptionId")
             self.user_stream_subscription_id = sub_id
             self.user_stream_active = True
+            self._start_user_stream_keepalive(sub_id)
         return response
 
     def unsubscribe_user_data_stream(self, subscription_id: Optional[int] = None) -> Dict:
@@ -889,7 +895,41 @@ class BinanceWebSocketAPIClient:
         response = self._wait_for_response(request_id)
         self.user_stream_active = False
         self.user_stream_subscription_id = None
+        self._stop_user_stream_keepalive()
         return response
+
+    def _start_user_stream_keepalive(self, subscription_id: Optional[int]) -> None:
+        """
+        Launch a background keepalive for signature-based user data streams.
+        Streams expire after 60 minutes unless pinged.
+        """
+        self._stop_user_stream_keepalive()
+        if subscription_id is None:
+            return
+
+        self._user_stream_keepalive_stop.clear()
+
+        def _keepalive():
+            interval = 30 * 60  # ping every 30 minutes
+            while not self._user_stream_keepalive_stop.wait(interval):
+                try:
+                    params = {"subscriptionId": subscription_id}
+                    req_id = self._send_signed_request("userDataStream.ping", params)
+                    self._wait_for_response(req_id, timeout=10)
+                    self.logger.debug(f"userDataStream.ping sent for subscriptionId={subscription_id}")
+                except Exception as e:
+                    self.logger.warning(f"userDataStream.ping failed: {e}")
+
+        self._user_stream_keepalive_thread = threading.Thread(target=_keepalive, daemon=True)
+        self._user_stream_keepalive_thread.start()
+
+    def _stop_user_stream_keepalive(self) -> None:
+        """Stop keepalive if running."""
+        self._user_stream_keepalive_stop.set()
+        thread = self._user_stream_keepalive_thread
+        if thread and thread.is_alive():
+            thread.join(timeout=1)
+        self._user_stream_keepalive_thread = None
 
     # Helper method to verify private key
     def verify_private_key(self):

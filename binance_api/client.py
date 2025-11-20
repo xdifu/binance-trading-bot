@@ -205,6 +205,19 @@ class BinanceClient:
         adjusted_time = int(time.time() * 1000) + self.time_offset
         self.logger.debug(f"Using adjusted timestamp: {adjusted_time} (offset: {self.time_offset}ms)")
         return adjusted_time
+
+    def _apply_ws_time_offset(self):
+        """
+        Keep REST-side timestamp aligned with the WS-API client's latest offset to avoid drift.
+        """
+        try:
+            if self.websocket_available and self.ws_client and hasattr(self.ws_client, "client"):
+                ws_offset = getattr(self.ws_client.client, "time_offset", None)
+                if ws_offset is not None:
+                    self.time_offset = ws_offset
+                    self.last_time_sync = int(time.time())
+        except Exception as exc:
+            self.logger.debug(f"Failed to sync WS time offset: {exc}")
     
     def _execute_with_fallback(self, ws_method_name, rest_method_name, *args, **kwargs):
         """
@@ -238,6 +251,10 @@ class BinanceClient:
             self._sync_time()
 
         requires_signature = any(keyword in rest_method_name for keyword in ['account', 'order', 'oco', 'myTrades', 'openOrders'])
+
+        # Keep REST timestamps aligned with the WS client to avoid mixed offsets.
+        if requires_signature:
+            self._apply_ws_time_offset()
 
         if requires_signature and not getattr(self, "can_sign_requests", True):
             raise RuntimeError(
@@ -294,6 +311,9 @@ class BinanceClient:
                         time.sleep(0.5)
 
         # Fall back to REST API
+        if not self.websocket_available:
+            # Opportunistically retry WS reconnection before using REST to maintain WS preference.
+            self._retry_websocket_connection()
         if self.rest_client:
             try:
                 rest_method = getattr(self.rest_client, rest_method_name)
@@ -481,7 +501,18 @@ class BinanceClient:
             self.logger.error(f"Failed to get order book for {symbol}: {e}")
             raise
             
-    def place_limit_order(self, symbol, side, quantity, price):
+    def place_limit_order(
+        self,
+        symbol,
+        side,
+        quantity,
+        price,
+        time_in_force="GTC",
+        new_client_order_id=None,
+        new_order_resp_type=None,
+        self_trade_prevention_mode=None,
+        recv_window=None,
+    ):
         """Place limit order"""
         try:
             # Validate and format price before sending
@@ -503,10 +534,19 @@ class BinanceClient:
                 'symbol': symbol,
                 'side': side,
                 'type': 'LIMIT',
-                'timeInForce': 'GTC',
+                'timeInForce': time_in_force or 'GTC',
                 'quantity': formatted_quantity,
                 'price': formatted_price  # Use formatted price
             }
+
+            if new_client_order_id:
+                params['newClientOrderId'] = new_client_order_id
+            if new_order_resp_type:
+                params['newOrderRespType'] = new_order_resp_type
+            if self_trade_prevention_mode:
+                params['selfTradePreventionMode'] = self_trade_prevention_mode
+            if recv_window:
+                params['recvWindow'] = recv_window
             
             self.logger.debug(f"Placing {side} limit order: {quantity} @ {formatted_price}")
             response = self._execute_with_fallback("new_order", "new_order", **params)
@@ -516,7 +556,16 @@ class BinanceClient:
             self.logger.error(f"Failed to place limit order: {e}")
             raise
             
-    def place_market_order(self, symbol, side, quantity):
+    def place_market_order(
+        self,
+        symbol,
+        side,
+        quantity,
+        new_client_order_id=None,
+        new_order_resp_type=None,
+        self_trade_prevention_mode=None,
+        recv_window=None,
+    ):
         """Place market order"""
         try:
             formatted_quantity = self._adjust_quantity_precision(quantity, symbol)
@@ -526,6 +575,14 @@ class BinanceClient:
                 'type': 'MARKET',
                 'quantity': formatted_quantity  # Ensure using string format
             }
+            if new_client_order_id:
+                params['newClientOrderId'] = new_client_order_id
+            if new_order_resp_type:
+                params['newOrderRespType'] = new_order_resp_type
+            if self_trade_prevention_mode:
+                params['selfTradePreventionMode'] = self_trade_prevention_mode
+            if recv_window:
+                params['recvWindow'] = recv_window
             response = self._execute_with_fallback("new_order", "new_order", **params)
             response = self._unwrap_response(response)
             return response
@@ -645,8 +702,25 @@ class BinanceClient:
             self.logger.error(f"Failed to place take profit order: {e}")
             raise
 
-    def new_oco_order(self, symbol, side, quantity, price, stopPrice, stopLimitPrice=None, 
-                     stopLimitTimeInForce="GTC", aboveType=None, belowType=None, **kwargs):
+    def new_oco_order(
+        self,
+        symbol,
+        side,
+        quantity,
+        price,
+        stopPrice,
+        stopLimitPrice=None,
+        stopLimitTimeInForce="GTC",
+        aboveType=None,
+        belowType=None,
+        listClientOrderId=None,
+        aboveClientOrderId=None,
+        belowClientOrderId=None,
+        newOrderRespType=None,
+        selfTradePreventionMode=None,
+        recvWindow=None,
+        **kwargs,
+    ):
         """
         Create OCO (One-Cancels-the-Other) order
         
@@ -671,6 +745,29 @@ class BinanceClient:
             formatted_price = format_price(price, price_precision)
             formatted_stop = format_price(stopPrice, price_precision)
 
+            # Minimal client-side relationship validation to avoid obvious rejects.
+            try:
+                price_val = float(formatted_price)
+                stop_val = float(formatted_stop)
+                if stopLimitPrice is not None:
+                    stop_limit_val = float(format_price(stopLimitPrice, price_precision))
+                else:
+                    stop_limit_val = None
+
+                if side == "SELL" and not (price_val > stop_val):
+                    raise ValueError("For SELL OCO orders limit price must be above stopPrice.")
+                if side == "BUY" and not (price_val < stop_val):
+                    raise ValueError("For BUY OCO orders limit price must be below stopPrice.")
+                # For stop-loss-limit legs, keep sensible relationship with trigger:
+                # SELL: stopLimitPrice is typically <= stopPrice; BUY: stopLimitPrice is typically >= stopPrice.
+                if stop_limit_val is not None and side == "SELL" and stop_limit_val > stop_val:
+                    raise ValueError("For SELL OCO orders stopLimitPrice should not exceed stopPrice.")
+                if stop_limit_val is not None and side == "BUY" and stop_limit_val < stop_val:
+                    raise ValueError("For BUY OCO orders stopLimitPrice should not be below stopPrice.")
+            except Exception as exc:
+                self.logger.error(f"Invalid OCO price relationship: {exc}")
+                return {"result": None, "error": {"code": -1001, "msg": str(exc)}, "success": False}
+
             base_params = {
                 "symbol": symbol,
                 "side": side,
@@ -678,6 +775,14 @@ class BinanceClient:
                 "price": formatted_price,
                 "stopPrice": formatted_stop
             }
+            if listClientOrderId:
+                base_params["listClientOrderId"] = listClientOrderId
+            if newOrderRespType:
+                base_params["newOrderRespType"] = newOrderRespType
+            if selfTradePreventionMode:
+                base_params["selfTradePreventionMode"] = selfTradePreventionMode
+            if recvWindow:
+                base_params["recvWindow"] = recvWindow
 
             if stopLimitPrice:
                 formatted_stop_limit = format_price(stopLimitPrice, price_precision)
@@ -704,6 +809,9 @@ class BinanceClient:
                     ws_params.setdefault("aboveType", "LIMIT_MAKER")
                 else:
                     ws_params.setdefault("aboveType", "STOP_LOSS")
+            if aboveClientOrderId:
+                ws_params["aboveClientOrderId"] = aboveClientOrderId
+                rest_params["aboveClientOrderId"] = aboveClientOrderId
 
             if belowType is not None:
                 ws_params["belowType"] = belowType
@@ -714,6 +822,9 @@ class BinanceClient:
                     ws_params.setdefault("belowType", "STOP_LOSS")
                 else:
                     ws_params.setdefault("belowType", "LIMIT_MAKER")
+            if belowClientOrderId:
+                ws_params["belowClientOrderId"] = belowClientOrderId
+                rest_params["belowClientOrderId"] = belowClientOrderId
 
             response = self._execute_with_fallback(
                 "new_oco_order",

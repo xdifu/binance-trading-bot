@@ -1,6 +1,7 @@
 import sys
 import types
 import threading
+import json
 from queue import Queue
 from unittest.mock import MagicMock
 
@@ -36,6 +37,8 @@ def _build_client_stub():
     client.event_callback = None
     client.user_stream_active = False
     client.user_stream_subscription_id = None
+    client._user_stream_keepalive_stop = threading.Event()
+    client._user_stream_keepalive_thread = None
     return client
 
 
@@ -44,10 +47,12 @@ def test_subscribe_user_stream_uses_plain_method_when_authenticated():
     client.session_authenticated = True
     client._send_request = MagicMock(return_value="req123")
     client._wait_for_response = MagicMock(return_value={"status": 200, "result": {"subscriptionId": 9}})
+    client._start_user_stream_keepalive = MagicMock()
 
     response = client.subscribe_user_data_stream()
 
     client._send_request.assert_called_once_with("userDataStream.subscribe")
+    client._start_user_stream_keepalive.assert_called_once_with(9)
     assert client.user_stream_active is True
     assert client.user_stream_subscription_id == 9
     assert response["status"] == 200
@@ -58,10 +63,12 @@ def test_subscribe_user_stream_signature_when_not_authenticated():
     client.session_authenticated = False
     client._send_signed_request = MagicMock(return_value="req999")
     client._wait_for_response = MagicMock(return_value={"status": 200, "result": {"subscriptionId": 3}})
+    client._start_user_stream_keepalive = MagicMock()
 
     response = client.subscribe_user_data_stream()
 
     client._send_signed_request.assert_called_once_with("userDataStream.subscribe.signature")
+    client._start_user_stream_keepalive.assert_called_once_with(3)
     assert client.user_stream_active is True
     assert client.user_stream_subscription_id == 3
     assert response["status"] == 200
@@ -73,10 +80,12 @@ def test_unsubscribe_user_stream_resets_flags():
     client.user_stream_subscription_id = 5
     client._send_request = MagicMock(return_value="req444")
     client._wait_for_response = MagicMock(return_value={"status": 200})
+    client._stop_user_stream_keepalive = MagicMock()
 
     response = client.unsubscribe_user_data_stream()
 
     client._send_request.assert_called_once_with("userDataStream.unsubscribe", None)
+    client._stop_user_stream_keepalive.assert_called_once()
     assert client.user_stream_active is False
     assert client.user_stream_subscription_id is None
     assert response["status"] == 200
@@ -93,6 +102,18 @@ def test_event_callback_receives_payload_and_subscription_id():
     client._handle_message(json_message := '{"event":{"e":"outboundAccountPosition"},"subscriptionId":7}')
 
     callback.assert_called_once_with(message["event"], message["subscriptionId"])
+
+
+def test_event_callback_handles_raw_user_event_without_wrapper():
+    callback = MagicMock()
+    client = _build_client_stub()
+    client.event_callback = callback
+
+    client._handle_message = BinanceWebSocketAPIClient._handle_message.__get__(client, BinanceWebSocketAPIClient)
+    payload = {"e": "executionReport", "s": "BTCUSDT"}
+    client._handle_message(json.dumps(payload))
+
+    callback.assert_called_once_with(payload, None)
 
 
 def test_cancel_oco_order_uses_order_list_cancel_method():
