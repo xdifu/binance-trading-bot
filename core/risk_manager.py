@@ -741,8 +741,8 @@ class RiskManager:
             
             if hasattr(self.binance_client, 'ws_client') and self.using_websocket:
                 # Using WebSocket API client
-                if hasattr(self.binance_client.ws_client.client, 'cancel_oco_order'):
-                    response = self.binance_client.ws_client.client.cancel_oco_order(
+                if hasattr(self.binance_client.ws_client, 'cancel_oco_order'):
+                    response = self.binance_client.ws_client.cancel_oco_order(
                         symbol=self.symbol,
                         orderListId=self.oco_order_id
                     )

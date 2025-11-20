@@ -423,19 +423,8 @@ class GridTradingBot:
                     break
                         
                 # Extend listen key validity
-                client_status = self.binance_client.get_client_status()
-                
-                # Final check before network operation
-                with self.state_lock:
-                    if not self.is_running:
-                        break
-                
-                if client_status["websocket_available"]:
-                    # Use WebSocket API
-                    self.binance_client.ws_client.client.ping_user_data_stream(current_listen_key)
-                else:
-                    # Fallback to REST API
-                    self.binance_client.rest_client.renew_listen_key(current_listen_key)
+                # Always use REST listenKey renewal when in listenKey mode
+                self.binance_client.rest_client.renew_listen_key(current_listen_key)
                     
                 logger.debug(f"Extended listenKey validity: {current_listen_key[:5]}...")
                 

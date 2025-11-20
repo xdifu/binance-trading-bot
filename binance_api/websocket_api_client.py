@@ -82,8 +82,12 @@ class BinanceWebSocketAPIClient:
                 self.private_key = None
                 self.logger.warning("Will fall back to HMAC authentication if API secret is provided.")
         
-        # Connection details
-        self.ws_base_url = "wss://testnet.binance.vision/ws-api/v3" if use_testnet else "wss://ws-api.binance.com/ws-api/v3"
+        # Connection details (align with official WS-API endpoints)
+        self.ws_base_url = (
+            "wss://ws-api.testnet.binance.vision/ws-api/v3"
+            if use_testnet
+            else "wss://ws-api.binance.com/ws-api/v3"
+        )
         self.timeout = timeout
         self.ping_interval = ping_interval
         self.auto_reconnect = auto_reconnect
@@ -1078,4 +1082,9 @@ class BinanceWSClient:
         if symbol:
             params["symbol"] = symbol
         request_id = self.client._send_signed_request("openOrders.status", params)
+        return self.client._wait_for_response(request_id)
+
+    def cancel_oco_order(self, **params):
+        """Cancel an order list (OCO) via WS API."""
+        request_id = self.client._send_signed_request("orderList.cancel", params)
         return self.client._wait_for_response(request_id)

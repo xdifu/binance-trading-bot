@@ -135,8 +135,18 @@ class BinanceClient:
                     # Record request start time
                     request_start_ms = int(time.time() * 1000)
                     
-                    # Get server time
-                    server_time = self.rest_client.time()
+                    # Prefer WS-API time when available; otherwise use REST
+                    if self.websocket_available and self.ws_client:
+                        try:
+                            ws_time_resp = self.ws_client.client.get_server_time()
+                            server_time = ws_time_resp.get("result") if isinstance(ws_time_resp, dict) else ws_time_resp
+                        except Exception:
+                            server_time = None
+                    else:
+                        server_time = None
+
+                    if not server_time:
+                        server_time = self.rest_client.time()
                     
                     # Record response received time
                     request_end_ms = int(time.time() * 1000)
@@ -255,21 +265,33 @@ class BinanceClient:
                     ws_kwargs['timestamp'] = timestamp_value
                 self.logger.debug(f"Added timestamp with adaptive safety offset {safety_offset}ms: {rest_kwargs['timestamp']} to {rest_method_name}")
 
-        # Try WebSocket API first if available
+        # Try WebSocket API first if available, with a couple of retry attempts before downgrading
         if self.websocket_available and self.ws_client:
-            try:
-                # Get the method from WebSocket client
-                ws_method = getattr(self.ws_client, ws_method_name, None)
-                if ws_method:
-                    return ws_method(*args, **ws_kwargs)
-                else:
+            ws_attempts = 0
+            while ws_attempts < 2:
+                try:
+                    ws_method = getattr(self.ws_client, ws_method_name, None)
+                    if ws_method:
+                        return ws_method(*args, **ws_kwargs)
                     self.logger.debug(f"Method {ws_method_name} not found in WebSocket client")
-            except Exception as e:
-                self.logger.warning(f"WebSocket API call failed for {ws_method_name}: {e}")
-                # If connection error, mark WebSocket as unavailable
-                if "connection" in str(e).lower() or "websocket" in str(e).lower():
-                    self.websocket_available = False
-                    self.logger.warning("WebSocket API marked as unavailable, switching to REST fallback")
+                    break
+                except Exception as e:
+                    ws_attempts += 1
+                    self.logger.warning(f"WebSocket API call failed for {ws_method_name} (attempt {ws_attempts}): {e}")
+                    if "connection" in str(e).lower() or "websocket" in str(e).lower():
+                        # Try a lightweight ping to recover before giving up
+                        try:
+                            ping_result = self.ws_client.client.ping_server()
+                            if ping_result and ping_result.get("status") == 200:
+                                continue  # retry WS once more
+                        except Exception:
+                            pass
+                    # If we exhausted retries, mark unavailable
+                    if ws_attempts >= 2:
+                        self.websocket_available = False
+                        self.logger.warning("WebSocket API marked as unavailable after retries, switching to REST fallback")
+                    else:
+                        time.sleep(0.5)
 
         # Fall back to REST API
         if self.rest_client:
@@ -353,6 +375,15 @@ class BinanceClient:
             self.logger.debug(f"Failed to derive precisions for {symbol}: {e}")
         return price_precision, quantity_precision
 
+    def _unwrap_response(self, response):
+        """
+        Normalize WS-API responses that wrap payload in status/result.
+        """
+        if isinstance(response, dict):
+            if "status" in response and "result" in response:
+                return response["result"]
+        return response
+
     def _adjust_price_precision(self, price, symbol=None):
         """
         Format price with appropriate precision
@@ -393,8 +424,10 @@ class BinanceClient:
             
         try:
             if symbol:
-                return self._execute_with_fallback("exchange_info", "exchange_info", symbol=symbol)
-            return self._execute_with_fallback("exchange_info", "exchange_info")
+                resp = self._execute_with_fallback("exchange_info", "exchange_info", symbol=symbol)
+            else:
+                resp = self._execute_with_fallback("exchange_info", "exchange_info")
+            return self._unwrap_response(resp)
         except Exception as e:
             self.logger.error(f"Failed to get exchange info: {e}")
             raise
@@ -413,7 +446,8 @@ class BinanceClient:
     def get_account_info(self):
         """Get account information"""
         try:
-            return self._execute_with_fallback("account", "account")
+            resp = self._execute_with_fallback("account", "account")
+            return self._unwrap_response(resp)
         except Exception as e:
             self.logger.error(f"Failed to get account info: {e}")
             raise
@@ -422,7 +456,13 @@ class BinanceClient:
         """Get current price for symbol"""
         try:
             ticker = self._execute_with_fallback("ticker_price", "ticker_price", symbol=symbol)
-            return float(ticker['price'] if isinstance(ticker, dict) else ticker['result']['price'])
+            ticker = self._unwrap_response(ticker)
+            if isinstance(ticker, dict):
+                if "price" in ticker:
+                    return float(ticker["price"])
+                if "result" in ticker and "price" in ticker["result"]:
+                    return float(ticker["result"]["price"])
+            raise ValueError("Unexpected ticker response format")
         except Exception as e:
             self.logger.error(f"Failed to get {symbol} price: {e}")
             raise
@@ -430,12 +470,13 @@ class BinanceClient:
     def get_order_book(self, symbol, limit=20):
         """Get order book depth for slippage estimation"""
         try:
-            return self._execute_with_fallback(
+            resp = self._execute_with_fallback(
                 "depth",
                 "depth",
                 symbol=symbol,
                 limit=limit
             )
+            return self._unwrap_response(resp)
         except Exception as e:
             self.logger.error(f"Failed to get order book for {symbol}: {e}")
             raise
@@ -468,7 +509,9 @@ class BinanceClient:
             }
             
             self.logger.debug(f"Placing {side} limit order: {quantity} @ {formatted_price}")
-            return self._execute_with_fallback("new_order", "new_order", **params)
+            response = self._execute_with_fallback("new_order", "new_order", **params)
+            response = self._unwrap_response(response)
+            return response
         except Exception as e:
             self.logger.error(f"Failed to place limit order: {e}")
             raise
@@ -483,7 +526,9 @@ class BinanceClient:
                 'type': 'MARKET',
                 'quantity': formatted_quantity  # Ensure using string format
             }
-            return self._execute_with_fallback("new_order", "new_order", **params)
+            response = self._execute_with_fallback("new_order", "new_order", **params)
+            response = self._unwrap_response(response)
+            return response
         except Exception as e:
             self.logger.error(f"Failed to place market order: {e}")
             raise
@@ -491,7 +536,8 @@ class BinanceClient:
     def cancel_order(self, symbol, order_id):
         """Cancel order"""
         try:
-            return self._execute_with_fallback("cancel_order", "cancel_order", symbol=symbol, orderId=order_id)
+            response = self._execute_with_fallback("cancel_order", "cancel_order", symbol=symbol, orderId=order_id)
+            return self._unwrap_response(response)
         except Exception as e:
             self.logger.error(f"Failed to cancel order: {e}")
             raise
@@ -500,8 +546,10 @@ class BinanceClient:
         """Get open orders"""
         try:
             if symbol:
-                return self._execute_with_fallback("get_open_orders", "get_open_orders", symbol=symbol)
-            return self._execute_with_fallback("get_open_orders", "get_open_orders")
+                resp = self._execute_with_fallback("get_open_orders", "get_open_orders", symbol=symbol)
+            else:
+                resp = self._execute_with_fallback("get_open_orders", "get_open_orders")
+            return self._unwrap_response(resp)
         except Exception as e:
             self.logger.error(f"Failed to get open orders: {e}")
             raise
@@ -509,12 +557,13 @@ class BinanceClient:
     def get_historical_klines(self, symbol, interval, start_str=None, limit=500):
         """Get historical klines data"""
         try:
-            return self._execute_with_fallback("klines", "klines",
+            resp = self._execute_with_fallback("klines", "klines",
                 symbol=symbol,
                 interval=interval,
                 startTime=start_str,
                 limit=limit
             )
+            return self._unwrap_response(resp)
         except Exception as e:
             self.logger.error(f"Failed to get klines data: {e}")
             raise
@@ -560,7 +609,8 @@ class BinanceClient:
                 'quantity': formatted_quantity,
                 'stopPrice': formatted_stop_price
             }
-            return self._execute_with_fallback("new_order", "new_order", **params)
+            resp = self._execute_with_fallback("new_order", "new_order", **params)
+            return self._unwrap_response(resp)
         except Exception as e:
             self.logger.error(f"Failed to place stop loss order: {e}")
             raise
@@ -589,7 +639,8 @@ class BinanceClient:
                 'quantity': formatted_quantity,
                 'stopPrice': formatted_stop_price
             }
-            return self._execute_with_fallback("new_order", "new_order", **params)
+            resp = self._execute_with_fallback("new_order", "new_order", **params)
+            return self._unwrap_response(resp)
         except Exception as e:
             self.logger.error(f"Failed to place take profit order: {e}")
             raise

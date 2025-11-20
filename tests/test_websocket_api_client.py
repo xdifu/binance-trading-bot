@@ -19,7 +19,7 @@ if "binance" not in sys.modules:
     sys.modules["binance"] = binance_module
 
 import logging
-from binance_api.websocket_api_client import BinanceWebSocketAPIClient
+from binance_api.websocket_api_client import BinanceWebSocketAPIClient, BinanceWSClient
 
 
 def _build_client_stub():
@@ -93,3 +93,17 @@ def test_event_callback_receives_payload_and_subscription_id():
     client._handle_message(json_message := '{"event":{"e":"outboundAccountPosition"},"subscriptionId":7}')
 
     callback.assert_called_once_with(message["event"], message["subscriptionId"])
+
+
+def test_cancel_oco_order_uses_order_list_cancel_method():
+    ws_adapter = BinanceWSClient.__new__(BinanceWSClient)
+    ws_adapter.logger = logging.getLogger("ws_cancel_test")
+    mock_inner = types.SimpleNamespace()
+    mock_inner._send_signed_request = MagicMock(return_value="req-cancel")
+    mock_inner._wait_for_response = MagicMock(return_value={"status": 200})
+    ws_adapter.client = mock_inner
+
+    result = ws_adapter.cancel_oco_order(orderListId=123)
+
+    mock_inner._send_signed_request.assert_called_once_with("orderList.cancel", {"orderListId": 123})
+    assert result["status"] == 200
