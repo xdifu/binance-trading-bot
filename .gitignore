@@ -37,9 +37,16 @@ ENV/
 logs/
 grid_bot.log
 
-# Key files (but keeping the directory structure)
-# key/*.pem
-# Uncomment the above line if you want to exclude all key files
+# Key files (private, keep directory but never commit secrets)
+key/**/*.pem
+key/**/*.key
+key/**/*.crt
+key/*private*
+key/*public*
+key/*.pem
+# Keep placeholders
+!key/.gitkeep
+!key/README.md
 
 # Cache files
 *.pickle
