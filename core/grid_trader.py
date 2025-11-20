@@ -38,6 +38,10 @@ class GridTrader:
         self.binance_client = binance_client
         self.telegram_bot = telegram_bot
         self.symbol = config.SYMBOL
+        protective_default = getattr(config, "ENABLE_PROTECTIVE_MODE", False)
+        auto_non_major = getattr(config, "AUTO_PROTECTIVE_FOR_NON_MAJOR", True)
+        major_list = set(getattr(config, "MAJOR_SYMBOLS", []))
+        self.protection_enabled = protective_default or (auto_non_major and self.symbol not in major_list)
         
         # Initialize logger first to enable logging throughout initialization
         self.logger = logging.getLogger(__name__)
@@ -124,6 +128,8 @@ class GridTrader:
         self.volume_history = []
         self.price_history = []
         self.history_max_size = 30  # Maximum length of historical data to maintain
+        # Trend-driven level scaling
+        self.level_reduction_factor = 1.0
     
     def _get_symbol_info(self):
         """
@@ -668,7 +674,10 @@ class GridTrader:
             return configured_levels
 
         affordable_levels = int(effective_funds / level_cost)
-        available_levels = max(min_levels, min(configured_levels, affordable_levels))
+        level_cap = configured_levels
+        if self.level_reduction_factor < 1.0:
+            level_cap = max(min_levels, int(configured_levels * self.level_reduction_factor))
+        available_levels = max(min_levels, min(level_cap, affordable_levels))
 
         if affordable_levels < min_levels and configured_levels >= min_levels:
             self.logger.warning(
@@ -1244,6 +1253,11 @@ class GridTrader:
         """
         price = level['price']
         side = level['side']
+
+        # Pause new orders in strong trend protective mode
+        if self._should_pause_orders():
+            self.logger.info("Protective pause is active; skipping new grid order placement")
+            return False
         
         # Get capital for this level (use dynamic capital if available, otherwise fall back to default)
         capital = level.get('capital', self.capital_per_level)
@@ -1636,29 +1650,55 @@ class GridTrader:
                 if new_side == "SELL":
                     # For SELL orders after BUY executed
                     new_price = price * (1 + buy_sell_spread)
-                    formatted_price = self._adjust_price_precision(new_price)
                 else:
                     # For BUY orders after SELL executed
                     new_price = price * (1 - buy_sell_spread)
-                    formatted_price = self._adjust_price_precision(new_price)
+
+                # Estimate slippage and achievable spread when protection is enabled
+                min_profit_buffer = getattr(config, "MIN_EXPECTED_PROFIT_BUFFER", 0)
+                round_trip_fee = config.TRADING_FEE_RATE * 2
+                achieved_spread = None
+                slippage_estimate = 0.0
+                if self.protection_enabled:
+                    est = self._estimate_slippage_and_spread(new_side, float(formatted_quantity))
+                    if est:
+                        slippage_estimate, book_spread, mid_price = est
+                        achieved_spread = abs((new_price - price) / price) - (slippage_estimate * 2)
+                        required = round_trip_fee + min_profit_buffer + (slippage_estimate * 2)
+                        if achieved_spread < required:
+                            # Inflate spread to satisfy required profit after fees and slippage
+                            adjust_ratio = required
+                            if new_side == "SELL":
+                                new_price = price * (1 + adjust_ratio)
+                            else:
+                                new_price = price * (1 - adjust_ratio)
+                            self.logger.info(
+                                "Adjusted price for %s to cover fees/slippage: %.8f -> %.8f (req %.4f%%, bookSpread %.4f%%, slip %.4f%%)",
+                                new_side,
+                                price,
+                                new_price,
+                                required * 100,
+                                (book_spread or 0) * 100 if book_spread is not None else 0,
+                                slippage_estimate * 100,
+                            )
+
+                formatted_price = self._adjust_price_precision(new_price)
 
                 # Calculate expected profit as a decimal (not percentage)
                 expected_profit_decimal = abs(float(new_price) - float(price)) / float(price)
+                effective_profit = expected_profit_decimal - round_trip_fee - (slippage_estimate * 2)
 
-                # Calculate round-trip trading fee (as decimal)
-                round_trip_fee = config.TRADING_FEE_RATE * 2
-
-                # Calculate minimum required profit with margin multiplier (as decimal)
-                min_required_profit = round_trip_fee * config.PROFIT_MARGIN_MULTIPLIER
+                # Calculate minimum required profit with margin multiplier and buffer (as decimal)
+                min_required_profit = (round_trip_fee * config.PROFIT_MARGIN_MULTIPLIER) + min_profit_buffer
 
                 # Compare using consistent decimal units
-                if expected_profit_decimal <= min_required_profit:
+                if (achieved_spread is not None and achieved_spread <= min_required_profit) or effective_profit <= min_required_profit:
                     # Convert to percentage only for logging purposes
                     expected_profit_pct = expected_profit_decimal * 100
                     min_required_profit_pct = min_required_profit * 100
 
-                    self.logger.info(
-                        f"Skipping reverse order - insufficient profit margin: "
+                    self.logger.warning(
+                        f"Skipping reverse order - insufficient profit margin after fees/slippage: "
                         f"{expected_profit_pct:.4f}% vs required: {min_required_profit_pct:.4f}%"
                     )
 
@@ -1897,6 +1937,9 @@ class GridTrader:
         """Ensure each grid level has an active order and place replacements when needed"""
         if not self.is_running or self.simulation_mode:
             return 0
+        if self._should_pause_orders():
+            self.logger.info("Protective pause active; skipping refill of missing grid slots")
+            return 0
 
         replacements = 0
 
@@ -1939,6 +1982,8 @@ class GridTrader:
         max_order_age_hours = max(1, getattr(config, "MAX_ORDER_AGE_HOURS", 4))
         max_order_age = max_order_age_hours * 3600
         base_deviation_threshold = max(0.0005, getattr(config, "PRICE_DEVIATION_THRESHOLD", 0.015))
+        round_trip_fee = config.TRADING_FEE_RATE * 2
+        min_profit_buffer = getattr(config, "MIN_EXPECTED_PROFIT_BUFFER", 0)
         
         # Track orders to cancel
         orders_to_cancel = []
@@ -1961,6 +2006,11 @@ class GridTrader:
                 
                 # Calculate distance from current price
                 price_distance = abs(level['price'] - current_price) / current_price
+
+                # Skip cancellation if the order still has profit potential in protected mode
+                if self.protection_enabled and self._has_profit_potential(level, current_price, round_trip_fee, min_profit_buffer):
+                    self.logger.debug("Preserving stale order %s due to profit potential", level['order_id'])
+                    continue
                 
                 # If order is old or far from price, cancel it
                 if (order_age > max_order_age) or (price_distance > deviation_threshold):
@@ -2019,6 +2069,10 @@ class GridTrader:
         # Reset and update precision values 
         self.price_precision = self._get_price_precision()
         self.quantity_precision = self._get_quantity_precision()
+        # Re-evaluate protective mode based on symbol category
+        major_list = set(getattr(config, "MAJOR_SYMBOLS", []))
+        auto_non_major = getattr(config, "AUTO_PROTECTIVE_FOR_NON_MAJOR", True)
+        self.protection_enabled = getattr(config, "ENABLE_PROTECTIVE_MODE", False) or (auto_non_major and self.symbol not in major_list)
         
         # Re-calculate trading parameters based on new symbol
         self.base_asset = new_symbol.replace('USDT', '')
@@ -2240,21 +2294,30 @@ class GridTrader:
             # PUMP state: Increase grid spacing to catch larger moves
             self.grid_spacing = min(self.grid_spacing * 1.25, config.MAX_GRID_SPACING)
             self.logger.info(f"PUMP state adjustment: Grid spacing increased to {self.grid_spacing*100:.2f}%")
-                
+            reduction = getattr(config, "PROTECTIVE_TREND_LEVEL_REDUCTION", 0.5)
+            self.level_reduction_factor = reduction if self.protection_enabled else 1.0
+            self.logger.info("Grid levels scaled by %.2f due to PUMP state", self.level_reduction_factor)
+            
         elif state == MarketState.CRASH:
             # CRASH state: Increase grid spacing similar to PUMP
             self.grid_spacing = min(self.grid_spacing * 1.25, config.MAX_GRID_SPACING)
             self.logger.info(f"CRASH state adjustment: Grid spacing increased to {self.grid_spacing*100:.2f}%")
-                
+            reduction = getattr(config, "PROTECTIVE_TREND_LEVEL_REDUCTION", 0.5)
+            self.level_reduction_factor = reduction if self.protection_enabled else 1.0
+            self.logger.info("Grid levels scaled by %.2f due to CRASH state", self.level_reduction_factor)
+            
         elif state == MarketState.BREAKOUT:
             # BREAKOUT state: Slightly increase spacing
             self.grid_spacing = min(self.grid_spacing * 1.15, config.MAX_GRID_SPACING)
             self.logger.info(f"BREAKOUT state adjustment: Grid spacing increased to {self.grid_spacing*100:.2f}%")
-                
+            self.level_reduction_factor = 0.75 if self.protection_enabled else 1.0
+            self.logger.info("Grid levels scaled by %.2f due to BREAKOUT state", self.level_reduction_factor)
+            
         elif state == MarketState.RANGING and hasattr(self, '_original_grid_settings'):
             # Restore original settings in RANGING state
             self.grid_spacing = self._original_grid_settings.get('grid_spacing', self.grid_spacing)
             self.logger.info(f"RANGING state: Grid spacing restored to {self.grid_spacing*100:.2f}%")
+            self.level_reduction_factor = 1.0
             
             # Clear saved settings
             delattr(self, '_original_grid_settings')
@@ -2283,6 +2346,75 @@ class GridTrader:
             'volume_change': volume_change,
             'last_changed': self.last_state_change_time if hasattr(self, 'last_state_change_time') else 0
         }
+
+    def _should_pause_orders(self):
+        """Return True when protective mode wants to pause new orders (strong trend)."""
+        if not self.protection_enabled:
+            return False
+        pause_on_trend = getattr(config, "PROTECTIVE_PAUSE_STRONG_TREND", True)
+        if pause_on_trend and self.current_market_state in (MarketState.PUMP, MarketState.CRASH):
+            return True
+        return False
+
+    def _estimate_slippage_and_spread(self, side, quantity):
+        """
+        Estimate slippage and current book spread using order book depth.
+        Returns (slippage_decimal, book_spread_decimal, mid_price) or None on failure.
+        """
+        try:
+            ob = self.binance_client.get_order_book(self.symbol, limit=20)
+            bids = [[float(p), float(q)] for p, q in ob.get("bids", []) if q is not None]
+            asks = [[float(p), float(q)] for p, q in ob.get("asks", []) if q is not None]
+            if not bids or not asks:
+                return None
+            best_bid = bids[0][0]
+            best_ask = asks[0][0]
+            mid = (best_bid + best_ask) / 2
+
+            def avg_fill(levels, qty, is_buy):
+                remaining = qty
+                total_cost = 0.0
+                for price, size in levels:
+                    take = min(remaining, size)
+                    total_cost += take * price
+                    remaining -= take
+                    if remaining <= 0:
+                        break
+                if remaining > 0:
+                    return None
+                avg_price = total_cost / qty if qty > 0 else None
+                if avg_price is None:
+                    return None
+                if is_buy:
+                    slip = max(0.0, (avg_price - best_ask) / best_ask)
+                else:
+                    slip = max(0.0, (best_bid - avg_price) / best_bid)
+                return slip, avg_price
+
+            if side == "BUY":
+                fill = avg_fill(asks, quantity, True)
+            else:
+                fill = avg_fill(bids, quantity, False)
+            if not fill:
+                return None
+
+            slippage, avg_price = fill
+            book_spread = (best_ask - best_bid) / mid if mid > 0 else 0
+            return slippage, book_spread, mid
+        except Exception as e:
+            self.logger.warning(f"Slippage estimation failed: {e}")
+            return None
+
+    def _has_profit_potential(self, level, current_price, round_trip_fee, min_profit_buffer):
+        """
+        Check if a stale order still has reasonable upside versus fees.
+        """
+        try:
+            potential = abs(level["price"] - current_price) / current_price
+            required = (round_trip_fee * config.PROFIT_MARGIN_MULTIPLIER) + min_profit_buffer
+            return potential >= required
+        except Exception:
+            return False
     
     def calculate_optimal_grid_center(self):
         """
@@ -2374,6 +2506,20 @@ class GridTrader:
             # 11. Calculate final grid center
             grid_center = (historical_center * (1 - current_weight) + 
                           current_price * current_weight)
+
+            # 11b. Limit deviation from current price to avoid placing grid too far away
+            max_dev = getattr(config, "MAX_CENTER_DEVIATION", 0.05)
+            deviation = abs(grid_center - current_price) / current_price
+            if deviation > max_dev:
+                direction = 1 if grid_center > current_price else -1
+                adjusted_center = current_price * (1 + direction * max_dev)
+                self.logger.info(
+                    "Grid center deviation %.2f%% exceeds max %.2f%%, clamping to %.8f",
+                    deviation * 100,
+                    max_dev * 100,
+                    adjusted_center,
+                )
+                grid_center = adjusted_center
             
             # 12. Use ATR for grid range calculation if available
             grid_range_value = self.grid_range_percent  # Default to config value

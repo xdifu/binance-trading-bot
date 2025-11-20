@@ -379,6 +379,19 @@ class BinanceClient:
         except Exception as e:
             self.logger.error(f"Failed to get {symbol} price: {e}")
             raise
+
+    def get_order_book(self, symbol, limit=20):
+        """Get order book depth for slippage estimation"""
+        try:
+            return self._execute_with_fallback(
+                "depth",
+                "depth",
+                symbol=symbol,
+                limit=limit
+            )
+        except Exception as e:
+            self.logger.error(f"Failed to get order book for {symbol}: {e}")
+            raise
             
     def place_limit_order(self, symbol, side, quantity, price):
         """Place limit order"""

@@ -66,6 +66,8 @@ All trading/risk parameters live in `config.py`. Important sections:
 - **Volatility inputs**: `ATR_PERIOD`, `ATR_RATIO`, asymmetric core ratios
 - **Risk controls**: `TRAILING_STOP_LOSS_PERCENT`, `TRAILING_TAKE_PROFIT_PERCENT`, `RISK_UPDATE_*`
   (values are percentages; e.g. `0.5` means 0.5%)
+- **Protective mode** (auto-on for non-major symbols by default): `ENABLE_PROTECTIVE_MODE`, `AUTO_PROTECTIVE_FOR_NON_MAJOR`, `MAJOR_SYMBOLS`,
+  `MIN_EXPECTED_PROFIT_BUFFER`, `MAX_CENTER_DEVIATION`, `PROTECTIVE_PAUSE_STRONG_TREND`, `PROTECTIVE_TREND_LEVEL_REDUCTION`
 - **Order hygiene**: `MAX_ORDER_AGE_HOURS`, `PRICE_DEVIATION_THRESHOLD`, `MIN_NOTIONAL_VALUE`
 - **Telemetry**: `LOG_LEVEL`, `ENABLE_TELEGRAM`, `DATA_DIR`
 

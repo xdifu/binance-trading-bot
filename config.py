@@ -93,6 +93,15 @@ DATA_DIR = "./data"  # 数据存储目录，修改为其他路径可更改数据
 # 配置验证函数
 #############################################
 
+# Protective mode settings
+ENABLE_PROTECTIVE_MODE = False  # Global switch; if False, only auto mode may enable protections
+AUTO_PROTECTIVE_FOR_NON_MAJOR = True  # Auto-enable protections when symbol not in MAJOR_SYMBOLS
+MAJOR_SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"]
+MIN_EXPECTED_PROFIT_BUFFER = 0.0002  # Minimum expected profit after fees and slippage (decimal, e.g., 0.0002 = 0.02%)
+MAX_CENTER_DEVIATION = 0.05  # Max allowed deviation between grid center and current price (e.g., 0.05 = 5%)
+PROTECTIVE_PAUSE_STRONG_TREND = True  # Pause new grid orders in strong trends (PUMP/CRASH)
+PROTECTIVE_TREND_LEVEL_REDUCTION = 0.5  # Scale grid levels in strong trends (0.5 keeps half the levels)
+
 def validate_config():
     """验证配置参数的有效性，检测不合理设置"""
     errors = []
