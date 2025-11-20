@@ -28,24 +28,24 @@ WS_RECONNECT_DELAY = 5  # 重连间隔时间(秒)，增大可避免频繁重连�
 # 交易基本设置
 #############################################
 
-SYMBOL = "DOGSUSDT"  # 主网实盘交易对
-CAPITAL_PER_LEVEL = 5  # 每个网格的资金(USDT)，增加可提高利润但需要更多总资金
+SYMBOL = "ZECUSDT"  # 主网实盘交易对
+CAPITAL_PER_LEVEL = 6  # 每个网格的资金(USDT)，增加可提高利润但需要更多总资金
 CAPITAL_SIZE = "small"  # 资金规模，可选值："small"(小资金优化) 或 "standard"(标准资金)
 
 #############################################
 # 网格参数 (全部以小数形式表示)
 #############################################
 
-GRID_LEVELS = 8  # 网格数量，增加数值可提高交易频率但需要更多资金
-GRID_SPACING = 0.008  # 网格间距 (0.8%)
-GRID_RANGE_PERCENT = 0.05  # 总网格价格范围 (5.0%)
+GRID_LEVELS = 7  # 网格数量，增加数值可提高交易频率但需要更多资金
+GRID_SPACING = 0.01  # 网格间距 (1.0%)
+GRID_RANGE_PERCENT = 0.08  # 总网格价格范围 (8.0%)
 MAX_GRID_SPACING = 0.03  # 最大单网格间距 (3%)
-MAX_GRID_RANGE = 0.05  # 最大网格总范围 (5%)
+MAX_GRID_RANGE = 0.10  # 最大网格总范围 (10%)
 RECALCULATION_PERIOD = 1  # 网格重新计算周期(天)，减小可更频繁更新网格位置
 
 # ATR相关设置 (波动性指标)
 ATR_PERIOD = 14  # ATR指标周期，增大可减少敏感度，减小可对短期波动更敏感
-ATR_RATIO = 0.3  # ATR比例系数，增大可设置更宽的网格间距
+ATR_RATIO = 0.5  # ATR比例系数，增大可设置更宽的网格间距
 
 # 非对称网格参数（核心区域优化）
 CORE_ZONE_PERCENTAGE = 0.5  # 核心区域占总范围的比例，增大可集中更多资金在中心价格附近
@@ -70,7 +70,7 @@ MIN_NOTIONAL_VALUE = 5  # 最小订单价值(USDT)，低于此值的订单将被
 # 风险管理设置
 #############################################
 
-TRAILING_STOP_LOSS_PERCENT = 4.0  # 追踪止损百分比（以百分数填写，例如0.5表示0.5%）
+TRAILING_STOP_LOSS_PERCENT = 5.0  # 追踪止损百分比（以百分数填写，例如5.0表示5%）
 TRAILING_TAKE_PROFIT_PERCENT = 8.0  # 追踪止盈百分比（以百分数填写，例如0.8表示0.8%）
 RISK_UPDATE_THRESHOLD_PERCENT = 0.25  # 风险阈值更新百分比，减小可更灵敏地调整止损位
 RISK_UPDATE_INTERVAL_MINUTES = 5  # 风险更新间隔(分钟)，减小可更频繁更新止损止盈

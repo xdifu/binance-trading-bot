@@ -135,6 +135,12 @@ class GridTrader:
         self.history_max_size = 30  # Maximum length of historical data to maintain
         # Trend-driven level scaling
         self.level_reduction_factor = 1.0
+        
+        # Smart grid recalculation tracking (Event-driven with confirmation)
+        self.out_of_bounds_start_time = None  # Timestamp when price first went out of bounds
+        self.out_of_bounds_confirmation_threshold = 2 * 60 * 60  # 2 hours in seconds
+        self.price_out_of_upper_bound = False  # Track if price is above upper limit
+        self.price_out_of_lower_bound = False  # Track if price is below lower limit
     
     def _get_symbol_info(self):
         """
@@ -1621,7 +1627,8 @@ class GridTrader:
     
     def check_grid_recalculation(self):
         """
-        Check if grid needs recalculation based on time, volatility or market state changes
+        Check if grid needs recalculation based on time, volatility or market state changes.
+        Implements smart confirmation: price must stay out of bounds for 2 hours before recalculation.
         
         Returns:
             bool: True if grid was recalculated or adjusted, False otherwise
@@ -1631,6 +1638,64 @@ class GridTrader:
             return False
             
         now = datetime.now()
+        current_time = time.time()
+        
+        # SMART RECALCULATION: Check if price is outside grid bounds
+        out_of_bounds_recalc = False
+        if self.grid and len(self.grid) > 0:
+            try:
+                current_price = self.binance_client.get_symbol_price(self.symbol)
+                grid_prices = [level['price'] for level in self.grid]
+                upper_limit = max(grid_prices)
+                lower_limit = min(grid_prices)
+                
+                # Check if price is currently out of bounds
+                currently_out_of_upper = current_price > upper_limit
+                currently_out_of_lower = current_price < lower_limit
+                currently_out_of_bounds = currently_out_of_upper or currently_out_of_lower
+                
+                if currently_out_of_bounds:
+                    # Price is out of bounds - start or continue timer
+                    if self.out_of_bounds_start_time is None:
+                        # First detection - start timer
+                        self.out_of_bounds_start_time = current_time
+                        self.price_out_of_upper_bound = currently_out_of_upper
+                        self.price_out_of_lower_bound = currently_out_of_lower
+                        direction = "above upper limit" if currently_out_of_upper else "below lower limit"
+                        self.logger.info(
+                            f"Price {direction} detected (${current_price:.6f} vs grid range ${lower_limit:.6f}-${upper_limit:.6f}). "
+                            f"Starting 2-hour confirmation timer."
+                        )
+                    else:
+                        # Timer already running - check if confirmation period elapsed
+                        time_out_of_bounds = current_time - self.out_of_bounds_start_time
+                        if time_out_of_bounds >= self.out_of_bounds_confirmation_threshold:
+                            # Confirmed sustained breakout - trigger recalculation
+                            direction = "above" if currently_out_of_upper else "below"
+                            hours_out = time_out_of_bounds / 3600
+                            self.logger.info(
+                                f"Price has been {direction} grid range for {hours_out:.1f} hours. "
+                                f"Confirmed breakout - triggering grid recalculation."
+                            )
+                            out_of_bounds_recalc = True
+                            # Reset timer after triggering recalc
+                            self.out_of_bounds_start_time = None
+                            self.price_out_of_upper_bound = False
+                            self.price_out_of_lower_bound = False
+                else:
+                    # Price returned to normal range - reset timer
+                    if self.out_of_bounds_start_time is not None:
+                        time_was_out = current_time - self.out_of_bounds_start_time
+                        self.logger.info(
+                            f"Price returned to grid range after {time_was_out/60:.1f} minutes. "
+                            f"Canceling breakout confirmation (false breakout detected)."
+                        )
+                        self.out_of_bounds_start_time = None
+                        self.price_out_of_upper_bound = False
+                        self.price_out_of_lower_bound = False
+                        
+            except Exception as e:
+                self.logger.error(f"Error checking price bounds: {e}")
         
         # NEW: Detect market state and apply appropriate adjustments
         current_state = self.detect_market_state()
@@ -1676,8 +1741,8 @@ class GridTrader:
         # NEW: Apply market state-based adjustments to grid parameters
         self._adjust_grid_based_on_market_state(current_state)
         
-        # Handle full grid recalculation (unchanged from original)
-        if time_based_recalc or volatility_based_recalc:
+        # Handle full grid recalculation (includes out-of-bounds confirmation, time-based, and volatility triggers)
+        if time_based_recalc or volatility_based_recalc or out_of_bounds_recalc:
             try:
                 # Cancel all orders
                 self._cancel_all_open_orders()

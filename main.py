@@ -19,7 +19,7 @@ import config
 
 # Configuration constants
 LISTEN_KEY_RENEWAL_INTERVAL = 30 * 60  # 30 minutes in seconds
-GRID_RECALCULATION_INTERVAL = 24 * 60 * 60  # 24 hours in seconds
+GRID_RECALCULATION_INTERVAL = 5 * 60  # 5 minutes in seconds (smart check with 2-hour confirmation)
 WEBSOCKET_RECONNECT_INTERVAL = 60  # 60 seconds
 MAINTENANCE_THREAD_SLEEP = 60  # 60 seconds
 
