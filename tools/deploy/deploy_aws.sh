@@ -8,7 +8,7 @@ set -euo pipefail
 
 # ==== Configurable defaults (override with env vars when calling) ====
 APP_DIR="${APP_DIR:-/opt/grid_trading_bot}"              # Target install path on server
-REPO_URL="${REPO_URL:-https://github.com/your-org/binance-grid-trading-bot.git}"  # Public repo URL
+REPO_URL="${REPO_URL:-git@github.com:xdifu/binance-trading-bot.git}"  # Public repo URL
 BRANCH="${BRANCH:-main}"                                # Branch or tag to deploy
 RUN_USER="${RUN_USER:-${SUDO_USER:-$(whoami)}}"         # Service user
 PYTHON_BIN="${PYTHON_BIN:-python3}"                     # Python interpreter
@@ -67,6 +67,12 @@ EOF
 }
 
 write_env_placeholder() {
+  # Preserve existing secrets if the file already exists.
+  if [ -f "$ENV_FILE" ]; then
+    log ".env file already exists. Skipping placeholder generation to preserve secrets."
+    return
+  fi
+
   cat > "$ENV_FILE" <<'EOF'
 # Fill these before running in production or enable SSM via USE_SSM=true
 API_KEY=
