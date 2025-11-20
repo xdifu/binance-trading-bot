@@ -725,18 +725,32 @@ class BinanceWebSocketAPIClient:
         Raises:
             ValueError: If no authentication method is available
         """
-        if not self.signature_generator:
+        # If signature generator is missing (e.g., object constructed via __new__ in tests),
+        # fall back to legacy attributes for signing.
+        sig_gen = getattr(self, "signature_generator", None)
+        if not sig_gen:
+            if hasattr(self, "private_key") and isinstance(self.private_key, ed25519.Ed25519PrivateKey):
+                sorted_params = sorted((k, v) for k, v in params.items() if k != 'signature')
+                query_string = '&'.join([f"{k}={v}" for k, v in sorted_params])
+                signature_bytes = self.private_key.sign(query_string.encode('utf-8'))
+                return base64.b64encode(signature_bytes).decode('utf-8')
+            if hasattr(self, "api_secret") and self.api_secret:
+                sorted_params = sorted((k, v) for k, v in params.items() if k != 'signature')
+                query_string = '&'.join([f"{k}={v}" for k, v in sorted_params])
+                import hmac
+                from hashlib import sha256
+                return hmac.new(
+                    self.api_secret.encode('utf-8'),
+                    query_string.encode('utf-8'),
+                    sha256
+                ).hexdigest()
             raise ValueError("No authentication method available. Provide API secret or private key.")
-        
-        # Sort parameters by key name (excluding signature itself)
-        sorted_params = sorted((k, v) for k, v in params.items() if k != 'signature')
-        
-        # Convert to query string format
-        query_string = '&'.join([f"{k}={v}" for k, v in sorted_params])
         
         try:
             # Generate signature using the appropriate method
-            signature, key_type = self.signature_generator.generate_signature(query_string)
+            sorted_params = sorted((k, v) for k, v in params.items() if k != 'signature')
+            query_string = '&'.join([f"{k}={v}" for k, v in sorted_params])
+            signature, key_type = sig_gen.generate_signature(query_string)
             self.logger.debug(f"Generated {key_type.value.upper()} signature for query: {query_string[:50]}...")
             return signature
         except Exception as e:
@@ -1097,7 +1111,7 @@ class BinanceWSClient:
         request_id = self.client._send_request("klines", params)
         return self.client._wait_for_response(request_id)
 
-    def account(self, omitZeroBalances=None, recvWindow=None):
+    def account(self, omitZeroBalances=None, recvWindow=None, **kwargs):
         """
         Get account status (balances) via WS API.
         
@@ -1153,7 +1167,7 @@ class BinanceWSClient:
         request_id = self.client._send_signed_request("order.cancel", params)
         return self.client._wait_for_response(request_id)
 
-    def get_open_orders(self, symbol=None, recvWindow=None):
+    def get_open_orders(self, symbol=None, recvWindow=None, **kwargs):
         """
         Get open orders via WS API.
         

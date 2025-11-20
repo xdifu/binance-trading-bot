@@ -575,7 +575,9 @@ class RiskManager:
             
             # Format prices correctly
             stop_price = self._adjust_price_precision(self.stop_loss_price)
-            stop_limit_price = self._adjust_price_precision(self.stop_loss_price * 0.99)
+            # Default: prefer STOP_LOSS (no stopLimitPrice) to avoid WS -1106 belowPrice issues.
+            use_stop_limit = getattr(config, "RISK_OCO_USE_STOP_LIMIT", False)
+            stop_limit_price = self._adjust_price_precision(self.stop_loss_price * 0.99) if use_stop_limit else None
             limit_price = self._adjust_price_precision(self.take_profit_price)
             
             # Final safety check - ensure stop < current < limit for SELL OCO orders
@@ -590,16 +592,20 @@ class RiskManager:
             
             self.logger.info(f"Placing OCO order via {api_type}: Stop: {stop_price}, Limit: {limit_price}, Qty: {quantity}")
             
-            # Place OCO order with standard parameters
-            response = self.binance_client.new_oco_order(
-                symbol=self.symbol,
-                side="SELL",  # Sell assets
-                quantity=quantity,
-                price=limit_price,  # Take profit price
-                stopPrice=stop_price,  # Stop loss trigger price
-                stopLimitPrice=stop_limit_price,  # Stop limit price
-                stopLimitTimeInForce="GTC"  # Good Till Cancel
-            )
+            def _send_oco(stop_limit_price_value):
+                """Helper to send OCO with optional stop-limit leg."""
+                return self.binance_client.new_oco_order(
+                    symbol=self.symbol,
+                    side="SELL",  # Sell assets
+                    quantity=quantity,
+                    price=limit_price,  # Take profit price
+                    stopPrice=stop_price,  # Stop loss trigger price
+                    stopLimitPrice=stop_limit_price_value if use_stop_limit and stop_limit_price_value else None,  # Stop limit price (None -> STOP_LOSS)
+                    stopLimitTimeInForce="GTC"  # Good Till Cancel
+                )
+
+            # Place OCO order; if WS complains about belowPrice not required (-1106), retry without stopLimitPrice.
+            response = _send_oco(stop_limit_price)
             
             # Check if the response indicates an error
             if isinstance(response, dict):
@@ -608,6 +614,31 @@ class RiskManager:
                     error_code = error_info.get('code', 'Unknown')
                     error_msg = error_info.get('msg', 'Unknown error')
                     self.logger.error(f"Error {error_code}: {error_msg}")
+
+                    # Retry once without stopLimitPrice when server rejects belowPrice (common WS -1106 case)
+                    if str(error_code) == "-1106" and "belowprice" in str(error_msg).lower():
+                        self.logger.warning("Retrying OCO without stopLimitPrice due to belowPrice rejection")
+                        retry_response = _send_oco(None)
+                        if isinstance(retry_response, dict) and retry_response.get('status') == 200 and 'error' not in retry_response:
+                            response = retry_response
+                            error_info = {}
+                            error_code = None
+                            error_msg = ""
+                            self.logger.info("OCO retry without stopLimitPrice succeeded")
+                        else:
+                            # If retry still failed, keep original error flow
+                            response = retry_response
+                            error_info = response.get('error', {}) if isinstance(response, dict) else {}
+                            error_code = error_info.get('code', 'Unknown')
+                            error_msg = error_info.get('msg', 'Unknown error')
+                            self.logger.error(f"Retry OCO without stopLimitPrice failed: {error_code} {error_msg}")
+
+                    # After retry handling, if still error, bail out
+                    if isinstance(response, dict) and ('error' in response or not response.get('success', True)):
+                        error_info = response.get('error', {})
+                        error_code = error_info.get('code', 'Unknown')
+                        error_msg = error_info.get('msg', 'Unknown error')
+                        self.logger.error(f"Error {error_code}: {error_msg}")
                     
                     # Send notification about the failure
                     if self.telegram_bot:

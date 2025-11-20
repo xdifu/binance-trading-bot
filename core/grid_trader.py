@@ -1202,17 +1202,25 @@ class GridTrader:
                     self.logger.info(f"Cancelled order {order['orderId']}")
                     
                 except Exception as e:
-                    # Handle specific Binance error codes
+                    # Handle specific Binance error codes (WS or REST)
+                    code_match = False
                     if isinstance(e, BinanceAPIException):
-                        # -2011: CANCEL_REJECTED (order doesn't exist/already filled)
-                        # -2011: "Unknown order sent" (legacy code)
-                        if e.code == -2011 or "Unknown order sent" in str(e):  # 修正重复的错误码
-                            self.logger.warning(
-                                f"Order {order['orderId']} cancellation rejected. "
-                                "Likely already filled or expired. Skipping."
-                            )
-                            continue  # Skip to next order instead of failing
-                            
+                        code_match = (e.code == -2011 or "unknown order sent" in str(e).lower())
+                    elif isinstance(e, Exception) and hasattr(e, "error_code"):
+                        code_match = (getattr(e, "error_code", None) == -2011 or "unknown order sent" in str(e).lower())
+                    else:
+                        # ClientError from binance.error
+                        try:
+                            code_match = (-2011 == getattr(e, "error_code", None)) or ("unknown order sent" in str(e).lower())
+                        except Exception:
+                            code_match = False
+
+                    if code_match:
+                        self.logger.warning(
+                            f"Order {order.get('orderId')} cancellation rejected (unknown/filled). Skipping."
+                        )
+                        continue  # Skip to next order instead of failing
+                    
                     # Re-raise unexpected errors
                     raise e
                     

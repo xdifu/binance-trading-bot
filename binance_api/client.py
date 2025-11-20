@@ -47,6 +47,7 @@ class BinanceClient:
                 self.logger.info("Initializing WebSocket API client...")
                 self.ws_client = BinanceWSClient(
                     api_key=self.api_key,
+                    api_secret=self.api_secret,
                     private_key_path=private_key_path,
                     private_key_pass=self.private_key_pass,
                     use_testnet=self.use_testnet
@@ -286,8 +287,7 @@ class BinanceClient:
 
                 timestamp_value = self._get_timestamp() + safety_offset
                 rest_kwargs['timestamp'] = timestamp_value
-                if 'timestamp' not in ws_kwargs:
-                    ws_kwargs['timestamp'] = timestamp_value
+                ws_kwargs['timestamp'] = timestamp_value
                 self.logger.debug(f"Added timestamp {timestamp_value} to request (offset: {self.time_offset}ms, safety: {safety_offset}ms)")
 
         # Try WebSocket API first if available, with retry attempts before downgrading
@@ -343,13 +343,15 @@ class BinanceClient:
                     break  # Use REST without marking WS unavailable
                     
                 except Exception as e:
-                    # Generic error - log and retry once, but don't immediately downgrade
+                    # Generic error - log and retry; after retries mark WS unavailable to allow REST fallback.
                     ws_attempts += 1
                     self.logger.warning(f"WebSocket API error for {ws_method_name} (attempt {ws_attempts}/{max_ws_attempts}): {e}")
                     
                     if ws_attempts >= max_ws_attempts:
-                        # After retries, log but don't mark unavailable for generic errors
-                        self.logger.warning(f"WebSocket API call {ws_method_name} failed after retries, using REST fallback")
+                        self.websocket_available = False
+                        self.logger.warning(
+                            f"WebSocket API call {ws_method_name} failed after retries, marking WS unavailable and using REST fallback"
+                        )
                         break
                     
                     time.sleep(0.5)
@@ -473,15 +475,10 @@ class BinanceClient:
                         f"WebSocket API error: status={status}, code={error_code}, msg={error_msg}"
                     )
                     
-                    # Raise ClientError to maintain consistency with REST API signature
+                    # Raise ClientError to maintain consistency with REST API signature.
+                    # Use positional args so Exception.__str__ contains the error details.
                     error_details = f"WebSocket API error (status={status}, code={error_code}): {error_msg}"
-                    raise ClientError(
-                        status_code=status,
-                        error_code=error_code,
-                        error_message=error_details,
-                        header=None,
-                        error_data=response
-                    )
+                    raise ClientError(status, error_code, error_details, None, response)
             
             # Extract result on success
             if 'result' in response:
@@ -923,6 +920,7 @@ class BinanceClient:
                 error_code = response.get('error', {}).get('code')
                 error_msg = response.get('error', {}).get('msg', 'Unknown error')
                 self.logger.error(f"OCO order failed with error {error_code}: {error_msg}")
+
                 # Return response with error info so caller knows order failed
                 return {"result": None, "error": response.get('error'), "success": False}
             
