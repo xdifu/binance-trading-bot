@@ -335,6 +335,91 @@ class TestBinanceClientFallbackLogic(unittest.TestCase):
         
         # WebSocket should be marked as unavailable
         self.assertFalse(client.websocket_available)
+    
+    def test_websocket_disconnection_exception_triggers_fallback(self):
+        """Verify WebSocketConnectionClosedException triggers fallback after retries"""
+        import time
+        import logging
+        
+        try:
+            from websocket import WebSocketConnectionClosedException
+        except ImportError:
+            self.skipTest("websocket-client library not available")
+        
+        client = BinanceClient.__new__(BinanceClient)
+        client.logger = logging.getLogger("fallback_test")
+        client.websocket_available = True
+        client.can_sign_requests = True
+        client.time_offset = 0
+        client.last_time_sync = int(time.time())
+        client.time_sync_interval = 600
+        
+        # Create mock WebSocket client that raises WebSocketConnectionClosedException
+        mock_ws_client = MagicMock()
+        mock_ws_client.test_method = MagicMock(
+            side_effect=WebSocketConnectionClosedException("Connection closed by server")
+        )
+        mock_ws_client.client = MagicMock()
+        mock_ws_client.client.ping_server = MagicMock(return_value={"status": 500})
+        client.ws_client = mock_ws_client
+        
+        # Create mock REST client
+        mock_rest_client = MagicMock()
+        mock_rest_client.test_method = MagicMock(return_value={"success": True})
+        client.rest_client = mock_rest_client
+        
+        # Execute with fallback - should mark WS unavailable and use REST
+        result = client._execute_with_fallback("test_method", "test_method")
+        
+        # Should have used REST client
+        self.assertEqual(result, {"success": True})
+        mock_rest_client.test_method.assert_called_once()
+        
+        # WebSocket should be marked as unavailable
+        self.assertFalse(client.websocket_available)
+        
+        # WebSocket method should have been called max_ws_attempts times
+        self.assertEqual(mock_ws_client.test_method.call_count, 2)
+    
+    def test_unexpected_exception_raises_instead_of_downgrade(self):
+        """Verify unexpected exceptions are raised instead of triggering REST fallback"""
+        import time
+        import logging
+        
+        client = BinanceClient.__new__(BinanceClient)
+        client.logger = logging.getLogger("fallback_test")
+        client.websocket_available = True
+        client.can_sign_requests = True
+        client.time_offset = 0
+        client.last_time_sync = int(time.time())
+        client.time_sync_interval = 600
+        
+        # Create mock WebSocket client that raises a custom unexpected exception
+        class UnexpectedError(Exception):
+            pass
+        
+        mock_ws_client = MagicMock()
+        mock_ws_client.test_method = MagicMock(
+            side_effect=UnexpectedError("This is a bug!")
+        )
+        client.ws_client = mock_ws_client
+        
+        # Create mock REST client (should NOT be called)
+        mock_rest_client = MagicMock()
+        mock_rest_client.test_method = MagicMock(return_value={"success": True})
+        client.rest_client = mock_rest_client
+        
+        # Execute with fallback - should raise UnexpectedError immediately
+        with self.assertRaises(UnexpectedError) as context:
+            client._execute_with_fallback("test_method", "test_method")
+        
+        # Verify the exception message
+        self.assertIn("This is a bug", str(context.exception))
+        
+        # REST client should NOT have been called (exception raises immediately)
+        mock_rest_client.test_method.assert_not_called()
+        
+        # WebSocket should STILL be marked as available (not downgraded)
 
 
 class TestBinanceClientResponseValidation(unittest.TestCase):

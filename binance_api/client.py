@@ -7,6 +7,16 @@ from binance.error import ClientError
 import config
 from utils.format_utils import format_price, format_quantity, get_precision_from_step_size
 
+# Import WebSocket exceptions for proper connection error handling
+try:
+    from websocket import WebSocketConnectionClosedException, WebSocketException
+    WEBSOCKET_EXCEPTIONS_AVAILABLE = True
+except ImportError:
+    # Fallback if websocket-client library not available
+    WebSocketConnectionClosedException = Exception
+    WebSocketException = Exception
+    WEBSOCKET_EXCEPTIONS_AVAILABLE = False
+
 # Import the WebSocket API client
 try:
     from .websocket_api_client import BinanceWSClient
@@ -343,18 +353,37 @@ class BinanceClient:
                     break  # Use REST without marking WS unavailable
                     
                 except Exception as e:
-                    # Generic error - log and retry; after retries mark WS unavailable to allow REST fallback.
-                    ws_attempts += 1
-                    self.logger.warning(f"WebSocket API error for {ws_method_name} (attempt {ws_attempts}/{max_ws_attempts}): {e}")
+                    # Distinguish connection-like errors from unexpected bugs
+                    connection_like = False
+                    if isinstance(e, (WebSocketConnectionClosedException, WebSocketException)):
+                        connection_like = True
+                    else:
+                        # Heuristic: treat generic Exceptions with connection keywords as connection issues
+                        msg = str(e).lower()
+                        for kw in ("connection", "disconnect", "closed", "timeout", "handshake"):
+                            if kw in msg:
+                                connection_like = True
+                                break
                     
-                    if ws_attempts >= max_ws_attempts:
-                        self.websocket_available = False
+                    if connection_like:
+                        ws_attempts += 1
                         self.logger.warning(
-                            f"WebSocket API call {ws_method_name} failed after retries, marking WS unavailable and using REST fallback"
+                            f"WebSocket disconnected for {ws_method_name} (attempt {ws_attempts}/{max_ws_attempts}): {e}"
                         )
-                        break
-                    
-                    time.sleep(0.5)
+                        if ws_attempts >= max_ws_attempts:
+                            self.websocket_available = False
+                            self.logger.warning(
+                                f"WebSocket API marked unavailable after {max_ws_attempts} disconnection failures"
+                            )
+                            break
+                        time.sleep(0.5)
+                    else:
+                        # Unexpected exception - bubble up to avoid masking bugs
+                        self.logger.error(
+                            f"Unexpected exception in {ws_method_name}: {type(e).__name__}: {e}",
+                            exc_info=True
+                        )
+                        raise  # Do not downgrade on logic/code errors
 
         # Fall back to REST API
         if not self.websocket_available:
