@@ -1039,6 +1039,26 @@ class BinanceWSClient:
             # Log the parameters for debugging
             self.logger.debug(f"Sending OCO order via WebSocket: {params}")
             
+            # Forward all optional parameters from **kwargs to support advanced features
+            # Reference: binance-spot-api-docs/web-socket-api.md lines 5112-5149
+            optional_params = [
+                # Order list level parameters
+                'listClientOrderId', 'newOrderRespType', 'selfTradePreventionMode', 'recvWindow',
+                # Above leg parameters
+                'aboveClientOrderId', 'aboveIcebergQty', 'aboveTrailingDelta',
+                'aboveStrategyId', 'aboveStrategyType',
+                'abovePegPriceType', 'abovePegOffsetType', 'abovePegOffsetValue',
+                # Below leg parameters
+                'belowClientOrderId', 'belowIcebergQty', 'belowTrailingDelta',
+                'belowStrategyId', 'belowStrategyType',
+                'belowPegPriceType', 'belowPegOffsetType', 'belowPegOffsetValue'
+            ]
+            
+            # Add any optional parameters that were provided
+            for param in optional_params:
+                if param in kwargs and kwargs[param] is not None:
+                    params[param] = kwargs[param]
+            
             # Send the request using the orderList.place.oco endpoint
             request_id = self.client._send_signed_request("orderList.place.oco", params)
             return self.client._wait_for_response(request_id)

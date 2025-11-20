@@ -266,8 +266,8 @@ class BinanceClient:
 
         if requires_signature and not getattr(self, "can_sign_requests", True):
             raise RuntimeError(
-                f"{rest_method_name} requires signed credentials but no Ed25519 key or HMAC secret is configured. "
-                "Provide PRIVATE_KEY or API_SECRET to enable trading/account calls."
+                f"{rest_method_name} requires signed credentials but no Ed25519 key, RSA key, or HMAC secret is configured. "
+                "Provide PRIVATE_KEY (Ed25519/RSA) or API_SECRET (HMAC) to enable trading/account calls."
             )
 
         # For methods that require signed requests, add adjusted timestamp
@@ -473,12 +473,14 @@ class BinanceClient:
                         f"WebSocket API error: status={status}, code={error_code}, msg={error_msg}"
                     )
                     
-                    # Raise ClientError to maintain consistency with REST API
+                    # Raise ClientError to maintain consistency with REST API signature
+                    error_details = f"WebSocket API error (status={status}, code={error_code}): {error_msg}"
                     raise ClientError(
                         status_code=status,
                         error_code=error_code,
-                        error_message=error_msg,
-                        response=response
+                        error_message=error_details,
+                        header=None,
+                        error_data=response
                     )
             
             # Extract result on success
@@ -942,6 +944,56 @@ class BinanceClient:
         except Exception as e:
             self.logger.error(f"Failed to create OCO order: {e}")
             return {"result": None, "error": {"code": -1000, "msg": str(e)}, "success": False}
+            
+    def cancel_oco_order(self, symbol, orderListId=None, listClientOrderId=None, 
+                        newClientOrderId=None, recvWindow=None):
+        """
+        Cancel an OCO order list.
+        
+        Reference: 
+        - WS API: binance-spot-api-docs/web-socket-api.md lines 5652-5817 (orderList.cancel)
+        - REST API: binance-spot-api-docs/rest-api.md lines 3248-3338 (DELETE /api/v3/orderList)
+        
+        Args:
+            symbol: Trading pair symbol (required)
+            orderListId: Order list ID to cancel (either this or listClientOrderId required)
+            listClientOrderId: List client order ID to cancel (either this or orderListId required)
+            newClientOrderId: New client order ID for the cancellation (optional)
+            recvWindow: Request validity window in milliseconds (optional)
+            
+        Returns:
+            Cancellation response with order list details
+            
+        Raises:
+            ClientError: If the cancellation fails or parameters are invalid
+        """
+        # Validate that at least one identifier is provided
+        if not orderListId and not listClientOrderId:
+            raise ValueError("Either orderListId or listClientOrderId must be provided")
+        
+        # Build parameters for WebSocket and REST APIs
+        params = {'symbol': symbol}
+        
+        if orderListId is not None:
+            params['orderListId'] = orderListId
+        if listClientOrderId is not None:
+            params['listClientOrderId'] = listClientOrderId
+        if newClientOrderId is not None:
+            params['newClientOrderId'] = newClientOrderId
+        if recvWindow is not None:
+            params['recvWindow'] = recvWindow
+        
+        # Use WS-first execution with REST fallback
+        # WS method: cancel_oco_order (in BinanceWSClient)
+        # REST method: cancel_oco_order (Spot client maps to DELETE /api/v3/orderList)
+        response = self._execute_with_fallback(
+            "cancel_oco_order",  # WebSocket method name
+            "cancel_oco_order",  # REST method name (binance-connector-python uses cancel_oco_order)
+            **params
+        )
+        
+        # Unwrap and validate WebSocket response if present
+        return self._unwrap_response(response)
             
     def check_balance(self, asset):
         """Check if balance is sufficient for an asset"""
