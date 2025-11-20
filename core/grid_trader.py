@@ -1659,7 +1659,7 @@ class GridTrader:
                 round_trip_fee = config.TRADING_FEE_RATE * 2
                 achieved_spread = None
                 slippage_estimate = 0.0
-                if self.protection_enabled:
+                if getattr(self, "protection_enabled", False):
                     est = self._estimate_slippage_and_spread(new_side, float(formatted_quantity))
                     if est:
                         slippage_estimate, book_spread, mid_price = est
@@ -1687,8 +1687,6 @@ class GridTrader:
                 # Calculate expected profit as a decimal (not percentage)
                 expected_profit_decimal = abs(float(new_price) - float(price)) / float(price)
                 effective_profit = expected_profit_decimal - round_trip_fee - (slippage_estimate * 2)
-
-                # Calculate minimum required profit with margin multiplier and buffer (as decimal)
                 min_required_profit = (round_trip_fee * config.PROFIT_MARGIN_MULTIPLIER) + min_profit_buffer
 
                 # Compare using consistent decimal units
@@ -2349,7 +2347,7 @@ class GridTrader:
 
     def _should_pause_orders(self):
         """Return True when protective mode wants to pause new orders (strong trend)."""
-        if not self.protection_enabled:
+        if not getattr(self, "protection_enabled", False):
             return False
         pause_on_trend = getattr(config, "PROTECTIVE_PAUSE_STRONG_TREND", True)
         if pause_on_trend and self.current_market_state in (MarketState.PUMP, MarketState.CRASH):

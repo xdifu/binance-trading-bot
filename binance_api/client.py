@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from binance.spot import Spot
 from binance.error import ClientError
 import config
-from utils.format_utils import format_price
+from utils.format_utils import format_price, format_quantity, get_precision_from_step_size
 
 # Import the WebSocket API client
 try:
@@ -32,6 +32,7 @@ class BinanceClient:
         self.ws_client = None
         self.rest_client = None
         self.can_sign_requests = False
+        self._symbol_info_cache = {}  # Cache symbol info for precision formatting
         
         # Add time offset variable for server time synchronization
         self.time_offset = 0
@@ -226,7 +227,7 @@ class BinanceClient:
 
         requires_signature = any(keyword in rest_method_name for keyword in ['account', 'order', 'oco', 'myTrades', 'openOrders'])
 
-        if requires_signature and not self.can_sign_requests:
+        if requires_signature and not getattr(self, "can_sign_requests", True):
             raise RuntimeError(
                 f"{rest_method_name} requires signed credentials but no Ed25519 key or HMAC secret is configured. "
                 "Provide PRIVATE_KEY or API_SECRET to enable trading/account calls."
@@ -324,19 +325,63 @@ class BinanceClient:
                 pass
         return False
 
-    def _adjust_price_precision(self, price):
+    def _get_symbol_precisions(self, symbol):
+        """
+        Get price and quantity precision from exchange filters for a symbol.
+
+        Returns (price_precision, quantity_precision)
+        """
+        price_precision = 8
+        quantity_precision = 8
+        try:
+            if symbol in self._symbol_info_cache:
+                symbol_info = self._symbol_info_cache[symbol]
+            else:
+                symbol_info = self.get_symbol_info(symbol)
+                if symbol_info:
+                    self._symbol_info_cache[symbol] = symbol_info
+
+            if symbol_info and "filters" in symbol_info:
+                for f in symbol_info["filters"]:
+                    if f.get("filterType") == "PRICE_FILTER" and f.get("tickSize"):
+                        price_precision = get_precision_from_step_size(f["tickSize"])
+                    elif f.get("filterType") == "LOT_SIZE" and f.get("stepSize"):
+                        quantity_precision = get_precision_from_step_size(f["stepSize"])
+        except Exception as e:
+            self.logger.debug(f"Failed to derive precisions for {symbol}: {e}")
+        return price_precision, quantity_precision
+
+    def _adjust_price_precision(self, price, symbol=None):
         """
         Format price with appropriate precision
         
         Args:
             price: Price value to format
+            symbol: Optional symbol to derive tick size precision
             
         Returns:
             str: Formatted price string
         """
-        # 使用默认精度 8 作为安全值，因为客户端可能没有获取具体交易对的精度
         precision = 8
+        if symbol:
+            precision, _ = self._get_symbol_precisions(symbol)
         return format_price(price, precision)
+
+    def _adjust_quantity_precision(self, quantity, symbol=None):
+        """
+        Format quantity with appropriate precision
+        
+        Args:
+            quantity: Quantity value to format
+            symbol: Optional symbol to derive step size precision
+            
+        Returns:
+            str: Formatted quantity string
+        """
+        precision = 8
+        if symbol:
+            _, precision = self._get_symbol_precisions(symbol)
+        return format_quantity(quantity, precision)
 
     def get_exchange_info(self, symbol=None):
         """Get exchange information"""
@@ -406,8 +451,9 @@ class BinanceClient:
                 self.logger.error(f"Non-numeric price value: {price} for {side} order")
                 raise ValueError(f"Non-numeric price value: {price}")
                 
-            # Format price to ensure it's a valid value and proper string format
-            formatted_price = self._adjust_price_precision(price_float)
+            # Format price and quantity according to symbol filters
+            formatted_price = self._adjust_price_precision(price_float, symbol)
+            formatted_quantity = self._adjust_quantity_precision(quantity, symbol)
             
             # Ensure using string formats
             params = {
@@ -415,7 +461,7 @@ class BinanceClient:
                 'side': side,
                 'type': 'LIMIT',
                 'timeInForce': 'GTC',
-                'quantity': str(quantity),
+                'quantity': formatted_quantity,
                 'price': formatted_price  # Use formatted price
             }
             
@@ -428,11 +474,12 @@ class BinanceClient:
     def place_market_order(self, symbol, side, quantity):
         """Place market order"""
         try:
+            formatted_quantity = self._adjust_quantity_precision(quantity, symbol)
             params = {
                 'symbol': symbol,
                 'side': side,
                 'type': 'MARKET',
-                'quantity': str(quantity)  # Ensure using string format
+                'quantity': formatted_quantity  # Ensure using string format
             }
             return self._execute_with_fallback("new_order", "new_order", **params)
         except Exception as e:
@@ -501,15 +548,15 @@ class BinanceClient:
                 raise ValueError(f"Non-numeric stop price: {stop_price}")
                 
             # Format stop price
-            formatted_stop_price = self._adjust_price_precision(stop_price_float)
+            formatted_stop_price = self._adjust_price_precision(stop_price_float, symbol)
+            formatted_quantity = self._adjust_quantity_precision(quantity, symbol)
                 
             params = {
                 'symbol': symbol,
                 'side': 'SELL',
                 'type': 'STOP_LOSS',
-                'quantity': str(quantity),
-                'stopPrice': formatted_stop_price,
-                'timeInForce': 'GTC'
+                'quantity': formatted_quantity,
+                'stopPrice': formatted_stop_price
             }
             return self._execute_with_fallback("new_order", "new_order", **params)
         except Exception as e:
@@ -530,15 +577,15 @@ class BinanceClient:
                 raise ValueError(f"Non-numeric stop price: {stop_price}")
                 
             # Format stop price
-            formatted_stop_price = self._adjust_price_precision(stop_price_float)
+            formatted_stop_price = self._adjust_price_precision(stop_price_float, symbol)
+            formatted_quantity = self._adjust_quantity_precision(quantity, symbol)
                 
             params = {
                 'symbol': symbol,
                 'side': 'SELL',
                 'type': 'TAKE_PROFIT',
-                'quantity': str(quantity),
-                'stopPrice': formatted_stop_price,
-                'timeInForce': 'GTC'
+                'quantity': formatted_quantity,
+                'stopPrice': formatted_stop_price
             }
             return self._execute_with_fallback("new_order", "new_order", **params)
         except Exception as e:
@@ -566,16 +613,22 @@ class BinanceClient:
             **kwargs: Additional parameters to pass to the API
         """
         try:
+            price_precision, qty_precision = self._get_symbol_precisions(symbol)
+            formatted_quantity = format_quantity(quantity, qty_precision)
+            formatted_price = format_price(price, price_precision)
+            formatted_stop = format_price(stopPrice, price_precision)
+
             base_params = {
                 "symbol": symbol,
                 "side": side,
-                "quantity": quantity,
-                "price": price,
-                "stopPrice": stopPrice
+                "quantity": formatted_quantity,
+                "price": formatted_price,
+                "stopPrice": formatted_stop
             }
 
             if stopLimitPrice:
-                base_params["stopLimitPrice"] = stopLimitPrice
+                formatted_stop_limit = format_price(stopLimitPrice, price_precision)
+                base_params["stopLimitPrice"] = formatted_stop_limit
                 base_params["stopLimitTimeInForce"] = stopLimitTimeInForce
 
             rest_params = dict(base_params)
@@ -594,14 +647,20 @@ class BinanceClient:
             elif "aboveType" in ws_only_params:
                 ws_params["aboveType"] = ws_only_params["aboveType"]
             else:
-                ws_params.setdefault("aboveType", "LIMIT_MAKER")
+                if side == "SELL":
+                    ws_params.setdefault("aboveType", "LIMIT_MAKER")
+                else:
+                    ws_params.setdefault("aboveType", "STOP_LOSS")
 
             if belowType is not None:
                 ws_params["belowType"] = belowType
             elif "belowType" in ws_only_params:
                 ws_params["belowType"] = ws_only_params["belowType"]
             else:
-                ws_params.setdefault("belowType", "LIMIT_MAKER")
+                if side == "SELL":
+                    ws_params.setdefault("belowType", "STOP_LOSS")
+                else:
+                    ws_params.setdefault("belowType", "LIMIT_MAKER")
 
             response = self._execute_with_fallback(
                 "new_oco_order",

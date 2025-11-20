@@ -156,7 +156,7 @@ class GridTradingBot:
                 self._handle_oco_update(message)
             
             # Handle account balance/position updates
-            elif hasattr(message, 'e') and message.e in ('outboundAccountPosition', 'outboundAccountInfo'):
+            elif hasattr(message, 'e') and message.e in ('outboundAccountPosition', 'balanceUpdate'):
                 self._handle_account_position_update(message)
                 
         except AttributeError:
@@ -179,7 +179,7 @@ class GridTradingBot:
                 elif 'e' in message and message['e'] == 'listStatus':
                     self._handle_oco_update(message)
                 
-                elif 'e' in message and message['e'] in ('outboundAccountPosition', 'outboundAccountInfo'):
+                elif 'e' in message and message['e'] in ('outboundAccountPosition', 'balanceUpdate'):
                     self._handle_account_position_update(message)
         except Exception as e:
             self.logger.error(f"Failed to process WebSocket message: {e}")

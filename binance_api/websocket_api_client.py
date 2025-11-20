@@ -958,30 +958,38 @@ class BinanceWSClient:
         - below leg: LIMIT_MAKER (take profit - executed when price drops)
         """
         try:
-            # Create core parameters
             params = {
                 "symbol": symbol,
                 "side": side,
                 "quantity": str(quantity)  # Ensure string format
             }
-            
-            if side == "SELL":  # Risk management OCO for selling
-                # Above leg is LIMIT_MAKER (take profit - executed when price rises)
-                params["aboveType"] = "LIMIT_MAKER"
-                params["abovePrice"] = str(price)  # Take profit price
-                
-                # Below leg is STOP_LOSS (stop loss - triggered when price drops)
-                params["belowType"] = "STOP_LOSS"
-                params["belowStopPrice"] = str(stopPrice)  # Stop loss trigger price
-            
-            else:  # BUY order OCO
-                # Above leg is STOP_LOSS (stop loss - triggered when price rises)
-                params["aboveType"] = "STOP_LOSS"
-                params["aboveStopPrice"] = str(stopPrice)  # Stop loss trigger price
-                
-                # Below leg is LIMIT_MAKER (take profit - executed when price drops)
-                params["belowType"] = "LIMIT_MAKER"
-                params["belowPrice"] = str(price)  # Take profit price
+
+            # Map legs based on side, allow limit stop legs when stopLimitPrice is provided
+            if side == "SELL":
+                params["aboveType"] = aboveType or "LIMIT_MAKER"
+                params["abovePrice"] = str(price)
+
+                if stopLimitPrice:
+                    params["belowType"] = belowType or "STOP_LOSS_LIMIT"
+                    params["belowPrice"] = str(stopLimitPrice)
+                    params["belowStopPrice"] = str(stopPrice)
+                    params["belowTimeInForce"] = stopLimitTimeInForce
+                else:
+                    params["belowType"] = belowType or "STOP_LOSS"
+                    params["belowStopPrice"] = str(stopPrice)
+            else:
+                # BUY: invert legs
+                if stopLimitPrice:
+                    params["aboveType"] = aboveType or "STOP_LOSS_LIMIT"
+                    params["abovePrice"] = str(stopLimitPrice)
+                    params["aboveStopPrice"] = str(stopPrice)
+                    params["aboveTimeInForce"] = stopLimitTimeInForce
+                else:
+                    params["aboveType"] = aboveType or "STOP_LOSS"
+                    params["aboveStopPrice"] = str(stopPrice)
+
+                params["belowType"] = belowType or "LIMIT_MAKER"
+                params["belowPrice"] = str(price)
             
             # Log the parameters for debugging
             self.logger.debug(f"Sending OCO order via WebSocket: {params}")
@@ -993,3 +1001,56 @@ class BinanceWSClient:
         except Exception as e:
             self.logger.error(f"Error creating OCO order via WebSocket API: {e}")
             raise
+
+    def exchange_info(self, symbol=None):
+        """Fetch exchange information via WS API."""
+        params = {}
+        if symbol:
+            params["symbol"] = symbol
+        request_id = self.client._send_request("exchangeInfo", params)
+        return self.client._wait_for_response(request_id)
+
+    def ticker_price(self, symbol):
+        """Get latest price for a symbol via WS API."""
+        params = {"symbol": symbol}
+        request_id = self.client._send_request("ticker.price", params)
+        return self.client._wait_for_response(request_id)
+
+    def depth(self, symbol, limit=20):
+        """Get partial order book depth via WS API."""
+        params = {"symbol": symbol, "limit": limit}
+        request_id = self.client._send_request("depth", params)
+        return self.client._wait_for_response(request_id)
+
+    def klines(self, symbol, interval, startTime=None, endTime=None, limit=500):
+        """Get kline data via WS API."""
+        params = {"symbol": symbol, "interval": interval, "limit": limit}
+        if startTime is not None:
+            params["startTime"] = startTime
+        if endTime is not None:
+            params["endTime"] = endTime
+        request_id = self.client._send_request("klines", params)
+        return self.client._wait_for_response(request_id)
+
+    def account(self):
+        """Get account status (balances) via WS API."""
+        request_id = self.client._send_signed_request("account.status")
+        return self.client._wait_for_response(request_id)
+
+    def new_order(self, **params):
+        """Place a new order via WS API."""
+        request_id = self.client._send_signed_request("order.place", params)
+        return self.client._wait_for_response(request_id)
+
+    def cancel_order(self, **params):
+        """Cancel an order via WS API."""
+        request_id = self.client._send_signed_request("order.cancel", params)
+        return self.client._wait_for_response(request_id)
+
+    def get_open_orders(self, symbol=None):
+        """Get open orders via WS API."""
+        params = {}
+        if symbol:
+            params["symbol"] = symbol
+        request_id = self.client._send_signed_request("openOrders.status", params)
+        return self.client._wait_for_response(request_id)

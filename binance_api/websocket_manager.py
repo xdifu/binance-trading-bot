@@ -141,7 +141,6 @@ class MarketDataWebsocketManager:
             'outboundAccountPosition': self._handle_account_update,
             'executionReport': self._handle_order_update,
             'listStatus': self._handle_oco_update,
-            'outboundAccountInfo': self._handle_account_update,
             'balanceUpdate': self._handle_balance_update
         }
     
