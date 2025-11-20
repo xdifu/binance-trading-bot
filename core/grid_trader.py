@@ -275,7 +275,6 @@ class GridTrader:
         if self.is_running:
             return "System already running"
         
-        self.is_running = True
         self.simulation_mode = simulation
         
         # Update client status before starting
@@ -298,6 +297,7 @@ class GridTrader:
             self.logger.error(error_msg)
             if self.telegram_bot:
                 self.telegram_bot.send_message(f"⚠️ {error_msg}")
+            self.is_running = False
             return f"Error: {error_msg}"
         
         temp_grid = self._calculate_grid_levels()
@@ -306,6 +306,7 @@ class GridTrader:
             self.logger.error(error_msg)
             if self.telegram_bot:
                 self.telegram_bot.send_message(f"⚠️ {error_msg}")
+            self.is_running = False
             return f"Error: {error_msg}"
         
         # Calculate actual needed resources
@@ -359,6 +360,7 @@ class GridTrader:
         
         # Cancel all previous open orders
         self._cancel_all_open_orders()
+        self.is_running = True  # Mark running only after all validations pass
         
         simulation_status = "Simulation mode: ON" if self.simulation_mode else "Simulation mode: OFF"
         message = f"Grid trading system started!\nCurrent price: {self.current_market_price}\nGrid range: {len(self.grid)} levels\nUsing {api_type}\n{simulation_status}"

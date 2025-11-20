@@ -5,12 +5,13 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 import config
 
 class TelegramBot:
-    def __init__(self, token, allowed_users, grid_trader=None, risk_manager=None):
+    def __init__(self, token, allowed_users, grid_trader=None, risk_manager=None, on_symbol_change=None):
         """Initialize the Telegram bot with the given token and allowed users"""
         self.application = Application.builder().token(token).build()
         self.allowed_users = allowed_users
         self.grid_trader = grid_trader
         self.risk_manager = risk_manager
+        self.on_symbol_change = on_symbol_change  # Optional callback to propagate symbol changes to controller
         self.logger = logging.getLogger(__name__)
         self.is_running = False
         self.loop = None
@@ -250,46 +251,6 @@ class TelegramBot:
                     )
                     return
                     
-                # Check if grid trading is running, stop it if needed
-                grid_was_running = False
-                if self.grid_trader and self.grid_trader.is_running:
-                    grid_was_running = True
-                    await update.message.reply_text("Stopping current grid trading to update symbol...")
-                    self.grid_trader.stop()
-                    if self.risk_manager and self.risk_manager.is_active:
-                        self.risk_manager.deactivate()
-                
-                # Update the trading symbol
-                old_symbol = config.SYMBOL
-                config.SYMBOL = new_symbol
-                
-                # Update grid trader's symbol
-                if hasattr(self.grid_trader, '_symbol'):
-                    self.grid_trader._symbol = new_symbol
-                self.grid_trader.symbol = new_symbol
-                
-                # Add this code: Update risk manager's symbol
-                if self.risk_manager:
-                    # If risk management is active, deactivate first
-                    if self.risk_manager.is_active:
-                        self.risk_manager.deactivate()
-                        
-                    # Update risk manager's symbol
-                    self.risk_manager.update_symbol(new_symbol)
-                    self.logger.info(f"Risk manager updated to use symbol {new_symbol}")
-                
-                # Reload symbol info
-                self.grid_trader.symbol_info = self.grid_trader._get_symbol_info()
-                self.grid_trader.tick_size = self.grid_trader._get_tick_size()
-                self.grid_trader.step_size = self.grid_trader._get_step_size()
-                self.grid_trader.price_precision = self.grid_trader._get_price_precision()
-                self.grid_trader.quantity_precision = self.grid_trader._get_quantity_precision()
-                
-                # Log and notify about the change
-                success_message = f"✅ Symbol updated from {old_symbol} to {new_symbol}"
-                self.logger.info(success_message)
-                await update.message.reply_text(success_message)
-                
                 # Show symbol details
                 min_notional = "unknown"
                 for f in symbol_info.get('filters', []):
@@ -305,11 +266,17 @@ class TelegramBot:
                     f"Minimum notional value: {min_notional}"
                 )
                 await update.message.reply_text(info_message)
-                
-                # Ask user if they want to restart grid trading
-                if grid_was_running:
-                    restart_message = "Would you like to restart grid trading with the new symbol?\n/startgrid - Start grid trading"
-                    await update.message.reply_text(restart_message)
+
+                # Delegate further orchestration (cancel/restart streams etc.) to controller if available
+                if self.on_symbol_change:
+                    await update.message.reply_text("Applying symbol change to trading system...")
+                    controller_message = self.on_symbol_change(new_symbol)
+                    if controller_message:
+                        await update.message.reply_text(controller_message)
+                else:
+                    await update.message.reply_text(
+                        "Symbol verified but controller is not configured; please restart the bot to apply changes."
+                    )
                 
             except Exception as e:
                 error_message = f"❌ Failed to update symbol: {str(e)}"

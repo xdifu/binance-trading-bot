@@ -26,8 +26,8 @@ class RiskManager:
         capital_size = getattr(config, 'CAPITAL_SIZE', 'standard').lower()
         
         # Get base risk values from config
-        base_stop_loss = config.TRAILING_STOP_LOSS_PERCENT / 100
-        base_take_profit = config.TRAILING_TAKE_PROFIT_PERCENT / 100
+        base_stop_loss = self._percent_to_fraction(config.TRAILING_STOP_LOSS_PERCENT, "Trailing stop loss")
+        base_take_profit = self._percent_to_fraction(config.TRAILING_TAKE_PROFIT_PERCENT, "Trailing take profit")
 
         # Apply settings based on capital size
         if capital_size == 'small':
@@ -79,6 +79,23 @@ class RiskManager:
         
         # Track pending operations for better error handling
         self.pending_oco_orders = {}
+
+    def _percent_to_fraction(self, percent_value, label):
+        """
+        Convert configured percentage (e.g. 0.5 meaning 0.5%) into fraction.
+        Provides a single place to clarify units in logs.
+        """
+        try:
+            numeric_value = float(percent_value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{label} must be numeric, got {percent_value}")
+
+        if numeric_value <= 0:
+            raise ValueError(f"{label} must be positive, got {percent_value}")
+
+        fraction = numeric_value / 100
+        self.logger.info(f"{label} configured as {numeric_value}% -> fraction {fraction:.6f}")
+        return fraction
 
     def _get_symbol_info(self):
         """

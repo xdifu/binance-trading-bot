@@ -18,6 +18,7 @@ class BinanceClient:
     def __init__(self):
         # Get API key from environment variables
         self.api_key = os.getenv("API_KEY", config.API_KEY)
+        self.api_secret = os.getenv("API_SECRET", getattr(config, "API_SECRET", None))
         # Get private key file path
         private_key_path = os.getenv("PRIVATE_KEY", config.PRIVATE_KEY)
         self.private_key_pass = None if os.getenv("PRIVATE_KEY_PASS") == "None" else os.getenv("PRIVATE_KEY_PASS", 
@@ -30,6 +31,7 @@ class BinanceClient:
         self.websocket_available = False
         self.ws_client = None
         self.rest_client = None
+        self.can_sign_requests = False
         
         # Add time offset variable for server time synchronization
         self.time_offset = 0
@@ -64,27 +66,44 @@ class BinanceClient:
             base_url = "https://testnet.binance.vision" if self.use_testnet else self.base_url
             
             # Read private key file content
-            if os.path.isfile(private_key_path):
+            self.has_private_key = os.path.isfile(private_key_path)
+            private_key_data = None
+            if self.has_private_key:
                 with open(private_key_path, 'rb') as f:
                     private_key_data = f.read()
             else:
-                self.logger.error(f"Private key file not found: {private_key_path}")
-                raise FileNotFoundError(f"Private key file not found: {private_key_path}")
+                self.logger.warning(f"Private key file not found: {private_key_path} (will try HMAC/keyless mode)")
+            self.has_hmac_secret = bool(self.api_secret)
             
             # Initialize REST client
-            self.rest_client = Spot(
-                api_key=self.api_key,
-                base_url=base_url,
-                private_key=private_key_data,
-                private_key_pass=self.private_key_pass
-            )
+            rest_kwargs = {
+                "api_key": self.api_key,
+                "base_url": base_url,
+            }
+            if self.has_private_key and private_key_data:
+                rest_kwargs.update(
+                    private_key=private_key_data,
+                    private_key_pass=self.private_key_pass,
+                )
+                self.can_sign_requests = True
+            elif self.has_hmac_secret:
+                rest_kwargs.update(api_secret=self.api_secret)
+                self.can_sign_requests = True
+            else:
+                # Public-only mode (suitable for simulations / dry runs that don't hit signed endpoints)
+                self.logger.warning("No signing credentials found; REST client will operate in public-only mode (no trading or account calls).")
+            
+            self.rest_client = Spot(**rest_kwargs)
             
             # Synchronize time before making any API calls
             self._sync_time()
             
-            # Verify connection is valid
-            self.rest_client.account()
-            self.logger.info("REST API client connected successfully (fallback ready)")
+            # Verify connection is valid if we can sign requests
+            if self.can_sign_requests:
+                self.rest_client.account()
+                self.logger.info("REST API client connected successfully (fallback ready)")
+            else:
+                self.logger.info("REST API client initialized for public endpoints only")
             
             # If WebSocket client failed, log a warning
             if not self.websocket_available:
@@ -205,8 +224,16 @@ class BinanceClient:
         if current_time - self.last_time_sync > self.time_sync_interval:
             self._sync_time()
 
+        requires_signature = any(keyword in rest_method_name for keyword in ['account', 'order', 'oco', 'myTrades', 'openOrders'])
+
+        if requires_signature and not self.can_sign_requests:
+            raise RuntimeError(
+                f"{rest_method_name} requires signed credentials but no Ed25519 key or HMAC secret is configured. "
+                "Provide PRIVATE_KEY or API_SECRET to enable trading/account calls."
+            )
+
         # For methods that require signed requests, add adjusted timestamp
-        if any(keyword in rest_method_name for keyword in ['account', 'order', 'oco', 'myTrades', 'openOrders']):
+        if requires_signature:
             if 'timestamp' not in rest_kwargs:
                 # Calculate adaptive safety offset based on current time offset
                 # If already behind (negative offset), use smaller safety margin

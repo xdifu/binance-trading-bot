@@ -70,8 +70,8 @@ MIN_NOTIONAL_VALUE = 6  # 最小订单价值(USDT)，低于此值的订单将被
 # 风险管理设置
 #############################################
 
-TRAILING_STOP_LOSS_PERCENT = 0.5  # 追踪止损百分比，减小可更早触发止损保护资金
-TRAILING_TAKE_PROFIT_PERCENT = 0.8  # 追踪止盈百分比，减小可更早锁定利润
+TRAILING_STOP_LOSS_PERCENT = 0.5  # 追踪止损百分比（以百分数填写，例如0.5表示0.5%）
+TRAILING_TAKE_PROFIT_PERCENT = 0.8  # 追踪止盈百分比（以百分数填写，例如0.8表示0.8%）
 RISK_UPDATE_THRESHOLD_PERCENT = 0.0025  # 风险阈值更新百分比，减小可更灵敏地调整止损位
 RISK_UPDATE_INTERVAL_MINUTES = 5  # 风险更新间隔(分钟)，减小可更频繁更新止损止盈
 

@@ -51,7 +51,8 @@ pip install -r requirements.txt
 
 1. Copy `.env.example` to `.env` (or create a new file) and provide:
    - `API_KEY`
-   - `PRIVATE_KEY` (path to PEM file for Ed25519 requests)
+   - **Either** `PRIVATE_KEY` (path to PEM file for Ed25519 requests) **or** `API_SECRET` for classic HMAC signing.  
+     If neither is set the bot can still read public market data, but all trading/account endpoints are disabled.
    - `PRIVATE_KEY_PASS` if the key is encrypted (use `None` for no passphrase)
    - Optional `TELEGRAM_TOKEN` and `ALLOWED_TELEGRAM_USERS`
 2. Store private keys under `key/` with the correct permissions.
@@ -64,6 +65,7 @@ All trading/risk parameters live in `config.py`. Important sections:
 - **Grid definition**: `GRID_LEVELS`, `GRID_SPACING`, `GRID_RANGE_PERCENT`, `RECALCULATION_PERIOD`
 - **Volatility inputs**: `ATR_PERIOD`, `ATR_RATIO`, asymmetric core ratios
 - **Risk controls**: `TRAILING_STOP_LOSS_PERCENT`, `TRAILING_TAKE_PROFIT_PERCENT`, `RISK_UPDATE_*`
+  (values are percentages; e.g. `0.5` means 0.5%)
 - **Order hygiene**: `MAX_ORDER_AGE_HOURS`, `PRICE_DEVIATION_THRESHOLD`, `MIN_NOTIONAL_VALUE`
 - **Telemetry**: `LOG_LEVEL`, `ENABLE_TELEGRAM`, `DATA_DIR`
 

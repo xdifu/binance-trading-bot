@@ -62,7 +62,8 @@ class GridTradingBot:
             if config.TELEGRAM_TOKEN and config.ALLOWED_TELEGRAM_USERS:
                 self.telegram_bot = TelegramBot(
                     token=config.TELEGRAM_TOKEN,
-                    allowed_users=config.ALLOWED_TELEGRAM_USERS
+                    allowed_users=config.ALLOWED_TELEGRAM_USERS,
+                    on_symbol_change=self.update_symbol
                 )
                 logger.info("Telegram bot initialized successfully")
         except Exception as e:
@@ -87,6 +88,48 @@ class GridTradingBot:
         if self.telegram_bot:
             self.telegram_bot.grid_trader = self.grid_trader
             self.telegram_bot.risk_manager = self.risk_manager
+
+    def update_symbol(self, new_symbol, restart_grid=False):
+        """
+        Update trading symbol across subsystems and refresh WebSocket subscriptions.
+        
+        Args:
+            new_symbol (str): Target symbol, e.g. BTCUSDT
+            restart_grid (bool): Whether to auto-start grid after switching
+        """
+        old_symbol = config.SYMBOL
+        try:
+            # Stop trading/risk modules first to release locks and avoid mixed symbols
+            if self.grid_trader and self.grid_trader.is_running:
+                self.grid_trader.stop()
+            if self.risk_manager and self.risk_manager.is_active:
+                self.risk_manager.deactivate()
+
+            # Apply new symbol to config and modules
+            config.SYMBOL = new_symbol
+            if self.grid_trader:
+                self.grid_trader.update_symbol(new_symbol)
+            if self.risk_manager:
+                self.risk_manager.update_symbol(new_symbol)
+
+            # Reset listen key to ensure we subscribe only to the new symbol
+            with self.state_lock:
+                self.listen_key = None
+
+            # Rebuild WebSocket streams for the new symbol if the bot is running
+            if self.is_running:
+                if self.ws_manager:
+                    self.ws_manager.stop()
+                self._setup_websocket()
+
+                if restart_grid and self.grid_trader:
+                    self.grid_trader.start_balanced_grid()
+
+            return f"✅ Symbol updated from {old_symbol} to {new_symbol}"
+        except Exception as e:
+            error_msg = f"Failed to update symbol to {new_symbol}: {e}"
+            logger.error(error_msg)
+            return f"❌ {error_msg}"
 
     def _handle_websocket_message(self, message):
         """Process WebSocket messages with focus on business logic only"""
