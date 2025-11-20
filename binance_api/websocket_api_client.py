@@ -684,20 +684,11 @@ class BinanceWebSocketAPIClient:
         if self.session_authenticated:
             return self._send_request(method, params, callback)
         
-        # Otherwise, sign the request
+        # Otherwise, sign the request (WebSocket API requires apiKey + signature)
         params['apiKey'] = self.api_key
         
         try:
-            # Import needed for signature generation - import here to avoid circular imports
-            try:
-                from binance.lib.utils import websocket_api_signature
-                
-                # Use the official Binance signature method if available
-                params = websocket_api_signature(self.api_key, self.api_secret, params)
-            except ImportError:
-                # Fallback to our custom signature method
-                params['signature'] = self._generate_signature(params)
-            
+            params['signature'] = self._generate_signature(params)
             return self._send_request(method, params, callback)
         except Exception as e:
             self.logger.error(f"Error signing request: {e}")
@@ -878,7 +869,6 @@ class BinanceWebSocketAPIClient:
             sub_id = response.get("result", {}).get("subscriptionId")
             self.user_stream_subscription_id = sub_id
             self.user_stream_active = True
-            self._start_user_stream_keepalive(sub_id)
         return response
 
     def unsubscribe_user_data_stream(self, subscription_id: Optional[int] = None) -> Dict:
@@ -900,28 +890,10 @@ class BinanceWebSocketAPIClient:
 
     def _start_user_stream_keepalive(self, subscription_id: Optional[int]) -> None:
         """
-        Launch a background keepalive for signature-based user data streams.
-        Streams expire after 60 minutes unless pinged.
+        Binance WS-API user data stream subscriptions do not require explicit keepalives.
+        This method is retained for interface compatibility but intentionally does nothing.
         """
         self._stop_user_stream_keepalive()
-        if subscription_id is None:
-            return
-
-        self._user_stream_keepalive_stop.clear()
-
-        def _keepalive():
-            interval = 30 * 60  # ping every 30 minutes
-            while not self._user_stream_keepalive_stop.wait(interval):
-                try:
-                    params = {"subscriptionId": subscription_id}
-                    req_id = self._send_signed_request("userDataStream.ping", params)
-                    self._wait_for_response(req_id, timeout=10)
-                    self.logger.debug(f"userDataStream.ping sent for subscriptionId={subscription_id}")
-                except Exception as e:
-                    self.logger.warning(f"userDataStream.ping failed: {e}")
-
-        self._user_stream_keepalive_thread = threading.Thread(target=_keepalive, daemon=True)
-        self._user_stream_keepalive_thread.start()
 
     def _stop_user_stream_keepalive(self) -> None:
         """Stop keepalive if running."""

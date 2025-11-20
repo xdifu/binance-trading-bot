@@ -4,6 +4,7 @@ import threading
 import json
 from queue import Queue
 from unittest.mock import MagicMock
+import base64
 
 import pytest
 
@@ -21,6 +22,7 @@ if "binance" not in sys.modules:
 
 import logging
 from binance_api.websocket_api_client import BinanceWebSocketAPIClient, BinanceWSClient
+from cryptography.hazmat.primitives.asymmetric import ed25519
 
 
 def _build_client_stub():
@@ -47,12 +49,10 @@ def test_subscribe_user_stream_uses_plain_method_when_authenticated():
     client.session_authenticated = True
     client._send_request = MagicMock(return_value="req123")
     client._wait_for_response = MagicMock(return_value={"status": 200, "result": {"subscriptionId": 9}})
-    client._start_user_stream_keepalive = MagicMock()
 
     response = client.subscribe_user_data_stream()
 
     client._send_request.assert_called_once_with("userDataStream.subscribe")
-    client._start_user_stream_keepalive.assert_called_once_with(9)
     assert client.user_stream_active is True
     assert client.user_stream_subscription_id == 9
     assert response["status"] == 200
@@ -63,12 +63,10 @@ def test_subscribe_user_stream_signature_when_not_authenticated():
     client.session_authenticated = False
     client._send_signed_request = MagicMock(return_value="req999")
     client._wait_for_response = MagicMock(return_value={"status": 200, "result": {"subscriptionId": 3}})
-    client._start_user_stream_keepalive = MagicMock()
 
     response = client.subscribe_user_data_stream()
 
     client._send_signed_request.assert_called_once_with("userDataStream.subscribe.signature")
-    client._start_user_stream_keepalive.assert_called_once_with(3)
     assert client.user_stream_active is True
     assert client.user_stream_subscription_id == 3
     assert response["status"] == 200
@@ -128,3 +126,34 @@ def test_cancel_oco_order_uses_order_list_cancel_method():
 
     mock_inner._send_signed_request.assert_called_once_with("orderList.cancel", {"orderListId": 123})
     assert result["status"] == 200
+
+
+def test_signed_request_prefers_ed25519_signature(monkeypatch):
+    client = _build_client_stub()
+    client.api_key = "test-key"
+    client.api_secret = "hmac-should-not-be-used"
+    client.private_key = ed25519.Ed25519PrivateKey.generate()
+    client.get_adjusted_timestamp = MagicMock(return_value=1234567890123)
+
+    captured = {}
+
+    def fake_send_request(method, params, callback=None):
+        captured["method"] = method
+        captured["params"] = params
+        return "req-abc"
+
+    client._send_request = fake_send_request
+
+    request_id = client._send_signed_request("order.place", {"symbol": "BTCUSDT"})
+    assert request_id == "req-abc"
+
+    # Ensure apiKey and signature exist and decode with Ed25519 public key
+    signed_params = captured["params"]
+    assert signed_params["apiKey"] == "test-key"
+    assert "signature" in signed_params
+
+    # Recreate the message that was signed (sorted, excluding signature)
+    unsigned_items = sorted((k, v) for k, v in signed_params.items() if k != "signature")
+    query_string = "&".join(f"{k}={v}" for k, v in unsigned_items)
+    signature_bytes = base64.b64decode(signed_params["signature"])
+    client.private_key.public_key().verify(signature_bytes, query_string.encode("utf-8"))
