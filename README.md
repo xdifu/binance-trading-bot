@@ -22,6 +22,7 @@ This repository contains a production-ready grid trading system for Binance spot
 ├── tg_bot/                 # Telegram command and alert interface
 ├── utils/                  # Precision helpers and indicator calculations
 ├── diagnostics.py          # Comprehensive connectivity/time-sync checker
+├── tools/                  # Operational/diagnostic scripts (time sync, health checks)
 └── tests/                  # Pytest suites for trader and risk manager behaviour
 ```
 

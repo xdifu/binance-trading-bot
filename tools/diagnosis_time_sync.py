@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# filepath: /home/god/Binance/diagnosis_time_sync.py
+# Time sync diagnostic tool for the grid trading bot
 
 import os
 import sys
@@ -12,11 +12,11 @@ import statistics
 import subprocess
 from datetime import datetime
 
-# Add project directory to path
+# Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import the relevant modules from the trading bot
-from grid_trading_bot.binance_api.client import BinanceClient
+from binance_api.client import BinanceClient
 import config
 
 # Configure logging

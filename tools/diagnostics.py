@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# filepath: /home/god/Binance/grid_trading_bot/diagnostics.py
+# Diagnostic script for the grid trading bot
 
 import os
 import sys
@@ -9,7 +9,7 @@ import logging
 from datetime import datetime
 import traceback
 
-# 添加项目根目录到系统路径
+# Add project root to PYTHONPATH
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # 导入必要模块
