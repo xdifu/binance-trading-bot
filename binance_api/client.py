@@ -33,6 +33,8 @@ class BinanceClient:
         self.rest_client = None
         self.can_sign_requests = False
         self._symbol_info_cache = {}  # Cache symbol info for precision formatting
+        self.user_stream_subscription_id = None
+        self.user_stream_mode = None  # "ws_api" or "listen_key"
         
         # Add time offset variable for server time synchronization
         self.time_offset = 0
@@ -731,6 +733,38 @@ class BinanceClient:
             "websocket_available": self.websocket_available,
             "rest_available": self.rest_client is not None
         }
+
+    def start_user_data_stream(self, on_event=None):
+        """
+        Prefer WS-API user data stream subscription; return True on success.
+        Falls back to False so caller can decide whether to use REST/listenKey streams.
+        """
+        if self.websocket_available and self.ws_client:
+            try:
+                sub_id = self.ws_client.start_user_stream(on_event)
+                if sub_id is not None:
+                    self.user_stream_subscription_id = sub_id
+                    self.user_stream_mode = "ws_api"
+                    self.logger.info(f"Subscribed to user data stream via WS API (subscriptionId={sub_id})")
+                    return True
+                self.logger.warning("WS API user data stream subscription returned no subscriptionId")
+            except Exception as e:
+                self.logger.warning(f"WS API user data stream subscription failed: {e}")
+                # mark unavailable only if connection issues
+                if "connection" in str(e).lower() or "websocket" in str(e).lower():
+                    self.websocket_available = False
+        return False
+
+    def stop_user_data_stream(self):
+        """Stop user data stream if active via WS API."""
+        if self.user_stream_mode == "ws_api" and self.ws_client and self.user_stream_subscription_id is not None:
+            try:
+                self.ws_client.stop_user_stream(self.user_stream_subscription_id)
+            except Exception as e:
+                self.logger.warning(f"Failed to unsubscribe user data stream: {e}")
+            finally:
+                self.user_stream_subscription_id = None
+                self.user_stream_mode = None
     
     def force_websocket_reconnect(self):
         """Force reconnection to WebSocket API"""

@@ -1695,15 +1695,22 @@ class GridTrader:
                     expected_profit_pct = expected_profit_decimal * 100
                     min_required_profit_pct = min_required_profit * 100
 
-                    self.logger.warning(
-                        f"Skipping reverse order - insufficient profit margin after fees/slippage: "
-                        f"{expected_profit_pct:.4f}% vs required: {min_required_profit_pct:.4f}%"
-                    )
+                    # If risk manager is active we prefer continuity over margin guardrails
+                    if risk_manager:
+                        self.logger.info(
+                            "Proceeding with reverse order despite low profit buffer (risk manager active): "
+                            f"{expected_profit_pct:.4f}% vs required: {min_required_profit_pct:.4f}%"
+                        )
+                    else:
+                        self.logger.warning(
+                            f"Skipping reverse order - insufficient profit margin after fees/slippage: "
+                            f"{expected_profit_pct:.4f}% vs required: {min_required_profit_pct:.4f}%"
+                        )
 
-                    # Place a replacement grid order to maintain grid density
-                    self._place_replacement_grid_order(level_index, float(price))
-                    result = False
-                    break
+                        # Place a replacement grid order to maintain grid density
+                        self._place_replacement_grid_order(level_index, float(price))
+                        result = False
+                        break
 
                 # Use config value for minimum order check
                 min_order_value = config.MIN_NOTIONAL_VALUE

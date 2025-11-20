@@ -44,6 +44,7 @@ class GridTradingBot:
         self.risk_manager = None
         self.ws_manager = None
         self.listen_key = None
+        self.user_stream_subscription_id = None  # WS-API subscriptionId when used
         self.keep_alive_thread = None
         self.logger = logging.getLogger(__name__)
         
@@ -327,7 +328,7 @@ class GridTradingBot:
             self.ws_manager.start_kline_stream(symbol=config.SYMBOL, interval='1m')
             self.ws_manager.start_bookticker_stream(symbol=config.SYMBOL)
             
-            # Start user data stream
+            # Start user data stream (WS-API preferred, stream listenKey as fallback)
             self._setup_user_data_stream()
             
         except Exception as e:
@@ -352,52 +353,50 @@ class GridTradingBot:
             logger.error(f"Failed to reconnect WebSocket: {e}")
     
     def _setup_user_data_stream(self):
-        """Set up user data stream for order updates with robust error handling"""
+        """Set up user data stream for order updates with WS-API preferred."""
         try:
-            # Only proceed if we have a WebSocket manager
+            client_status = self.binance_client.get_client_status()
+
+            # 1) Preferred path: WebSocket API subscription (no listenKey)
+            if client_status["websocket_available"] and self.binance_client.ws_client:
+                def _on_event(event_payload, subscription_id=None):
+                    try:
+                        self._handle_websocket_message(event_payload)
+                    except Exception as e:
+                        logger.error(f"Failed to process WS-API user event: {e}")
+
+                if self.binance_client.start_user_data_stream(on_event=_on_event):
+                    self.user_stream_subscription_id = self.binance_client.user_stream_subscription_id
+                    logger.info(f"User data stream subscribed via WS API (subscriptionId={self.user_stream_subscription_id})")
+                    return  # No listenKey setup needed
+
+            # 2) Fallback: legacy listenKey stream via REST + market stream client
             if not self.ws_manager:
                 logger.error("Cannot set up user data stream: WebSocket manager not initialized")
                 return
-                
-            # Get client status to determine API availability
-            client_status = self.binance_client.get_client_status()
-            listen_key_response = None
-            
-            # Try WebSocket API first, fall back to REST
-            if client_status["websocket_available"]:
-                try:
-                    listen_key_response = self.binance_client.ws_client.client.start_user_data_stream()
-                    if listen_key_response and listen_key_response.get('status') == 200:
-                        self.listen_key = listen_key_response['result']['listenKey']
-                    else:
-                        logger.warning("WebSocket API listen key request failed, falling back to REST")
-                        listen_key_response = None
-                except Exception as e:
-                    logger.warning(f"Failed to get listen key from WebSocket API: {e}")
-            
-            # Fallback to REST API if needed
-            if not listen_key_response or not self.listen_key:
-                try:
-                    listen_key_response = self.binance_client.rest_client.new_listen_key()
-                    if listen_key_response and 'listenKey' in listen_key_response:
-                        self.listen_key = listen_key_response['listenKey']
-                    else:
-                        logger.error("Failed to get listen key from REST API")
-                        return
-                except Exception as e:
-                    logger.error(f"Failed to get listen key from REST API: {e}")
+
+            try:
+                listen_key_response = self.binance_client.rest_client.new_listen_key()
+                if listen_key_response and 'listenKey' in listen_key_response:
+                    self.listen_key = listen_key_response['listenKey']
+                else:
+                    logger.error("Failed to get listen key from REST API")
                     return
-            
-            # Start user data stream with the listen key
+            except Exception as e:
+                logger.error(f"Failed to get listen key from REST API: {e}")
+                return
+
+            self.binance_client.user_stream_mode = "listen_key"
+            # Start user data stream with the listen key (stream API)
             self.ws_manager.start_user_data_stream(self.listen_key)
-            logger.info("User data stream started successfully")
-            
+            logger.info("User data stream started via stream.listenKey fallback")
+
             # Start keep-alive thread with thread safety
             with self.state_lock:
                 if not self.keep_alive_thread or not self.keep_alive_thread.is_alive():
                     self.keep_alive_thread = Thread(target=self._keep_alive_listen_key_thread, daemon=True)
                     self.keep_alive_thread.start()
-            
+
         except Exception as e:
             logger.error(f"Failed to set up user data stream: {e}")
     
@@ -602,11 +601,18 @@ class GridTradingBot:
             listen_key_to_close = self.listen_key
             self.listen_key = None
             
-        if listen_key_to_close:
+        # Close WS-API subscription if used
+        if getattr(self.binance_client, "user_stream_mode", None) == "ws_api":
+            try:
+                self.binance_client.stop_user_data_stream()
+            except Exception as e:
+                logger.error(f"Failed to unsubscribe user data stream: {e}")
+        elif listen_key_to_close:
             try:
                 client_status = self.binance_client.get_client_status()
                 if client_status["websocket_available"]:
-                    self.binance_client.ws_client.client.stop_user_data_stream(listen_key_to_close)
+                    # Even if WS API is available, listenKey was created via REST; close it via REST
+                    self.binance_client.rest_client.close_listen_key(listen_key_to_close)
                 else:
                     self.binance_client.rest_client.close_listen_key(listen_key_to_close)
             except Exception as e:

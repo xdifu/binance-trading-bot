@@ -30,7 +30,8 @@ class BinanceWebSocketAPIClient:
         use_testnet: bool = False,
         auto_reconnect: bool = True,
         ping_interval: int = 20,
-        timeout: int = 20  # Increased default timeout to 20 seconds
+        timeout: int = 20,  # Increased default timeout to 20 seconds
+        event_callback: Optional[Callable[[Dict[str, Any], Optional[int]], None]] = None
     ):
         """
         Initialize the WebSocket API client
@@ -107,6 +108,11 @@ class BinanceWebSocketAPIClient:
         
         # Session status
         self.session_authenticated = False
+        # Optional callback for push events (e.g., user data stream)
+        self.event_callback = event_callback
+        # Track user data stream subscription for reconnection recovery
+        self.user_stream_active = False
+        self.user_stream_subscription_id: Optional[int] = None
         
         # Time synchronization variables
         self.time_offset = 0  # Time difference between local and server time in ms
@@ -435,6 +441,13 @@ class BinanceWebSocketAPIClient:
                 
                 if self.connect():
                     self.logger.info("Reconnected successfully")
+                    # Re-subscribe to user data stream if previously active
+                    if self.user_stream_active and self.event_callback:
+                        try:
+                            resp = self.subscribe_user_data_stream()
+                            self.logger.info(f"Recovered user data stream subscription: {resp}")
+                        except Exception as sub_err:
+                            self.logger.error(f"Failed to recover user data stream after reconnect: {sub_err}")
                     break
                 
                 attempts += 1
@@ -516,10 +529,17 @@ class BinanceWebSocketAPIClient:
                         if callback:
                             callback(data)
                 self.response_queue.put(data)
-            # Handle event notifications (e.g. account updates)
+            # Handle push events (e.g., user data stream events)
             elif 'event' in data:
-                # Process event data
-                self.logger.debug(f"Received event: {data['event']}")
+                event_payload = data.get('event')
+                subscription_id = data.get('subscriptionId')
+                if self.event_callback:
+                    try:
+                        self.event_callback(event_payload, subscription_id)
+                    except Exception as cb_err:
+                        self.logger.error(f"Event callback failed: {cb_err}")
+                else:
+                    self.logger.debug(f"Received event without handler: {data}")
             else:
                 self.logger.debug(f"Unhandled message: {message[:200]}...")
                 
@@ -829,53 +849,43 @@ class BinanceWebSocketAPIClient:
         request_id = self._send_signed_request("account.status")
         return self._wait_for_response(request_id)
     
-    # ===== User Stream Methods =====
+    # ===== User Stream Methods (WebSocket API per userDataStream.subscribe) =====
     
-    def start_user_data_stream(self) -> Dict:
+    def subscribe_user_data_stream(self) -> Dict:
         """
-        Start a user data stream
+        Subscribe to the User Data Stream on the current WS-API connection.
         
         Returns:
-            Dict: Response containing listenKey
+            Dict: Response containing subscriptionId
         """
-        request_id = self._send_request("userDataStream.start", {"apiKey": self.api_key})
-        return self._wait_for_response(request_id)
-    
-    def ping_user_data_stream(self, listen_key: str) -> Dict:
-        """
-        Ping a user data stream to keep it alive
-        
-        Args:
-            listen_key: Listen key to ping
-            
-        Returns:
-            Dict: Server response
-        """
-        params = {
-            "apiKey": self.api_key,
-            "listenKey": listen_key
-        }
-        
-        request_id = self._send_request("userDataStream.ping", params)
-        return self._wait_for_response(request_id)
+        method = "userDataStream.subscribe"
+        if self.session_authenticated:
+            request_id = self._send_request(method)
+        else:
+            # Use signature-based subscription when not authenticated via session.logon
+            request_id = self._send_signed_request(f"{method}.signature")
+        response = self._wait_for_response(request_id)
+        if response and response.get("status") == 200:
+            sub_id = response.get("result", {}).get("subscriptionId")
+            self.user_stream_subscription_id = sub_id
+            self.user_stream_active = True
+        return response
 
-    def stop_user_data_stream(self, listen_key: str) -> Dict:
+    def unsubscribe_user_data_stream(self, subscription_id: Optional[int] = None) -> Dict:
         """
-        Stop a user data stream
+        Unsubscribe from User Data Stream.
         
         Args:
-            listen_key: Listen key to stop
-            
-        Returns:
-            Dict: Server response
+            subscription_id: Optional specific subscriptionId; if None, all subscriptions are closed.
         """
-        params = {
-            "apiKey": self.api_key,
-            "listenKey": listen_key
-        }
-        
-        request_id = self._send_request("userDataStream.stop", params)
-        return self._wait_for_response(request_id)
+        params = {}
+        if subscription_id is not None:
+            params["subscriptionId"] = subscription_id
+        request_id = self._send_request("userDataStream.unsubscribe", params or None)
+        response = self._wait_for_response(request_id)
+        self.user_stream_active = False
+        self.user_stream_subscription_id = None
+        return response
 
     # Helper method to verify private key
     def verify_private_key(self):
@@ -920,14 +930,15 @@ class BinanceWSClient:
     """
     
     def __init__(self, api_key=None, api_secret=None, private_key_path=None, 
-                 private_key_pass=None, use_testnet=False):
+                 private_key_pass=None, use_testnet=False, event_callback=None):
         self.client = BinanceWebSocketAPIClient(
             api_key=api_key,
             api_secret=api_secret,
             private_key_path=private_key_path,
             private_key_pass=private_key_pass,
             use_testnet=use_testnet,
-            timeout=30  # Increased timeout
+            timeout=30,  # Increased timeout
+            event_callback=event_callback
         )
         self.logger = logging.getLogger(__name__)
     
@@ -943,6 +954,20 @@ class BinanceWSClient:
         except Exception as e:
             self.logger.error(f"Connectivity check failed: {e}")
             return False
+
+    # ---- User data stream (WS-API) helpers ----
+    def start_user_stream(self, on_event=None):
+        """
+        Subscribe to user data stream; pass-through of subscriptionId.
+        on_event: callable(event_payload, subscription_id)
+        """
+        if on_event:
+            self.client.event_callback = on_event
+        response = self.client.subscribe_user_data_stream()
+        return response.get("result", {}).get("subscriptionId")
+
+    def stop_user_stream(self, subscription_id=None):
+        return self.client.unsubscribe_user_data_stream(subscription_id)
 
     def new_oco_order(self, symbol, side, quantity, price, stopPrice, stopLimitPrice=None, 
                      stopLimitTimeInForce="GTC", aboveType=None, belowType=None, **kwargs):
