@@ -108,6 +108,22 @@ pytest
 
 `tests/test_grid_trader.py`, `tests/test_grid_levels.py`, and `tests/test_risk_manager.py` focus on order recycling, OCO placement, and capital restoration logic. Extend these when adding new behaviour.
 
+## Deployment (AWS/systemd)
+
+- Use the idempotent helper at `tools/deploy/deploy_aws.sh` to provision/update on an EC2 host (creates venv, installs deps, writes `.env`, and configures a systemd service).
+- Store secrets in AWS SSM Parameter Store/Secrets Manager (e.g., `/gridbot/API_KEY`, `/gridbot/API_SECRET`, `/gridbot/TELEGRAM_TOKEN`, `/gridbot/ALLOWED_TELEGRAM_USERS`) and give the instance role `ssm:GetParameter` (with decryption). Run with `USE_SSM=true`.
+- Example manual run on EC2:
+  ```bash
+  sudo bash tools/deploy/deploy_aws.sh \
+    APP_DIR=/opt/grid_trading_bot \
+    REPO_URL=https://github.com/your-org/binance-grid-trading-bot.git \
+    BRANCH=main \
+    USE_SSM=true \
+    SSM_PREFIX=/gridbot \
+    RUN_USER=ubuntu
+  ```
+- For CI-driven auto-updates, trigger the same script via SSH or SSM (e.g., GitHub Actions calling `aws ssm send-command ...`) after each push/tag. The script is safe to rerun; it pulls latest code, updates deps, and restarts the systemd service.
+
 ## Operational Notes
 
 - Ensure the system clock stays within ±500 ms of Binance; `diagnosis_time_sync.py` can be used for NTP audits.
