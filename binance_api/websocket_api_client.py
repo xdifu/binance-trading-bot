@@ -1028,6 +1028,16 @@ class BinanceWSClient:
                 params["aboveType"] = aboveType or "LIMIT_MAKER"
                 params["abovePrice"] = str(price)
 
+                # Map REST-style parameters for SELL (Limit is Above, Stop is Below)
+                if "limitIcebergQty" in kwargs:
+                    params["aboveIcebergQty"] = kwargs.pop("limitIcebergQty")
+                if "stopIcebergQty" in kwargs:
+                    params["belowIcebergQty"] = kwargs.pop("stopIcebergQty")
+                if "limitClientOrderId" in kwargs:
+                    params["aboveClientOrderId"] = kwargs.pop("limitClientOrderId")
+                if "stopClientOrderId" in kwargs:
+                    params["belowClientOrderId"] = kwargs.pop("stopClientOrderId")
+
                 if stopLimitPrice:
                     params["belowType"] = belowType or "STOP_LOSS_LIMIT"
                     params["belowPrice"] = str(stopLimitPrice)
@@ -1049,6 +1059,16 @@ class BinanceWSClient:
 
                 params["belowType"] = belowType or "LIMIT_MAKER"
                 params["belowPrice"] = str(price)
+
+                # Map REST-style parameters for BUY (Limit is Below, Stop is Above)
+                if "limitIcebergQty" in kwargs:
+                    params["belowIcebergQty"] = kwargs.pop("limitIcebergQty")
+                if "stopIcebergQty" in kwargs:
+                    params["aboveIcebergQty"] = kwargs.pop("stopIcebergQty")
+                if "limitClientOrderId" in kwargs:
+                    params["belowClientOrderId"] = kwargs.pop("limitClientOrderId")
+                if "stopClientOrderId" in kwargs:
+                    params["aboveClientOrderId"] = kwargs.pop("stopClientOrderId")
             
             # Log the parameters for debugging
             self.logger.debug(f"Sending OCO order via WebSocket: {params}")
