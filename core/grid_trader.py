@@ -1054,20 +1054,59 @@ class GridTrader:
             self.logger.error(f"Error calculating grid levels: {e}", exc_info=True)
             return []
             
-    def calculate_trend_strength(self, current_price=None, klines=None, lookback=20):
+    def _calculate_single_timeframe_trend(self, klines, lookback=20):
         """
-        Calculate market trend strength on a scale from -1 to 1
-        
-        Args:
-            current_price: Optional current market price (will fetch data if klines not provided)
-            klines: Optional list of kline/candlestick data (will be fetched if not provided)
-            lookback: Number of periods to consider for trend calculation
-            
-        Returns:
-            float: trend_strength - Value between -1 and 1 indicating trend direction and strength
+        Helper method to calculate trend strength for a specific set of klines.
+        Returns a float between -1.0 and 1.0.
         """
         try:
-            # Step 1: Get klines if not provided
+            if not klines or len(klines) < lookback + 1:
+                return 0.0
+
+            # Extract close prices
+            closes = []
+            for k in klines[-lookback-1:]:
+                if isinstance(k, list):
+                    closes.append(float(k[4]))
+                elif isinstance(k, dict) and 'close' in k:
+                    closes.append(float(k['close']))
+            
+            if len(closes) < lookback + 1:
+                return 0.0
+
+            # Calculate price change momentum
+            changes = []
+            for i in range(1, len(closes)):
+                change_pct = (closes[i] - closes[i-1]) / closes[i-1]
+                changes.append(change_pct)
+
+            # Short trend (last 5 periods)
+            short_trend = sum(changes[-5:]) if len(changes) >= 5 else 0
+
+            # Overall trend (time-weighted)
+            weights = [0.5 + (i/lookback/2) for i in range(lookback)]
+            if len(changes) < len(weights):
+                weights = weights[-len(changes):]
+            
+            weighted_changes = [changes[i] * weights[i] for i in range(len(changes))]
+            overall_trend = sum(weighted_changes)
+
+            # Combine short and overall
+            combined_trend = (short_trend * 0.7) + (overall_trend * 0.3)
+
+            # Normalize
+            return max(min(combined_trend * 50, 1.0), -1.0)
+
+        except Exception as e:
+            self.logger.warning(f"Error in single timeframe trend calculation: {e}")
+            return 0.0
+
+    def calculate_trend_strength(self, current_price=None, klines=None, lookback=20):
+        """
+        Legacy wrapper for trend calculation, defaults to 1h timeframe.
+        Maintains backward compatibility and sets self.trend_strength.
+        """
+        try:
             if klines is None:
                 klines = self.binance_client.get_historical_klines(
                     symbol=self.symbol,
@@ -1075,101 +1114,80 @@ class GridTrader:
                     limit=self.atr_period + lookback
                 )
             
-            # Step 2: Ensure we have enough data
-            if not klines or len(klines) < lookback + 1:
-                self.logger.warning("Insufficient kline data for trend calculation")
-                return 0
+            trend_strength = self._calculate_single_timeframe_trend(klines, lookback)
             
-            # Step 3: Extract close prices
-            closes = []
-            for k in klines[-lookback-1:]:
-                # Handle both array format and dict format
-                if isinstance(k, list):
-                    closes.append(float(k[4]))  # Close price is at index 4
-                elif isinstance(k, dict) and 'close' in k:
-                    closes.append(float(k['close']))
-                    
-            if not closes or len(closes) < lookback + 1:
-                self.logger.warning("Could not extract enough close prices from kline data")
-                return 0
-                
-            # Step 4: Calculate price change momentum and direction
-            changes = []
-            for i in range(1, len(closes)):
-                change_pct = (closes[i] - closes[i-1]) / closes[i-1]
-                changes.append(change_pct)
-                
-            # Step 5: Get recent trend direction (last 5 periods)
-            short_trend = sum(changes[-5:]) if len(changes) >= 5 else 0
-            
-            # Step 6: Get overall trend momentum with time-weighted changes
-            weights = [0.5 + (i/lookback/2) for i in range(lookback)]  # Increasing weights
-            if len(changes) < len(weights):
-                weights = weights[-len(changes):]
-                
-            weighted_changes = [changes[i] * weights[i] for i in range(len(changes))]
-            overall_trend = sum(weighted_changes)
-            
-            # Step 7: Combine short and overall trend with more weight on recent
-            combined_trend = (short_trend * 0.7) + (overall_trend * 0.3)
-            
-            # Step 8: Normalize between -1 and 1 with proper scaling
-            trend_strength = max(min(combined_trend * 50, 1.0), -1.0)
-            
-            # Step 9: Log results
-            trend_multiplier = getattr(config, 'TREND_MULTIPLIER', 0.05)
+            # Log results
             self.logger.info(
-                f"Detected trend strength: {trend_strength:.2f}, "
+                f"Detected trend strength (single-frame): {trend_strength:.2f}, "
                 f"effective adjustment: {(trend_strength*0.3*100):.1f}% of grid range"
             )
-            self.logger.debug(f"Calculated trend strength: {trend_strength:.2f}")
             
-            # Store calculated trend strength as instance attribute for use in grid creation
             self.trend_strength = trend_strength
-            
             return trend_strength
             
         except Exception as e:
             self.logger.error(f"Error calculating trend strength: {e}")
-            return 0  # Default to no trend on error
-    
+            return 0
+
     def calculate_market_metrics(self):
         """
-        Calculate market metrics using optimal timeframes:
-        - Volatility (ATR): 15m candles for better short-term precision
-        - Trend strength: 1h candles for more reliable direction signals
+        Calculate market metrics using multi-timeframe weighted analysis:
+        - Volatility (ATR): 15m candles
+        - Trend: Weighted average of 15m (20%), 1h (50%), 4h (30%)
         
         Returns:
-            tuple: (atr_value, trend_strength) - Current market volatility and trend indicators
+            tuple: (atr_value, trend_strength)
         """
         try:
-            # Calculate volatility using 15-minute timeframe for better precision
-            volatility_klines = self.binance_client.get_historical_klines(
+            # 1. Fetch Data
+            # 15m for ATR and short-term trend
+            klines_15m = self.binance_client.get_historical_klines(
                 symbol=self.symbol, 
                 interval="15m", 
-                limit=self.atr_period + 10
+                limit=max(self.atr_period + 10, 24) # Need enough for both
             )
-            atr = calculate_atr(volatility_klines, period=self.atr_period) if volatility_klines else None
             
-            # Calculate trend using 1-hour timeframe for better stability
-            trend_klines = self.binance_client.get_historical_klines(
+            # 1h for mid-term trend
+            klines_1h = self.binance_client.get_historical_klines(
                 symbol=self.symbol, 
                 interval="1h", 
-                limit=24  # Use 24 hours for reliable trend assessment
+                limit=24
             )
-            trend = self.calculate_trend_strength(klines=trend_klines, lookback=15)  # Reduced lookback for better responsiveness
+            
+            # 4h for long-term trend
+            klines_4h = self.binance_client.get_historical_klines(
+                symbol=self.symbol, 
+                interval="4h", 
+                limit=24
+            )
+
+            # 2. Calculate ATR (using 15m)
+            atr = calculate_atr(klines_15m, period=self.atr_period) if klines_15m else None
+            
+            # 3. Calculate Multi-Timeframe Trend
+            t_15m = self._calculate_single_timeframe_trend(klines_15m, lookback=15)
+            t_1h = self._calculate_single_timeframe_trend(klines_1h, lookback=15)
+            t_4h = self._calculate_single_timeframe_trend(klines_4h, lookback=15)
+            
+            # Weighted Average: 15m(20%) + 1h(50%) + 4h(30%)
+            final_trend = (t_15m * 0.2) + (t_1h * 0.5) + (t_4h * 0.3)
+            
+            # Store for use in grid creation
+            self.trend_strength = final_trend
 
             atr_display = f"{atr:.8f}" if isinstance(atr, (int, float, np.floating)) else "N/A"
-            trend_display = f"{trend:.2f}" if isinstance(trend, (int, float, np.floating)) else "N/A"
-            self.logger.info(f"Market metrics calculated using mixed timeframes - ATR: {atr_display}, Trend: {trend_display}")
-            return atr, trend
+            self.logger.info(
+                f"Multi-Timeframe Analysis - ATR: {atr_display} | "
+                f"Trend: {final_trend:.2f} (15m:{t_15m:.2f}, 1h:{t_1h:.2f}, 4h:{t_4h:.2f})"
+            )
+            
+            return atr, final_trend
             
         except Exception as e:
-            self.logger.error(f"Error calculating market metrics using mixed timeframes: {e}")
-            # Fall back to original methods if the mixed approach fails
+            self.logger.error(f"Error in multi-timeframe metrics: {e}")
+            # Fallback
             atr = self._get_current_atr()
             trend = self.calculate_trend_strength()
-            self.logger.warning("Fell back to single timeframe metrics due to error in mixed calculation")
             return atr, trend
     
     def _create_core_zone_grid(self, current_price, core_upper, core_lower, core_levels):
