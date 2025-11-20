@@ -4,7 +4,7 @@ import time
 import threading
 from datetime import datetime, timedelta
 from binance_api.client import BinanceClient
-from binance.exceptions import BinanceAPIException  # 需添加此导入
+from binance.error import ClientError  # Use binance-connector's exception class
 from utils.indicators import calculate_atr
 from utils.format_utils import format_price, format_quantity, get_precision_from_filters
 import config
@@ -87,6 +87,11 @@ class GridTrader:
             # Fallback with configured values when ATR calculation fails
             self.grid_spacing = min(config.GRID_SPACING, config.MAX_GRID_SPACING)
             self.logger.info(f"Using fallback grid spacing: {self.grid_spacing*100:.2f}%")
+        
+        # CRITICAL FIX: Initialize K-line cache BEFORE any market metrics calculation
+        self._kline_cache = {}
+        self._kline_cache_ttl = 900  # 15 minutes TTL
+        self._kline_cache_lock = threading.Lock()
         
         # Use grid range directly since values are already decimal
         self.grid_range_percent = min(config.GRID_RANGE_PERCENT, config.MAX_GRID_RANGE)
@@ -219,6 +224,55 @@ class GridTrader:
         fallback_step_size = getattr(config, 'FALLBACK_STEP_SIZE', 1.0)  # Configurable fallback
         self.logger.warning(f"No LOT_SIZE filter found for {self.symbol}, using fallback step size {fallback_step_size}")
         return fallback_step_size  # Use configurable fallback
+    
+    def _get_cached_klines(self, symbol, interval, limit):
+        """
+        Get cached K-line data to reduce API calls and avoid rate limits
+        
+        Args:
+            symbol: Trading pair symbol
+            interval: K-line interval (e.g., '4h', '15m')
+            limit: Number of K-lines to fetch
+            
+        Returns:
+            list: K-line data or None on failure
+        """
+        cache_key = f"{symbol}_{interval}_{limit}"
+        current_time = time.time()
+        
+        with self._kline_cache_lock:
+            # Check if cached data exists and is still valid
+            if cache_key in self._kline_cache:
+                cached_data, timestamp = self._kline_cache[cache_key]
+                if current_time - timestamp < self._kline_cache_ttl:
+                    self.logger.debug(f"Using cached klines for {cache_key} (age: {int(current_time - timestamp)}s)")
+                    return cached_data
+            
+            # Cache miss or expired, fetch new data
+            try:
+                klines = self.binance_client.get_historical_klines(
+                    symbol=symbol,
+                    interval=interval,
+                    limit=limit
+                )
+                if klines:
+                    self._kline_cache[cache_key] = (klines, current_time)
+                    self.logger.debug(f"Fetched and cached {len(klines)} klines for {cache_key}")
+                    return klines
+                else:
+                    self.logger.warning(f"Received empty klines for {cache_key}")
+                    # If we have stale cache, return it
+                    if cache_key in self._kline_cache:
+                        self.logger.warning(f"Using stale cache for {cache_key}")
+                        return self._kline_cache[cache_key][0]
+                    return None
+            except Exception as e:
+                self.logger.error(f"Failed to fetch klines for {cache_key}: {e}")
+                # Return stale cache if available
+                if cache_key in self._kline_cache:
+                    self.logger.warning(f"API error, using stale cache for {cache_key}")
+                    return self._kline_cache[cache_key][0]
+                return None
     
     def get_status(self):
         """
@@ -357,14 +411,15 @@ class GridTrader:
             warnings.append(f"Insufficient {base_asset}: Required {base_needed:.2f}, Available {available_base:.2f}")
             insufficient_funds = True
 
-        # Single warning message block for all fund insufficiency issues
+        # CRITICAL: Reject start if insufficient funds (don't cancel existing orders)
         if insufficient_funds and not simulation:
-            warning_message = f"⚠️ Warning: {' '.join(warnings)}\nStarting in limited mode."
-            self.logger.warning(warning_message)
+            error_message = f"❌ Cannot start grid trading: {' '.join(warnings)}\n\nPlease add sufficient funds or adjust grid parameters."
+            self.logger.error(error_message)
             if self.telegram_bot:
-                self.telegram_bot.send_message(warning_message)
+                self.telegram_bot.send_message(error_message)
+            return error_message  # Exit immediately without cancelling orders or setting is_running
         
-        # Cancel all previous open orders
+        # Only cancel orders after fund validation passes
         self._cancel_all_open_orders()
         self.is_running = True  # Mark running only after all validations pass
         
@@ -654,6 +709,62 @@ class GridTrader:
         # Place grid orders using the unified method
         self._initialize_grid_orders()
 
+    def _calculate_max_buy_levels(self, usdt_balance, current_price):
+        """
+        Calculate maximum BUY levels supported by available USDT balance
+        CRITICAL: Accounts for 1.5x capital amplification in core zone
+        
+        Args:
+            usdt_balance: Available USDT balance
+            current_price: Current market price
+            
+        Returns:
+            int: Maximum number of BUY levels we can afford
+        """
+        effective_usdt = max(usdt_balance - self.pending_locks.get('USDT', 0), 0)
+        
+        # CRITICAL FIX: Account for maximum 1.5x amplification in core zone
+        # Use conservative estimate with safety margin
+        max_capital_per_level = self.capital_per_level * 1.6  # 1.5x + 10% safety margin
+        
+        if max_capital_per_level <= 0:
+            return 0
+            
+        max_buy = int(effective_usdt / max_capital_per_level)
+        self.logger.debug(
+            f"Available USDT: {effective_usdt:.2f}, can support {max_buy} BUY levels "
+            f"(accounting for 1.6x max capital amplification)"
+        )
+        return max_buy
+    
+    def _calculate_max_sell_levels(self, base_balance, current_price):
+        """
+        Calculate maximum SELL levels supported by available base asset balance
+        CRITICAL: Accounts for 1.5x capital amplification in core zone
+        
+        Args:
+            base_balance: Available base asset balance
+            current_price: Current market price
+            
+        Returns:
+            int: Maximum number of SELL levels we can afford
+        """
+        base_asset = self.symbol.replace('USDT', '')
+        effective_base = max(base_balance - self.pending_locks.get(base_asset, 0), 0)
+        # CRITICAL FIX: Account for maximum 1.5x amplification in core zone
+        max_capital_per_level = self.capital_per_level * 1.6  # 1.5x + 10% safety margin
+        sell_quantity_per_level = max_capital_per_level / current_price if current_price > 0 else 0
+        
+        if sell_quantity_per_level <= 0:
+            return 0
+            
+        max_sell = int(effective_base / sell_quantity_per_level)
+        self.logger.debug(
+            f"Available {base_asset}: {effective_base:.6f}, can support {max_sell} SELL levels "
+            f"(accounting for 1.6x max capital amplification)"
+        )
+        return max_sell
+
     def _determine_available_grid_levels(self, total_available_usdt):
         """Calculate the number of grid levels supported by available capital."""
         configured_levels = self.config_grid_levels
@@ -703,17 +814,69 @@ class GridTrader:
         """
         # --- Step 1: Calculate basic grid parameters ---
         try:
-            # Calculate maximum possible grid count based on available funds
-            total_available_usdt = self.binance_client.check_balance('USDT')
-            available_grid_levels = self._determine_available_grid_levels(total_available_usdt)
+            # CRITICAL FIX: Get balances for both assets
+            base_asset = self.symbol.replace('USDT', '')
+            usdt_balance = self.binance_client.check_balance('USDT')
+            base_balance = self.binance_client.check_balance(base_asset)
+            
+            # Get current price for calculations
+            live_current_price = self.binance_client.get_symbol_price(self.symbol)
+            
+            # Calculate maximum levels supported by each asset
+            max_buy_levels = self._calculate_max_buy_levels(usdt_balance, live_current_price)
+            max_sell_levels = self._calculate_max_sell_levels(base_balance, live_current_price)
+            
+            # Use the configured grid levels as target, but respect asset limits
+            configured_levels = self.config_grid_levels
+            
+            # Apply level reduction factor if in trending market
+            level_cap = configured_levels
+            if self.level_reduction_factor < 1.0:
+                level_cap = max(3, int(configured_levels * self.level_reduction_factor))
+            
+            # Determine actual grid levels we can support
+            # CRITICAL FIX: Validate dual-sided grid capability
+            self.max_affordable_buy_levels = max_buy_levels
+            self.max_affordable_sell_levels = max_sell_levels
+            
+            # CRITICAL: Reject if cannot support both BUY and SELL
+            if max_buy_levels == 0:
+                self.logger.error(
+                    f"Cannot start grid: insufficient USDT for any BUY orders. "
+                    f"Available USDT: {usdt_balance:.2f}, Required per level: {self.capital_per_level * 1.6:.2f}"
+                )
+                return []  # Must have BUY capability for hedging
+            
+            if max_sell_levels == 0:
+                self.logger.error(
+                    f"Cannot start grid: insufficient {base_asset} for any SELL orders. "
+                    f"Available {base_asset}: {base_balance:.6f}"
+                )
+                return []  # Must have SELL capability for hedging
+            
+            total_supported_levels = max_buy_levels + max_sell_levels
+            available_grid_levels = min(level_cap, total_supported_levels)
+            
+            # Ensure minimum viable grid (at least 1 BUY + 1 SELL)
+            min_viable_levels = 2
+            if available_grid_levels < min_viable_levels:
+                self.logger.warning(
+                    f"Insufficient assets for grid trading: max_buy={max_buy_levels}, max_sell={max_sell_levels}. "
+                    f"Minimum {min_viable_levels} levels required."
+                )
+                return []
+            
             previous_grid_levels = getattr(self, "current_grid_levels", self.config_grid_levels)
+            
+            # Calculate total equivalent funds for logging (USDT + base in USDT value)
+            total_funds = usdt_balance + (base_balance * live_current_price)
 
             if available_grid_levels < self.config_grid_levels:
                 self.logger.info(
-                    "Adjusted grid levels from %s to %s based on available funds: %s USDT",
+                    "Adjusted grid levels from %s to %s based on available funds: %.2f USDT equivalent",
                     self.config_grid_levels,
                     available_grid_levels,
-                    total_available_usdt,
+                    total_funds,
                 )
             elif previous_grid_levels < self.config_grid_levels and available_grid_levels == self.config_grid_levels:
                 self.logger.info(
@@ -724,22 +887,31 @@ class GridTrader:
             grid_level_limit = available_grid_levels
 
             self.logger.debug(
-                "Using %s grid levels (configured target %s) with %s USDT available",
+                "Using %s grid levels (configured target %s) with %.2f USDT equivalent (USDT: %.2f, Base: %.6f)",
                 grid_level_limit,
                 self.config_grid_levels,
-                total_available_usdt,
+                total_funds,
+                usdt_balance,
+                base_balance,
             )
 
-            # Use mean reversion optimized center instead of current market price
+           # Use mean reversion optimized center instead of current market price FOR GRID POSITIONING
             grid_center, grid_range_percent = self.calculate_optimal_grid_center()
-            current_price = grid_center  # Replace current price with calculated center
+            
+            # CRITICAL FIX: Store grid center separately, don't overwrite real-time price tracker
+            self.grid_center = grid_center  # Store for grid positioning logic
+            # DO NOT set self.current_market_price = grid_center (that was the bug!)
+            
+            # Use grid_center for grid positioning calculations
+            current_price = grid_center  # Local variable for grid positioning
 
             # Check validity of calculated center
             if current_price <= 0:
                 self.logger.error(f"Invalid grid center price: {current_price}")
                 return []
-                
-            self.current_market_price = current_price
+            
+            # Store grid center for reference, but keep live price separate
+            # self.current_market_price should only be updated from live ticker
             grid_range = current_price * grid_range_percent
             
             # --- Step 2: Calculate trend-based offset and strength ---
@@ -818,13 +990,55 @@ class GridTrader:
             # --- Step 5: Sort and validate the grid ---
             grid_levels.sort(key=lambda x: x["price"])
             grid_levels = self._ensure_balanced_grid(grid_levels, upper_bound, lower_bound)
+            
+            # CRITICAL FIX: Enforce BUY/SELL limits based on available assets
+            buy_count = sum(1 for level in grid_levels if level['side'] == 'BUY')
+            sell_count = sum(1 for level in grid_levels if level['side'] == 'SELL')
+            
+            # Check if we exceed limits
+            if buy_count > self.max_affordable_buy_levels or sell_count > self.max_affordable_sell_levels:
+                self.logger.warning(
+                    f"Grid exceeds asset limits: BUY {buy_count}/{self.max_affordable_buy_levels}, "
+                    f"SELL {sell_count}/{self.max_affordable_sell_levels}. Trimming excess orders."
+                )
+                
+                # Trim excess BUY orders (remove furthest from center first)
+                if buy_count > self.max_affordable_buy_levels:
+                    buy_levels = [l for l in grid_levels if l['side'] == 'BUY']
+                    # Sort by distance from grid center (furthest first)
+                    buy_levels.sort(key=lambda l: abs(l['price'] - grid_center), reverse=True)
+                    # Keep only the affordable amount
+                    keep_buy = set(l['price'] for l in buy_levels[:self.max_affordable_buy_levels])
+                    grid_levels = [l for l in grid_levels if l['side'] != 'BUY' or l['price'] in keep_buy]
+                    self.logger.info(f"Trimmed BUY orders from {buy_count} to {self.max_affordable_buy_levels}")
+                
+                # Trim excess SELL orders (remove furthest from center first)
+                if sell_count > self.max_affordable_sell_levels:
+                    sell_levels = [l for l in grid_levels if l['side'] == 'SELL']
+                    sell_levels.sort(key=lambda l: abs(l['price'] - grid_center), reverse=True)
+                    keep_sell = set(l['price'] for l in sell_levels[:self.max_affordable_sell_levels])
+                    grid_levels = [l for l in grid_levels if l['side'] != 'SELL' or l['price'] in keep_sell]
+                    self.logger.info(f"Trimmed SELL orders from {sell_count} to {self.max_affordable_sell_levels}")
+            
+            # CRITICAL: Verify grid balance after trimming
+            final_buy_count = sum(1 for level in grid_levels if level['side'] == 'BUY')
+            final_sell_count = sum(1 for level in grid_levels if level['side'] == 'SELL')
+            
+            if final_buy_count == 0 or final_sell_count == 0:
+                self.logger.error(
+                    f"Grid imbalanced after trimming: BUY={final_buy_count}, SELL={final_sell_count}. "
+                    f"Cannot operate with one-sided grid. Rejecting grid generation."
+                )
+                return []  # Reject unbalanced grid
 
             actual_grid_levels = len(grid_levels)
             if actual_grid_levels != grid_level_limit:
                 self.logger.debug(
-                    "Generated %s grid levels after balancing (target limit %s)",
+                    "Generated %s grid levels after balancing and enforcement (target limit %s, BUY=%s, SELL=%s)",
                     actual_grid_levels,
                     grid_level_limit,
+                    final_buy_count,
+                    final_sell_count,
                 )
 
             self.current_grid_levels = actual_grid_levels
@@ -1202,22 +1416,25 @@ class GridTrader:
                     self.logger.info(f"Cancelled order {order['orderId']}")
                     
                 except Exception as e:
-                    # Handle specific Binance error codes (WS or REST)
+                    # Handle specific Binance error codes from binance-connector
+                    # ClientError from binance.error has error_code attribute
                     code_match = False
-                    if isinstance(e, BinanceAPIException):
-                        code_match = (e.code == -2011 or "unknown order sent" in str(e).lower())
-                    elif isinstance(e, Exception) and hasattr(e, "error_code"):
-                        code_match = (getattr(e, "error_code", None) == -2011 or "unknown order sent" in str(e).lower())
+                    
+                    if isinstance(e, ClientError):
+                        # Standard binance-connector exception
+                        code_match = (e.error_code == -2011 or "unknown order" in str(e).lower())
+                        self.logger.debug(f"ClientError caught: code={e.error_code}, message={e}")
+                    elif hasattr(e, "error_code"):
+                        # Other exceptions with error_code attribute
+                        code_match = (getattr(e, "error_code", None) == -2011 or "unknown order" in str(e).lower())
                     else:
-                        # ClientError from binance.error
-                        try:
-                            code_match = (-2011 == getattr(e, "error_code", None)) or ("unknown order sent" in str(e).lower())
-                        except Exception:
-                            code_match = False
+                        # Unknown exception type
+                        self.logger.warning(f"Unexpected exception type during order cancellation: {type(e).__name__}")
+                        code_match = False
 
                     if code_match:
                         self.logger.warning(
-                            f"Order {order.get('orderId')} cancellation rejected (unknown/filled). Skipping."
+                            f"Order {order.get('orderId')} cancellation rejected (unknown/already filled). Skipping."
                         )
                         continue  # Skip to next order instead of failing
                     
@@ -1697,28 +1914,18 @@ class GridTrader:
                 effective_profit = expected_profit_decimal - round_trip_fee - (slippage_estimate * 2)
                 min_required_profit = (round_trip_fee * config.PROFIT_MARGIN_MULTIPLIER) + min_profit_buffer
 
-                # Compare using consistent decimal units
-                if (achieved_spread is not None and achieved_spread <= min_required_profit) or effective_profit <= min_required_profit:
+                # CRITICAL FIX: Always place reverse order to maintain hedge, even if profit is low
+                # Skipping reverse orders breaks grid integrity and leaves positions unhedged
+                if effective_profit <= min_required_profit:
                     # Convert to percentage only for logging purposes
                     expected_profit_pct = expected_profit_decimal * 100
                     min_required_profit_pct = min_required_profit * 100
-
-                    # If risk manager is active we prefer continuity over margin guardrails
-                    if risk_manager:
-                        self.logger.info(
-                            "Proceeding with reverse order despite low profit buffer (risk manager active): "
-                            f"{expected_profit_pct:.4f}% vs required: {min_required_profit_pct:.4f}%"
-                        )
-                    else:
-                        self.logger.warning(
-                            f"Skipping reverse order - insufficient profit margin after fees/slippage: "
-                            f"{expected_profit_pct:.4f}% vs required: {min_required_profit_pct:.4f}%"
-                        )
-
-                        # Place a replacement grid order to maintain grid density
-                        self._place_replacement_grid_order(level_index, float(price))
-                        result = False
-                        break
+                    
+                    self.logger.warning(
+                        f"Low profit margin detected: {expected_profit_pct:.4f}% vs required {min_required_profit_pct:.4f}%. "
+                        f"Placing reverse order anyway to maintain grid hedge."
+                    )
+                    # Continue with order placement - DO NOT SKIP
 
                 # Use config value for minimum order check
                 min_order_value = config.MIN_NOTIONAL_VALUE
@@ -1857,8 +2064,13 @@ class GridTrader:
             float: The capital allocation in USDT for this price level
         """
         # Get current price and calculate zones properly each time
-        current_price = self.current_market_price
-        grid_range = current_price * self.grid_range_percent
+        # Use real-time price for capital allocation decisions, not stale grid_center
+        live_price = self.binance_client.get_symbol_price(self.symbol)
+        current_price = live_price  # Use live price instead of self.current_market_price
+        
+        # Get grid center for zone calculations (stored during grid setup)
+        grid_center = getattr(self, 'grid_center', current_price)
+        grid_range = grid_center * self.grid_range_percent
         core_range = grid_range * self.core_zone_percentage
         core_upper = current_price + (core_range / 2)
         core_lower = current_price - (core_range / 2)
@@ -2092,8 +2304,11 @@ class GridTrader:
         self.quote_asset = 'USDT'  # Assuming all pairs are USDT based
         
         # Update other relevant properties
-        self.orders = {}
-        self.fund_lock = {self.base_asset: 0.0, self.quote_asset: 0.0}
+        self.pending_orders = {}
+        self.pending_locks = {}
+        self.balance_lock = threading.RLock()
+        
+        # Cache is already initialized in __init__, no need to re-initialize here
         
         # Log the updated values
         self.logger.info(f"Symbol updated from {old_symbol} to {new_symbol}")
@@ -2444,7 +2659,8 @@ class GridTrader:
             atr_value, trend_strength = self.calculate_market_metrics()
             
             # 2. Get historical data for mean reversion analysis
-            historical_klines = self.binance_client.get_historical_klines(
+            # Use cached klines to avoid rate limits
+            historical_klines = self._get_cached_klines(
                 symbol=self.symbol, 
                 interval="4h",  # 4-hour candles balance detail and noise reduction
                 limit=360       # ~60 days for statistical significance

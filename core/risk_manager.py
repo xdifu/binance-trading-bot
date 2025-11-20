@@ -262,6 +262,38 @@ class RiskManager:
         # Create initial OCO order
         self._place_oco_orders()
     
+    def _calculate_grid_reserve_requirement(self):
+        """
+        Calculate estimated base asset requirement if pending grid BUY orders fill
+        
+        Returns:
+            float: Estimated base asset quantity needed for reverse SELL orders
+        """
+        if not self.grid_trader or not hasattr(self.grid_trader, 'grid'):
+            return 0.0
+        
+        try:
+            current_price = self.binance_client.get_symbol_price(self.symbol)
+            
+            # Count pending BUY orders that could fill
+            estimated_base_needed = 0.0
+            for level in self.grid_trader.grid:
+                if level.get('side') == 'BUY' and level.get('order_id'):
+                    # This BUY order is active and could fill
+                    capital = level.get('capital', self.grid_trader.capital_per_level)
+                    quantity = capital / current_price if current_price > 0 else 0
+                    estimated_base_needed += quantity
+            
+            # Apply safety factor (1.3x) for price volatility
+            estimated_base_needed *= 1.3
+            
+            self.logger.debug(f"Estimated grid base requirement: {estimated_base_needed:.6f}")
+            return estimated_base_needed
+            
+        except Exception as e:
+            self.logger.error(f"Failed to calculate grid reserve requirement: {e}")
+            return 0.0
+    
     def deactivate(self):
         """Deactivate risk management system"""
         if not self.is_active:
@@ -511,12 +543,21 @@ class RiskManager:
             
             # Reserve portion of assets for grid trading - UPDATED TO USE pending_locks
             if self.grid_trader and hasattr(self.grid_trader, 'pending_locks'):
-                # Check if asset has pending locks by grid trader
+                # CRITICAL FIX: Dynamic reserve calculation based on grid needs
+                # Calculate how much base asset the grid might need if pending BUY orders fill
+                grid_base_requirement = self._calculate_grid_reserve_requirement()
                 locked_by_grid = self.grid_trader.pending_locks.get(asset, 0)
                 
-                # Also reserve a portion for future grid orders
-                reserve_for_grid = 0.3  # Reserve 30% of available assets for grid trading
-                reserved_amount = max(locked_by_grid, asset_balance * reserve_for_grid)
+                # Reserve is the larger of: locked funds, or estimated needs (capped at 50%)
+                total_reserve_needed = locked_by_grid + grid_base_requirement
+                reserve_ratio = min(0.5, max(0.3, total_reserve_needed / asset_balance if asset_balance > 0 else 0.3))
+                reserved_amount = asset_balance * reserve_ratio
+                
+                self.logger.info(
+                    f"OCO reserve calculation: locked={locked_by_grid:.4f}, "
+                    f"grid_need_estimate={grid_base_requirement:.4f}, "
+                    f"reserve_ratio={reserve_ratio*100:.1f}% ({reserved_amount:.4f} {asset})"
+                )
                 
                 if asset_balance > reserved_amount:
                     original_balance = asset_balance

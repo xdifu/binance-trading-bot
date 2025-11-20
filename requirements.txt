@@ -33,7 +33,6 @@ psutil==7.0.0
 pycparser==2.22
 pycryptodome==3.22.0
 pyparsing==3.2.1
-python-binance==1.0.28
 python-dateutil==2.9.0.post0
 python-dotenv==1.0.1
 python-telegram-bot==22.0
