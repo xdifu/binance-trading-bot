@@ -157,3 +157,147 @@ def test_signed_request_prefers_ed25519_signature(monkeypatch):
     query_string = "&".join(f"{k}={v}" for k, v in unsigned_items)
     signature_bytes = base64.b64decode(signed_params["signature"])
     client.private_key.public_key().verify(signature_bytes, query_string.encode("utf-8"))
+
+
+def test_oco_order_sell_parameter_mapping():
+    """Verify SELL OCO orders correctly map price/stopPrice to above/below params"""
+    ws_adapter = BinanceWSClient.__new__(BinanceWSClient)
+    ws_adapter.logger = logging.getLogger("oco_test")
+    
+    # Create mock inner client
+    mock_inner = types.SimpleNamespace()
+    captured_params = {}
+    
+    def fake_signed_request(method, params):
+        captured_params["method"] = method
+        captured_params["params"] = params
+        return "req-sell-oco"
+    
+    mock_inner._send_signed_request = fake_signed_request
+    mock_inner._wait_for_response = MagicMock(return_value={"status": 200, "result": {"orderListId": 123}})
+    ws_adapter.client = mock_inner
+    
+    # Place SELL OCO order
+    result = ws_adapter.new_oco_order(
+        symbol="BTCUSDT",
+        side="SELL",
+        quantity=1.0,
+        price=50000,  # Take profit (limit) - should be abovePrice
+        stopPrice=49000,  # Stop loss trigger - should be belowStopPrice
+        stopLimitPrice=48900  # Stop limit execution - should be belowPrice
+    )
+    
+    # Verify method name
+    assert captured_params["method"] == "orderList.place.oco"
+    
+    # Verify parameter mapping for SELL
+    params = captured_params["params"]
+    assert params["symbol"] == "BTCUSDT"
+    assert params["side"] == "SELL"
+    assert params["quantity"] == "1.0"  # Converted to string
+    
+    # SELL: above leg = take profit (limit), below leg = stop loss
+    assert params["aboveType"] == "LIMIT_MAKER"
+    assert params["abovePrice"] == "50000"
+    assert params["belowType"] == "STOP_LOSS_LIMIT"
+    assert params["belowStopPrice"] == "49000"
+    assert params["belowPrice"] == "48900"
+    
+    assert result["status"] == 200
+
+
+def test_oco_order_buy_parameter_mapping():
+    """Verify BUY OCO orders correctly invert leg assignment"""
+    ws_adapter = BinanceWSClient.__new__(BinanceWSClient)
+    ws_adapter.logger = logging.getLogger("oco_test")
+    
+    # Create mock inner client
+    mock_inner = types.SimpleNamespace()
+    captured_params = {}
+    
+    def fake_signed_request(method, params):
+        captured_params["method"] = method
+        captured_params["params"] = params
+        return "req-buy-oco"
+    
+    mock_inner._send_signed_request = fake_signed_request
+    mock_inner._wait_for_response = MagicMock(return_value={"status": 200, "result": {"orderListId": 456}})
+    ws_adapter.client = mock_inner
+    
+    # Place BUY OCO order
+    result = ws_adapter.new_oco_order(
+        symbol="ETHUSDT",
+        side="BUY",
+        quantity=2.0,
+        price=3000,  # Take profit (limit) - should be belowPrice
+        stopPrice=3200,  # Stop loss trigger - should be aboveStopPrice
+        stopLimitPrice=3250  # Stop limit execution - should be abovePrice
+    )
+    
+    # Verify parameter mapping for BUY (inverted from SELL)
+    params = captured_params["params"]
+    assert params["symbol"] == "ETHUSDT"
+    assert params["side"] == "BUY"
+    
+    # BUY: above leg = stop loss, below leg = take profit (limit)
+    assert params["aboveType"] == "STOP_LOSS_LIMIT"
+    assert params["aboveStopPrice"] == "3200"
+    assert params["abovePrice"] == "3250"
+    assert params["belowType"] == "LIMIT_MAKER"
+    assert params["belowPrice"] == "3000"
+    
+    assert result["status"] == 200
+
+
+def test_optional_parameters_account():
+    """Verify account() method accepts optional parameters"""
+    ws_adapter = BinanceWSClient.__new__(BinanceWSClient)
+    ws_adapter.logger = logging.getLogger("param_test")
+    
+    # Create mock inner client
+    mock_inner = types.SimpleNamespace()
+    captured_params = {}
+    
+    def fake_signed_request(method, params):
+        captured_params["method"] = method
+        captured_params["params"] = params if params else {}
+        return "req-account"
+    
+    mock_inner._send_signed_request = fake_signed_request
+    mock_inner._wait_for_response = MagicMock(return_value={"status": 200, "result": {"balances": []}})
+    ws_adapter.client = mock_inner
+    
+    # Test with optional parameters
+    result = ws_adapter.account(omitZeroBalances=True, recvWindow=10000)
+    
+    params = captured_params["params"]
+    assert params["omitZeroBalances"] is True
+    assert params["recvWindow"] == 10000
+    assert result["status"] == 200
+
+
+def test_optional_parameters_get_open_orders():
+    """Verify get_open_orders() method accepts recvWindow parameter"""
+    ws_adapter = BinanceWSClient.__new__(BinanceWSClient)
+    ws_adapter.logger = logging.getLogger("param_test")
+    
+    # Create mock inner client
+    mock_inner = types.SimpleNamespace()
+    captured_params = {}
+    
+    def fake_signed_request(method, params):
+        captured_params["method"] = method
+        captured_params["params"] = params if params else {}
+        return "req-orders"
+    
+    mock_inner._send_signed_request = fake_signed_request
+    mock_inner._wait_for_response = MagicMock(return_value={"status": 200, "result": []})
+    ws_adapter.client = mock_inner
+    
+    # Test with optional recvWindow
+    result = ws_adapter.get_open_orders(symbol="BTCUSDT", recvWindow=15000)
+    
+    params = captured_params["params"]
+    assert params["symbol"] == "BTCUSDT"
+    assert params["recvWindow"] == 15000
+    assert result["status"] == 200

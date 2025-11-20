@@ -10,8 +10,10 @@ from queue import Queue, Empty
 from typing import Optional, Dict, Any, Callable
 import websocket
 from websocket import WebSocketConnectionClosedException, ABNF
-from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from cryptography.hazmat.primitives.asymmetric import ed25519
+
+# Import the centralized signature generator
+from binance_api.signature_utils import SignatureGenerator, KeyType
 
 class BinanceWebSocketAPIClient:
     """
@@ -53,34 +55,45 @@ class BinanceWebSocketAPIClient:
         self.api_secret = api_secret
         self.private_key_path = private_key_path
         self.private_key_pass = private_key_pass
-        self.private_key = None
         
-        # Load private key if provided
-        if private_key_path and os.path.isfile(private_key_path):
-            try:
-                with open(private_key_path, 'rb') as f:
-                    private_key_data = f.read()
-                    
-                # Correctly handle private_key_pass, especially when it's "None"
-                if private_key_pass and private_key_pass.lower() != 'none':
-                    password = private_key_pass.encode('utf-8')
-                else:
-                    password = None
-                    
-                self.private_key = load_pem_private_key(
-                    private_key_data, 
-                    password=password
+        # Initialize signature generator (supports HMAC, RSA, and Ed25519)
+        self.signature_generator = None
+        self.private_key = None  # For backward compatibility
+        
+        try:
+            if private_key_path and os.path.isfile(private_key_path):
+                # Load RSA or Ed25519 private key
+                self.signature_generator = SignatureGenerator(
+                    private_key_path=private_key_path,
+                    private_key_pass=private_key_pass
                 )
                 
-                # Verify the key type is Ed25519
-                if not isinstance(self.private_key, ed25519.Ed25519PrivateKey):
-                    self.logger.warning("Loaded key is not an Ed25519 private key. WebSocket API requires Ed25519 keys.")
-                    self.logger.warning("Will fall back to HMAC authentication if API secret is provided.")
-                    self.private_key = None
-            except Exception as e:
-                self.logger.error(f"Failed to load private key: {e}")
-                self.private_key = None
-                self.logger.warning("Will fall back to HMAC authentication if API secret is provided.")
+                # For backward compatibility, store the key object
+                if self.signature_generator.key_type == KeyType.ED25519:
+                    self.private_key = self.signature_generator._ed25519_key
+                    self.logger.info("Loaded Ed25519 private key for WebSocket API authentication")
+                elif self.signature_generator.key_type == KeyType.RSA:
+                    self.logger.info("Loaded RSA private key for WebSocket API authentication")
+                else:
+                    self.logger.warning(f"Unknown key type: {self.signature_generator.key_type}")
+                    
+            elif api_secret:
+                # Use HMAC authentication
+                self.signature_generator = SignatureGenerator(api_secret=api_secret)
+                self.logger.info("Using HMAC authentication for WebSocket API")
+            else:
+                self.logger.warning("No authentication credentials provided")
+                
+        except Exception as e:
+            self.logger.error(f"Failed to initialize signature generator: {e}")
+            # Fall back to HMAC if available
+            if api_secret:
+                try:
+                    self.signature_generator = SignatureGenerator(api_secret=api_secret)
+                    self.logger.info("Falling back to HMAC authentication")
+                except Exception as fallback_error:
+                    self.logger.error(f"HMAC fallback also failed: {fallback_error}")
+                    self.signature_generator = None
         
         # Connection details (align with official WS-API endpoints)
         self.ws_base_url = (
@@ -696,48 +709,39 @@ class BinanceWebSocketAPIClient:
     
     def _generate_signature(self, params: Dict) -> str:
         """
-        Generate signature for API request
+        Generate signature for API request using SignatureGenerator.
+        
+        Supports all three key types per binance-spot-api-docs/web-socket-api.md:
+        - HMAC SHA-256 (returns hex-encoded signature)
+        - RSA PKCS#1 v1.5 SHA-256 (returns base64-encoded signature)
+        - Ed25519 (returns base64-encoded signature)
         
         Args:
             params: Request parameters
             
         Returns:
-            str: Signature for the request
+            str: Signature for the request (encoding depends on key type)
             
         Raises:
             ValueError: If no authentication method is available
         """
-        # Sort parameters by key name
-        sorted_params = sorted(params.items())
+        if not self.signature_generator:
+            raise ValueError("No authentication method available. Provide API secret or private key.")
+        
+        # Sort parameters by key name (excluding signature itself)
+        sorted_params = sorted((k, v) for k, v in params.items() if k != 'signature')
         
         # Convert to query string format
-        query_string = '&'.join([f"{k}={v}" for k, v in sorted_params if k != 'signature'])
+        query_string = '&'.join([f"{k}={v}" for k, v in sorted_params])
         
-        # Sign with Ed25519 key (recommended for WebSocket API)
-        if self.private_key and isinstance(self.private_key, ed25519.Ed25519PrivateKey):
-            try:
-                signature = self.private_key.sign(query_string.encode('utf-8'))
-                return base64.b64encode(signature).decode('utf-8')
-            except Exception as e:
-                self.logger.error(f"Ed25519 signature failed: {e}")
-                # Try HMAC fallback if API secret is available
-                if self.api_secret:
-                    self.logger.info("Falling back to HMAC authentication")
-                else:
-                    raise
-        
-        # HMAC signature - less preferred for WebSocket API
-        if self.api_secret:
-            import hmac
-            from hashlib import sha256
-            signature = hmac.new(
-                self.api_secret.encode('utf-8'),
-                query_string.encode('utf-8'),
-                sha256
-            ).hexdigest()
+        try:
+            # Generate signature using the appropriate method
+            signature, key_type = self.signature_generator.generate_signature(query_string)
+            self.logger.debug(f"Generated {key_type.value.upper()} signature for query: {query_string[:50]}...")
             return signature
-        
-        raise ValueError("No authentication method available")
+        except Exception as e:
+            self.logger.error(f"Signature generation failed: {e}")
+            raise
     
     def _wait_for_response(self, request_id: str, timeout: int = None) -> Dict:
         """
@@ -1073,13 +1077,54 @@ class BinanceWSClient:
         request_id = self.client._send_request("klines", params)
         return self.client._wait_for_response(request_id)
 
-    def account(self):
-        """Get account status (balances) via WS API."""
-        request_id = self.client._send_signed_request("account.status")
+    def account(self, omitZeroBalances=None, recvWindow=None):
+        """
+        Get account status (balances) via WS API.
+        
+        Reference: binance-spot-api-docs/web-socket-api.md line 6056
+        
+        Args:
+            omitZeroBalances (bool, optional): When True, emits only non-zero balances.
+                Default: False
+            recvWindow (int, optional): Request validity window in milliseconds.
+                Max: 60000. Default: 5000
+        
+        Returns:
+            Dict: Account information with balances
+        """
+        params = {}
+        if omitZeroBalances is not None:
+            params['omitZeroBalances'] = omitZeroBalances
+        if recvWindow is not None:
+            params['recvWindow'] = recvWindow
+        
+        request_id = self.client._send_signed_request("account.status", params if params else None)
         return self.client._wait_for_response(request_id)
 
     def new_order(self, **params):
-        """Place a new order via WS API."""
+        """
+        Place a new order via WS API.
+        
+        Reference: binance-spot-api-docs/web-socket-api.md line 2824-3000
+        
+        Args:
+            **params: Order parameters including:
+                - symbol (str, REQUIRED): Trading pair
+                - side (str, REQUIRED): BUY or SELL
+                - type (str, REQUIRED): Order type (LIMIT, MARKET, STOP_LOSS, etc.)
+                - quantity (str, optional): Order quantity
+                - quoteOrderQty (str, optional): Quote asset quantity
+                - price (str, optional): Limit price
+                - timeInForce (str, optional): GTC, IOC, FOK
+                - stopPrice (str, optional): Stop price for STOP_LOSS orders
+                - icebergQty (str, optional): Iceberg order quantity
+                - newOrderRespType (str, optional): ACK, RESULT, or FULL
+                - recvWindow (int, optional): Request validity window (max 60000ms)
+                - ... (see official docs for complete parameter list)
+        
+        Returns:
+            Dict: Order response
+        """
         request_id = self.client._send_signed_request("order.place", params)
         return self.client._wait_for_response(request_id)
 
@@ -1088,12 +1133,27 @@ class BinanceWSClient:
         request_id = self.client._send_signed_request("order.cancel", params)
         return self.client._wait_for_response(request_id)
 
-    def get_open_orders(self, symbol=None):
-        """Get open orders via WS API."""
+    def get_open_orders(self, symbol=None, recvWindow=None):
+        """
+        Get open orders via WS API.
+        
+        Reference: binance-spot-api-docs/web-socket-api.md line 6293
+        
+        Args:
+            symbol (str, optional): Trading symbol filter. If omitted, returns orders for all symbols.
+            recvWindow (int, optional): Request validity window in milliseconds.
+                Max: 60000. Default: 5000
+        
+        Returns:
+            Dict: List of open orders
+        """
         params = {}
         if symbol:
             params["symbol"] = symbol
-        request_id = self.client._send_signed_request("openOrders.status", params)
+        if recvWindow is not None:
+            params["recvWindow"] = recvWindow
+            
+        request_id = self.client._send_signed_request("openOrders.status", params if params else None)
         return self.client._wait_for_response(request_id)
 
     def cancel_oco_order(self, **params):

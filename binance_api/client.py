@@ -221,8 +221,14 @@ class BinanceClient:
     
     def _execute_with_fallback(self, ws_method_name, rest_method_name, *args, **kwargs):
         """
-        Execute a method with WebSocket API first, falling back to REST API if needed
-
+        Execute a method with WebSocket API first, falling back to REST API if needed.
+        
+        Per AGENTS.md requirements:
+        - WebSocket API is attempted first with retry mechanism
+        - Only downgrades to REST on connection-level failures
+        - Business errors (invalid params) raise immediately without downgrade
+        - Missing methods use REST without marking WS unavailable
+        
         Args:
             ws_method_name: Method name to call on the WebSocket client
             rest_method_name: Method name to call on the REST client
@@ -231,6 +237,7 @@ class BinanceClient:
         Returns:
             Result from either WebSocket or REST API
         """
+        # Separate WS-specific and REST-specific kwargs
         ws_specific_kwargs = kwargs.pop('_ws_kwargs', None)
         rest_specific_kwargs = kwargs.pop('_rest_kwargs', None)
 
@@ -250,6 +257,7 @@ class BinanceClient:
         if current_time - self.last_time_sync > self.time_sync_interval:
             self._sync_time()
 
+        # Check if this is a signed request
         requires_signature = any(keyword in rest_method_name for keyword in ['account', 'order', 'oco', 'myTrades', 'openOrders'])
 
         # Keep REST timestamps aligned with the WS client to avoid mixed offsets.
@@ -280,45 +288,83 @@ class BinanceClient:
                 rest_kwargs['timestamp'] = timestamp_value
                 if 'timestamp' not in ws_kwargs:
                     ws_kwargs['timestamp'] = timestamp_value
-                self.logger.debug(f"Added timestamp with adaptive safety offset {safety_offset}ms: {rest_kwargs['timestamp']} to {rest_method_name}")
+                self.logger.debug(f"Added timestamp {timestamp_value} to request (offset: {self.time_offset}ms, safety: {safety_offset}ms)")
 
-        # Try WebSocket API first if available, with a couple of retry attempts before downgrading
+        # Try WebSocket API first if available, with retry attempts before downgrading
         if self.websocket_available and self.ws_client:
             ws_attempts = 0
-            while ws_attempts < 2:
+            max_ws_attempts = 2
+            
+            while ws_attempts < max_ws_attempts:
                 try:
                     ws_method = getattr(self.ws_client, ws_method_name, None)
                     if ws_method:
-                        return ws_method(*args, **ws_kwargs)
-                    self.logger.debug(f"Method {ws_method_name} not found in WebSocket client")
-                    break
-                except Exception as e:
+                        result = ws_method(*args, **ws_kwargs)
+                        self.logger.debug(f"Successfully executed {ws_method_name} via WebSocket API")
+                        return result
+                    else:
+                        # Method not found - use REST without marking WS unavailable
+                        self.logger.debug(f"Method {ws_method_name} not implemented in WebSocket client, using REST")
+                        break  # Exit retry loop, proceed to REST
+                        
+                except (ConnectionError, TimeoutError, OSError) as e:
+                    # Connection-level errors - retry then potentially downgrade
                     ws_attempts += 1
-                    self.logger.warning(f"WebSocket API call failed for {ws_method_name} (attempt {ws_attempts}): {e}")
-                    if "connection" in str(e).lower() or "websocket" in str(e).lower():
-                        # Try a lightweight ping to recover before giving up
+                    self.logger.warning(
+                        f"WebSocket connection error for {ws_method_name} (attempt {ws_attempts}/{max_ws_attempts}): {e}"
+                    )
+                    
+                    if ws_attempts < max_ws_attempts:
+                        # Try lightweight ping to check if connection is recoverable
                         try:
                             ping_result = self.ws_client.client.ping_server()
                             if ping_result and ping_result.get("status") == 200:
-                                continue  # retry WS once more
+                                self.logger.info("WebSocket connection recovered, retrying...")
+                                time.sleep(0.5)
+                                continue  # Retry WS
                         except Exception:
                             pass
-                    # If we exhausted retries, mark unavailable
-                    if ws_attempts >= 2:
+                    
+                    # Exhausted retries - mark as unavailable and fall back to REST
+                    if ws_attempts >= max_ws_attempts:
                         self.websocket_available = False
-                        self.logger.warning("WebSocket API marked as unavailable after retries, switching to REST fallback")
-                    else:
-                        time.sleep(0.5)
+                        self.logger.warning(
+                            f"WebSocket API marked unavailable after {max_ws_attempts} connection failures"
+                        )
+                        
+                except (ValueError, TypeError, KeyError) as e:
+                    # Business logic/parameter errors - raise immediately without downgrade
+                    self.logger.error(f"Parameter error in {ws_method_name}: {e}")
+                    raise
+                    
+                except AttributeError as e:
+                    # Method attribute error - usually means method not implemented
+                    self.logger.debug(f"Method {ws_method_name} not available in WebSocket client: {e}")
+                    break  # Use REST without marking WS unavailable
+                    
+                except Exception as e:
+                    # Generic error - log and retry once, but don't immediately downgrade
+                    ws_attempts += 1
+                    self.logger.warning(f"WebSocket API error for {ws_method_name} (attempt {ws_attempts}/{max_ws_attempts}): {e}")
+                    
+                    if ws_attempts >= max_ws_attempts:
+                        # After retries, log but don't mark unavailable for generic errors
+                        self.logger.warning(f"WebSocket API call {ws_method_name} failed after retries, using REST fallback")
+                        break
+                    
+                    time.sleep(0.5)
 
         # Fall back to REST API
         if not self.websocket_available:
             # Opportunistically retry WS reconnection before using REST to maintain WS preference.
             self._retry_websocket_connection()
+            
         if self.rest_client:
             try:
                 rest_method = getattr(self.rest_client, rest_method_name)
                 self.logger.debug(f"Using REST API fallback for {rest_method_name}")
                 return rest_method(*args, **rest_kwargs)
+                
             except ClientError as e:
                 # Enhanced handling for timestamp errors
                 if hasattr(e, 'error_code') and e.error_code == -1021:
@@ -354,7 +400,7 @@ class BinanceClient:
                     self.logger.error(f"REST API fallback call failed for {rest_method_name}: {e}")
                     raise
         else:
-            raise RuntimeError("Neither WebSocket nor REST API client is available")
+            raise RuntimeError(f"No API client available to execute {rest_method_name}")
     
     def _retry_websocket_connection(self):
         """Try to reconnect to WebSocket API if it was previously unavailable"""
@@ -397,11 +443,48 @@ class BinanceClient:
 
     def _unwrap_response(self, response):
         """
-        Normalize WS-API responses that wrap payload in status/result.
+        Normalize WS-API responses and validate status codes.
+        
+        Per AGENTS.md: "WS responses must be unpacked using the status + result structure"
+        Per binance-spot-api-docs/web-socket-api.md lines 159-291:
+        - status: 200 = success
+        - status: 4XX/5XX = error
+        
+        Args:
+            response: Response from WebSocket API
+        
+        Returns:
+            Unwrapped result data
+        
+        Raises:
+            BinanceAPIException: If response contains error status
         """
         if isinstance(response, dict):
-            if "status" in response and "result" in response:
-                return response["result"]
+            # Check for error status (non-200)
+            if 'status' in response:
+                status = response.get('status')
+                if status != 200:
+                    error = response.get('error', {})
+                    error_code = error.get('code', 'UNKNOWN')
+                    error_msg = error.get('msg', 'Unknown error')
+                    
+                    # Log the error with full context
+                    self.logger.error(
+                        f"WebSocket API error: status={status}, code={error_code}, msg={error_msg}"
+                    )
+                    
+                    # Raise ClientError to maintain consistency with REST API
+                    raise ClientError(
+                        status_code=status,
+                        error_code=error_code,
+                        error_message=error_msg,
+                        response=response
+                    )
+            
+            # Extract result on success
+            if 'result' in response:
+                return response['result']
+        
         return response
 
     def _adjust_price_precision(self, price, symbol=None):

@@ -171,7 +171,12 @@ class TestBinanceClient(unittest.TestCase):
             
             result = client.cancel_order('BTCUSDT', 1)
             
-            self.mock_ws_client.cancel_order.assert_called_with(symbol='BTCUSDT', orderId=1)
+            # Verify call arguments (ignoring timestamp)
+            self.mock_ws_client.cancel_order.assert_called()
+            call_args = self.mock_ws_client.cancel_order.call_args
+            self.assertEqual(call_args.kwargs['symbol'], 'BTCUSDT')
+            self.assertEqual(call_args.kwargs['orderId'], 1)
+            self.assertIn('timestamp', call_args.kwargs)
             self.assertEqual(result['status'], 'CANCELED')
 
     def test_get_open_orders(self):
@@ -184,7 +189,11 @@ class TestBinanceClient(unittest.TestCase):
             
             result = client.get_open_orders('BTCUSDT')
             
-            self.mock_ws_client.get_open_orders.assert_called_with(symbol='BTCUSDT')
+            # Verify call arguments (ignoring timestamp)
+            self.mock_ws_client.get_open_orders.assert_called()
+            call_args = self.mock_ws_client.get_open_orders.call_args
+            self.assertEqual(call_args.kwargs['symbol'], 'BTCUSDT')
+            self.assertIn('timestamp', call_args.kwargs)
             self.assertEqual(len(result), 1)
             self.assertEqual(result[0]['orderId'], 1)
 
@@ -226,6 +235,172 @@ class TestBinanceClient(unittest.TestCase):
             
             self.mock_ws_client.ticker_price.assert_called_with(symbol='BTCUSDT')
             self.assertEqual(price, 50000.0)
+
+if __name__ == '__main__':
+    unittest.main()
+
+
+class TestBinanceClientFallbackLogic(unittest.TestCase):
+    """Test WebSocket→REST fallback behavior"""
+    
+    def test_fallback_not_triggered_on_business_error(self):
+        """Verify ValueError doesn't mark WebSocket unavailable"""
+        import time
+        import logging
+        
+        client = BinanceClient.__new__(BinanceClient)
+        client.logger = logging.getLogger("fallback_test")
+        client.websocket_available = True
+        client.rest_client = MagicMock()
+        client.can_sign_requests = True
+        client.time_offset = 0
+        client.last_time_sync = int(time.time())
+        client.time_sync_interval = 600
+        
+        # Create mock WebSocket client that raises ValueError
+        mock_ws_client = MagicMock()
+        mock_ws_client.test_method = MagicMock(side_effect=ValueError("Invalid price value"))
+        client.ws_client = mock_ws_client
+        
+        # Execute with fallback - should raise ValueError without marking WS unavailable
+        with self.assertRaises(ValueError):
+            client._execute_with_fallback("test_method", "test_method")
+        
+        # WebSocket should still be marked as available
+        self.assertTrue(client.websocket_available)
+    
+    def test_fallback_not_triggered_on_method_not_found(self):
+        """Verify missing method doesn't mark WebSocket unavailable"""
+        import time
+        import logging
+        
+        client = BinanceClient.__new__(BinanceClient)
+        client.logger = logging.getLogger("fallback_test")
+        client.websocket_available = True
+        client.can_sign_requests = True
+        client.time_offset = 0
+        client.last_time_sync = int(time.time())
+        client.time_sync_interval = 600
+        
+        # Create mock WebSocket client without the method
+        mock_ws_client = MagicMock(spec=[])  # Empty spec means no attributes
+        client.ws_client = mock_ws_client
+        
+        # Create mock REST client
+        mock_rest_client = MagicMock()
+        mock_rest_client.nonexistent_method = MagicMock(return_value={"success": True})
+        client.rest_client = mock_rest_client
+        
+        # Execute with fallback - should use REST without marking WS unavailable
+        result = client._execute_with_fallback("nonexistent_method", "nonexistent_method")
+        
+        # Should have used REST client
+        self.assertEqual(result, {"success": True})
+        mock_rest_client.nonexistent_method.assert_called_once()
+        
+        # WebSocket should still be marked as available
+        self.assertTrue(client.websocket_available)
+    
+    def test_fallback_triggered_on_connection_error(self):
+        """Verify ConnectionError marks WebSocket unavailable after retries"""
+        import time
+        import logging
+        
+        client = BinanceClient.__new__(BinanceClient)
+        client.logger = logging.getLogger("fallback_test")
+        client.websocket_available = True
+        client.can_sign_requests = True
+        client.time_offset = 0
+        client.last_time_sync = int(time.time())
+        client.time_sync_interval = 600
+        
+        # Create mock WebSocket client that raises ConnectionError
+        mock_ws_client = MagicMock()
+        mock_ws_client.test_method = MagicMock(side_effect=ConnectionError("Connection lost"))
+        mock_ws_client.client = MagicMock()
+        mock_ws_client.client.ping_server = MagicMock(return_value={"status": 500})  # Ping fails
+        client.ws_client = mock_ws_client
+        
+        # Create mock REST client
+        mock_rest_client = MagicMock()
+        mock_rest_client.test_method = MagicMock(return_value={"success": True})
+        client.rest_client = mock_rest_client
+        
+        # Execute with fallback - should mark WS unavailable and use REST
+        result = client._execute_with_fallback("test_method", "test_method")
+        
+        # Should have used REST client
+        self.assertEqual(result, {"success": True})
+        mock_rest_client.test_method.assert_called_once()
+        
+        # WebSocket should be marked as unavailable
+        self.assertFalse(client.websocket_available)
+
+
+class TestBinanceClientResponseValidation(unittest.TestCase):
+    """Test WebSocket response unwrapping and validation"""
+    
+    def test_unwrap_response_validates_status_code(self):
+        """Verify _unwrap_response raises exception for non-200 status"""
+        import logging
+        
+        client = BinanceClient.__new__(BinanceClient)
+        client.logger = logging.getLogger("unwrap_test")
+        
+       # Test 200 status (success)
+        response_200 = {
+            "id": "req-1",
+            "status": 200,
+            "result": {"orderId": 123}
+        }
+        result = client._unwrap_response(response_200)
+        self.assertEqual(result, {"orderId": 123})
+        
+        # Test 400 status (error)
+        response_400 = {
+            "id": "req-2",
+            "status": 400,
+            "error": {
+                "code": -2010,
+                "msg": "Account has insufficient balance."
+            }
+        }
+        
+        with self.assertRaises(ClientError) as context:
+            client._unwrap_response(response_400)
+        
+        # Verify error details
+        self.assertEqual(context.exception.error_code, -2010)
+        self.assertIn("insufficient balance", str(context.exception).lower())
+    
+    def test_unwrap_response_extracts_result(self):
+        """Verify _unwrap_response correctly extracts result field"""
+        import logging
+        
+        client = BinanceClient.__new__(BinanceClient)
+        client.logger = logging.getLogger("unwrap_test")
+        
+        # Response with result field
+        response = {
+            "id": "req-3",
+            "status": 200,
+            "result": {
+                "symbol": "BTCUSDT",
+                "orderId": 456,
+                "status": "FILLED"
+            }
+        }
+        
+        result = client._unwrap_response(response)
+        
+        # Should extract only the result field
+        self.assertEqual(result, {
+            "symbol": "BTCUSDT",
+            "orderId": 456,
+            "status": "FILLED"
+        })
+        self.assertNotIn("id", result)
+
 
 if __name__ == '__main__':
     unittest.main()

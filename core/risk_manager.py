@@ -727,79 +727,52 @@ class RiskManager:
             self.telegram_bot.send_message(message)
 
     def _cancel_oco_orders(self):
-        """Cancel existing OCO orders"""
+        """
+        Cancel existing OCO orders.
+        
+        Uses BinanceClient.cancel_oco_order which properly validates responses
+        and handles WS→REST fallback automatically.
+        """
         if not self.oco_order_id:
             return
             
         try:
-            # Check WebSocket availability before proceeding
+            # Check WebSocket availability for logging purposes
             client_status = self.binance_client.get_client_status()
             self.using_websocket = client_status["websocket_available"]
             api_type = "WebSocket API" if self.using_websocket else "REST API"
             
             self.logger.info(f"Cancelling OCO order {self.oco_order_id} via {api_type}")
             
-            if hasattr(self.binance_client, 'ws_client') and self.using_websocket:
-                # Using WebSocket API client
-                if hasattr(self.binance_client.ws_client, 'cancel_oco_order'):
-                    response = self.binance_client.ws_client.cancel_oco_order(
-                        symbol=self.symbol,
-                        orderListId=self.oco_order_id
-                    )
-                else:
-                    # Fallback to REST client
-                    response = self.binance_client.rest_client.cancel_oco_order(  # 修改: cancel_order_list -> cancel_oco_order
-                        symbol=self.symbol,
-                        orderListId=self.oco_order_id
-                    )
-            else:
-                # Using REST client directly
-                response = self.binance_client.rest_client.cancel_oco_order(  # 修改: cancel_order_list -> cancel_oco_order
-                    symbol=self.symbol,
-                    orderListId=self.oco_order_id
-                )
+            # Use BinanceClient wrapper which validates responses and handles fallback
+            response = self.binance_client.cancel_oco_order(
+                symbol=self.symbol,
+                orderListId=self.oco_order_id
+            )
+            
+            # Response validation is handled by BinanceClient._unwrap_response
+            # If we reach here, the cancel was successful
             
             # Clear from pending orders tracking
             str_order_id = str(self.oco_order_id)
             if str_order_id in self.pending_oco_orders:
                 self.pending_oco_orders.pop(str_order_id)
                 
-            self.logger.info(f"Cancelled OCO order ID: {self.oco_order_id}")
+            self.logger.info(f"Successfully cancelled OCO order ID: {self.oco_order_id}")
             self.oco_order_id = None
             
         except Exception as e:
             # Ignore errors for orders that can't be found - likely already executed or cancelled
-            if "not found" in str(e).lower() or "unknown" in str(e).lower() or "does not exist" in str(e).lower():
+            error_str = str(e).lower()
+            if "not found" in error_str or "unknown" in error_str or "does not exist" in error_str:
                 self.logger.warning(f"OCO order {self.oco_order_id} not found, likely already executed or cancelled")
                 # Reset tracking
                 self.oco_order_id = None
                 self.pending_oco_orders = {}
             else:
-                self.logger.warning(f"Failed to cancel OCO order: {e}")
-                
-                # If this was a WebSocket error, try once more with REST
-                if "connection" in str(e).lower() and self.using_websocket:
-                    try:
-                        # Force client to update connection status
-                        client_status = self.binance_client.get_client_status()
-                        self.using_websocket = client_status["websocket_available"]
-                        
-                        # Try again with REST client directly
-                        self.binance_client.rest_client.cancel_oco_order(  # 修改: cancel_order_list -> cancel_oco_order
-                            symbol=self.symbol,
-                            orderListId=self.oco_order_id
-                        )
-                        
-                        self.logger.info(f"Cancelled OCO order ID: {self.oco_order_id} via REST fallback")
-                        self.oco_order_id = None
-                        self.pending_oco_orders = {}
-                    except Exception as retry_error:
-                        if "not found" in str(retry_error).lower() or "unknown" in str(retry_error).lower():
-                            self.logger.warning(f"OCO order {self.oco_order_id} not found during fallback attempt")
-                            self.oco_order_id = None 
-                            self.pending_oco_orders = {}
-                        else:
-                            self.logger.error(f"Fallback OCO order cancellation also failed: {retry_error}")
+                self.logger.error(f"Failed to cancel OCO order {self.oco_order_id}: {e}")
+                # Don't clear order_id on other errors - might retry later
+
 
     def execute_stop_loss(self):
         """Execute stop loss operation"""
