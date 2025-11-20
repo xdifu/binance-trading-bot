@@ -58,6 +58,15 @@ ssh -i "$KEY_PEM" ubuntu@$SERVER_IP "sudo journalctl -u gridbot -f"
 
 注意：.env 文件被 .gitignore 忽略，不会随 Git 同步。如果您修改了 API Key 或其他环境变量，必须手动上传。
 
+### 修改注意事项
+
+  * **严禁行内注释**：`.env` 文件中不要在数值后加 `# 注释`，否则会导致解析错误（Systemd 无法处理行内注释）。
+      * 错误示例：`USER_ID=12345 # 我的ID`
+      * 正确示例：`USER_ID=12345`
+
+### 上传与应用流程
+
+
 ```bash
 # 1. 上传新的 .env 文件
 scp -i "$KEY_PEM" .env ubuntu@$SERVER_IP:$REMOTE_DIR/
@@ -137,5 +146,11 @@ ssh -i "$KEY_PEM" ubuntu@$SERVER_IP "sudo systemctl restart gridbot"
   * **部署脚本报错 (Directory not empty):**
 
       * 这是 Git 初始化问题，通常只在首次部署时出现。如果再次发生，需登录服务器手动修复 Git 状态。
+
+  * **服务启动失败 "ValueError: invalid literal for int()"**
+
+      * 原因：通常是因为 `.env` 文件中存在包含中文或特殊字符的行内注释。
+      * 解决：删除 `.env` 中的所有行内注释，只保留 `KEY=VALUE` 格式，重新上传并重启。
+
 
 <!-- end list -->
