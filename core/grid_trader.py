@@ -1531,7 +1531,7 @@ class GridTrader:
         # CRITICAL: Orderbook-based price protection to prevent instant market execution
         try:
             # Get current orderbook to check best bid/ask
-            ticker = self.binance_client.binance_rest_client.ticker_book_ticker(self.symbol)
+            ticker = self.binance_client.rest_client.ticker_book_ticker(self.symbol)
             best_bid = float(ticker['bidPrice'])
             best_ask = float(ticker['askPrice'])
             
