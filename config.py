@@ -36,7 +36,7 @@ CAPITAL_SIZE = "small"  # 资金规模，可选值："small"(小资金优化) �
 # 网格参数 (全部以小数形式表示)
 #############################################
 
-GRID_LEVELS = 7  # 网格数量，增加数值可提高交易频率但需要更多资金
+GRID_LEVELS = 9  # 网格数量，增加数值可提高交易频率但需要更多资金
 GRID_SPACING = 0.01  # 网格间距 (1.0%)
 GRID_RANGE_PERCENT = 0.08  # 总网格价格范围 (8.0%)
 MAX_GRID_SPACING = 0.03  # 最大单网格间距 (3%)
@@ -62,7 +62,7 @@ PRICE_DEVIATION_THRESHOLD = 0.005  # 过期订单距离当前价格阈值，减�
 
 # 交易参数
 TRADING_FEE_RATE = 0.001  # 单向交易手续费率 (0.1%)
-PROFIT_MARGIN_MULTIPLIER = 3.0  # 要求利润必须是手续费的倍数
+PROFIT_MARGIN_MULTIPLIER = 2.5  # 要求利润必须是手续费的倍数
 BUY_SELL_SPREAD = 0.0025  # 买卖价差 (0.25%)
 MIN_NOTIONAL_VALUE = 5  # 最小订单价值(USDT)，低于此值的订单将被跳过
 
@@ -100,7 +100,7 @@ MAJOR_SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"]
 MIN_EXPECTED_PROFIT_BUFFER = 0.0002  # Minimum expected profit after fees and slippage (decimal, e.g., 0.0002 = 0.02%)
 MAX_CENTER_DEVIATION = 0.05  # Max allowed deviation between grid center and current price (e.g., 0.05 = 5%)
 PROTECTIVE_PAUSE_STRONG_TREND = True  # Pause new grid orders in strong trends (PUMP/CRASH)
-PROTECTIVE_TREND_LEVEL_REDUCTION = 0.5  # Scale grid levels in strong trends (0.5 keeps half the levels)
+PROTECTIVE_TREND_LEVEL_REDUCTION = 0.8  # Scale grid levels in strong trends (0.5 keeps half the levels)
 
 def validate_config():
     """验证配置参数的有效性，检测不合理设置"""

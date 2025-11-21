@@ -2436,6 +2436,17 @@ class GridTrader:
             "capital": self._calculate_dynamic_capital_for_level(price)
         }
         
+        # STRICT PROFIT CHECK: Prevent forced hedging if it leads to fee erosion
+        round_trip_fee = config.TRADING_FEE_RATE * 2
+        min_profit_buffer = getattr(config, "MIN_EXPECTED_PROFIT_BUFFER", 0)
+        
+        if not self._has_profit_potential(new_level, current_price, round_trip_fee, min_profit_buffer):
+            self.logger.warning(
+                f"Skipping replacement order: Profit potential too low for {side} @ {price:.8f} "
+                f"(Current: {current_price:.8f})"
+            )
+            return
+
         # Update the grid level and place the order
         self.grid[level_index] = new_level
         self._place_grid_order(new_level)
