@@ -34,6 +34,7 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+logging.getLogger('binance_api').setLevel(logging.DEBUG)
 
 class GridTradingBot:
     def __init__(self):
@@ -135,6 +136,11 @@ class GridTradingBot:
     def _handle_websocket_message(self, message):
         """Process WebSocket messages with focus on business logic only"""
         try:
+            # DEBUG: Log message type to debug missing execution reports
+            msg_type = getattr(message, 'e', message.get('e') if isinstance(message, dict) else 'unknown')
+            # Log ALL messages to verify connectivity
+            self.logger.info(f"Received WS message: type={msg_type}, keys={list(message.keys()) if isinstance(message, dict) else dir(message)}")
+
             # Handle kline events for price updates
             if (hasattr(message, 'e') and message.e == 'kline' and 
                 hasattr(message, 'k') and hasattr(message.k, 'c') and 
@@ -321,7 +327,8 @@ class GridTradingBot:
             # Create new MarketDataWebsocketManager
             self.ws_manager = MarketDataWebsocketManager(
                 on_message_callback=self._handle_websocket_message,
-                on_error_callback=self._websocket_error_handler
+                on_error_callback=self._websocket_error_handler,
+                use_testnet=config.USE_TESTNET
             )
             
             # Start necessary data streams
@@ -354,21 +361,31 @@ class GridTradingBot:
     
     def _setup_user_data_stream(self):
         """Set up user data stream for order updates with WS-API preferred."""
+        logger.info("=== Starting User Data Stream Setup ===")
         try:
             client_status = self.binance_client.get_client_status()
+            logger.info(f"Client status: websocket_available={client_status['websocket_available']}, ws_client={self.binance_client.ws_client is not None}")
 
             # 1) Preferred path: WebSocket API subscription (no listenKey)
             if client_status["websocket_available"] and self.binance_client.ws_client:
+                logger.info("Attempting WS-API user data stream subscription...")
                 def _on_event(event_payload, subscription_id=None):
                     try:
+                        logger.info(f"Received user data event: {str(event_payload)[:200]}")
                         self._handle_websocket_message(event_payload)
                     except Exception as e:
                         logger.error(f"Failed to process WS-API user event: {e}")
 
-                if self.binance_client.start_user_data_stream(on_event=_on_event):
+                subscription_result = self.binance_client.start_user_data_stream(on_event=_on_event)
+                logger.info(f"WS-API subscription result: {subscription_result}")
+                if subscription_result:
                     self.user_stream_subscription_id = self.binance_client.user_stream_subscription_id
-                    logger.info(f"User data stream subscribed via WS API (subscriptionId={self.user_stream_subscription_id})")
+                    logger.info(f"✓ User data stream subscribed via WS API (subscriptionId={self.user_stream_subscription_id})")
                     return  # No listenKey setup needed
+                else:
+                    logger.warning("WS-API subscription returned False, falling back to listenKey")
+            else:
+                logger.info(f"Skipping WS-API path: websocket_available={client_status['websocket_available']}, ws_client exists={self.binance_client.ws_client is not None}")
 
             # 2) Fallback: legacy listenKey stream via REST + market stream client
             if not self.ws_manager:

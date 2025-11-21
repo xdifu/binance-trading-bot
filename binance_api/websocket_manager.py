@@ -112,13 +112,14 @@ class MarketDataWebsocketManager:
     by the WebSocketAPIClient class.
     """
     
-    def __init__(self, on_message_callback, on_error_callback=None):
+    def __init__(self, on_message_callback, on_error_callback=None, use_testnet=False):
         """
         Initialize the WebSocket manager for market data streams
         
         Args:
             on_message_callback: Callback function for received messages
             on_error_callback: Callback function for error handling
+            use_testnet: Whether to use testnet streams
         """
         self.ws_client = None
         self.on_message_callback = on_message_callback
@@ -131,6 +132,13 @@ class MarketDataWebsocketManager:
         self.listen_key = None
         self.max_reconnect_attempts = 10
         self.current_reconnect_attempt = 0
+        self.use_testnet = use_testnet
+        
+        # Set stream URL based on network
+        if self.use_testnet:
+            self.stream_url = "wss://stream.testnet.binance.vision"
+        else:
+            self.stream_url = "wss://stream.binance.com:9443"
         
         # Initialize message handlers mapping
         self.message_handlers = {
@@ -367,6 +375,7 @@ class MarketDataWebsocketManager:
         
         # Create a new client
         self.ws_client = SpotWebsocketStreamClient(
+            stream_url=self.stream_url,
             on_message=self._message_handler, 
             on_error=self._error_handler,
             is_combined=True  # Use combined streams
