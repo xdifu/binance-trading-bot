@@ -416,7 +416,9 @@ class GridTrader:
             warnings.append(f"Insufficient {quote_asset}: Required {usdt_needed:.2f}, Available {available_quote:.2f}")
             insufficient_funds = True
 
+
         # Also check if we have enough base asset (e.g., BTC, ETH)
+        self.logger.debug(f"Balance check: base_needed={base_needed:.8f}, available_base={available_base:.8f}, base_tolerance={base_tolerance:.8f}, check={(available_base + base_tolerance):.8f} < {base_needed:.8f} = {available_base + base_tolerance < base_needed}")
         if available_base + base_tolerance < base_needed and not simulation:
             warnings.append(f"Insufficient {base_asset}: Required {base_needed:.2f}, Available {available_base:.2f}")
             insufficient_funds = True
