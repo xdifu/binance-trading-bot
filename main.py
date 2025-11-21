@@ -486,8 +486,9 @@ class GridTradingBot:
                     self.grid_trader.check_grid_recalculation()
                     last_grid_check = now
                 
-                # Check for unfilled grid slots every 15 minutes
-                if (now - last_unfilled_check).total_seconds() > 15 * 60:  # 15 minutes
+                # Check for unfilled grid slots every 1 minute (was 15 minutes)
+                # This ensures faster recovery if immediate replacement fails
+                if (now - last_unfilled_check).total_seconds() > 60:  # 1 minute
                     self.grid_trader._check_for_unfilled_grid_slots()
                     last_unfilled_check = now
                 

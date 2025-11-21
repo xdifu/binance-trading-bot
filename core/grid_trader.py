@@ -2023,6 +2023,11 @@ class GridTrader:
             return
         
         # Process the filled order and place the opposite order
+        # CRITICAL FIX: Mark the order as filled in the grid immediately
+        # This ensures that even if the replacement order fails, the slot is marked as empty
+        # and will be picked up by the _check_for_unfilled_grid_slots loop
+        matching_level['order_id'] = None
+        
         self._process_filled_order(matching_level, level_index, side, quantity, price)
     
     # OPTIMIZED: Extract order data method to reduce code duplication
