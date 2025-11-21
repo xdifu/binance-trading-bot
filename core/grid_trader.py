@@ -2884,16 +2884,31 @@ class GridTrader:
             grid_center = (historical_center * (1 - current_weight) + 
                           current_price * current_weight)
 
-            # 11b. Limit deviation from current price to avoid placing grid too far away
-            max_dev = getattr(config, "MAX_CENTER_DEVIATION", 0.05)
+            # 11b. Dynamic deviation limit based on market state
+            # Strong trends need wider limits to follow price movement
+            # Ranging markets need tighter limits to optimize grid density
+            if abs(trend_strength) > 0.8:
+                # Strong trend (PUMP/CRASH): allow 8% deviation to follow the trend
+                max_dev = 0.08
+                market_state = "strong trend"
+            elif abs(trend_strength) > 0.5:
+                # Moderate trend: allow 5% deviation
+                max_dev = 0.05
+                market_state = "moderate trend"
+            else:
+                # Ranging market: keep tight 3% deviation
+                max_dev = getattr(config, "MAX_CENTER_DEVIATION", 0.03)
+                market_state = "ranging"
+            
             deviation = abs(grid_center - current_price) / current_price
             if deviation > max_dev:
                 direction = 1 if grid_center > current_price else -1
                 adjusted_center = current_price * (1 + direction * max_dev)
                 self.logger.info(
-                    "Grid center deviation %.2f%% exceeds max %.2f%%, clamping to %.8f",
+                    "Grid center deviation %.2f%% exceeds max %.2f%% (%s), clamping to %.8f",
                     deviation * 100,
                     max_dev * 100,
+                    market_state,
                     adjusted_center,
                 )
                 grid_center = adjusted_center
