@@ -45,7 +45,9 @@ class BinanceClient:
         self._symbol_info_cache = {}  # Cache symbol info for precision formatting
         self.user_stream_subscription_id = None
         self.user_stream_mode = None  # "ws_api" or "listen_key"
-        
+        self._book_ticker_cache = {}  # Cache for best bid/ask
+        self.book_ticker_ttl_ms = 2000  # Cache freshness window
+
         # Add time offset variable for server time synchronization
         self.time_offset = 0
         self.last_time_sync = 0
@@ -611,6 +613,61 @@ class BinanceClient:
         except Exception as e:
             self.logger.error(f"Failed to get order book for {symbol}: {e}")
             raise
+
+    def _get_cached_book_ticker(self, symbol, max_age_ms):
+        """Return cached book ticker if fresh enough"""
+        entry = self._book_ticker_cache.get(symbol)
+        if not entry:
+            return None
+        age_ms = (time.time() - entry["ts"]) * 1000
+        if age_ms <= max_age_ms:
+            return entry["data"]
+        return None
+
+    def get_book_ticker(self, symbol, allow_stale_ms=None):
+        """
+        Get best bid/ask using WS-API first, fallback to REST per AGENTS.md.
+
+        Reference: binance-spot-api-docs/web-socket-api.md (ticker.bookTicker)
+        """
+        symbol = symbol.upper()
+        max_age = allow_stale_ms or self.book_ticker_ttl_ms
+
+        # Serve fresh cache if available
+        cached = self._get_cached_book_ticker(symbol, max_age)
+        if cached:
+            return cached
+
+        resp = self._execute_with_fallback("book_ticker", "ticker_book_ticker", symbol=symbol)
+        ticker = self._unwrap_response(resp)
+
+        if not isinstance(ticker, dict) or "bidPrice" not in ticker or "askPrice" not in ticker:
+            raise ValueError(f"Unexpected book ticker response for {symbol}: {ticker}")
+
+        self._book_ticker_cache[symbol] = {"data": ticker, "ts": time.time()}
+        return ticker
+
+    def get_best_bid_ask(self, symbol, allow_stale_ms=None):
+        """
+        Convenience helper returning (bid, ask) floats with cache + fallback.
+        """
+        symbol = symbol.upper()
+        max_age = allow_stale_ms or self.book_ticker_ttl_ms
+
+        last_error = None
+        ticker = None
+        try:
+            ticker = self.get_book_ticker(symbol, allow_stale_ms=max_age)
+        except Exception as e:
+            last_error = e
+            # Try stale cache if available
+            ticker = self._get_cached_book_ticker(symbol, max_age)
+
+        if not ticker:
+            self.logger.error(f"Failed to get book ticker for {symbol}: {last_error}")
+            raise last_error if last_error else RuntimeError(f"book ticker unavailable for {symbol}")
+
+        return float(ticker["bidPrice"]), float(ticker["askPrice"])
             
     def place_limit_order(
         self,

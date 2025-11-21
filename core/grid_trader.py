@@ -1530,10 +1530,8 @@ class GridTrader:
         
         # CRITICAL: Orderbook-based price protection to prevent instant market execution
         try:
-            # Get current orderbook to check best bid/ask
-            ticker = self.binance_client.rest_client.ticker_book_ticker(self.symbol)
-            best_bid = float(ticker['bidPrice'])
-            best_ask = float(ticker['askPrice'])
+            # Prefer WS bookTicker (per web-socket-api.md), fallback to REST with cache
+            best_bid, best_ask = self.binance_client.get_best_bid_ask(self.symbol)
             
             order_price = float(formatted_price)
             fee_rate = config.TRADING_FEE_RATE
@@ -1560,9 +1558,9 @@ class GridTrader:
                     return False
                     
         except Exception as e:
-            self.logger.warning(f"Could not fetch orderbook for price validation: {e}, proceeding with order")
-            # Don't block order placement if orderbook fetch fails
-            pass
+            # Without orderbook data we cannot guarantee the order will not cross the spread; block placement
+            self.logger.error(f"Cannot validate order price (orderbook fetch failed): {e}")
+            return False
             
         try:
             if self.simulation_mode:

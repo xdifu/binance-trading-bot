@@ -1115,6 +1115,16 @@ class BinanceWSClient:
         request_id = self.client._send_request("ticker.price", params)
         return self.client._wait_for_response(request_id)
 
+    def book_ticker(self, symbol):
+        """
+        Get best bid/ask via WS API.
+
+        Reference: binance-spot-api-docs/web-socket-api.md (ticker.bookTicker)
+        """
+        params = {"symbol": symbol}
+        request_id = self.client._send_request("ticker.bookTicker", params)
+        return self.client._wait_for_response(request_id)
+
     def depth(self, symbol, limit=20):
         """Get partial order book depth via WS API."""
         params = {"symbol": symbol, "limit": limit}
