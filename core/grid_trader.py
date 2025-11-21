@@ -1527,6 +1527,42 @@ class GridTrader:
         if formatted_price == "0" or float(formatted_price) <= 0:
             self.logger.error(f"Price formatting returned invalid value: '{formatted_price}' for {price}, skipping order")
             return False
+        
+        # CRITICAL: Orderbook-based price protection to prevent instant market execution
+        try:
+            # Get current orderbook to check best bid/ask
+            ticker = self.binance_client.binance_rest_client.ticker_book_ticker(self.symbol)
+            best_bid = float(ticker['bidPrice'])
+            best_ask = float(ticker['askPrice'])
+            
+            order_price = float(formatted_price)
+            fee_rate = config.TRADING_FEE_RATE
+            
+            if side == 'SELL':
+                # Sell orders must be above best bid to avoid instant execution
+                # Add fee buffer (2x fees + 0.2% safety margin) to ensure profitability
+                min_safe_price = best_bid * (1 + fee_rate * 2 + 0.002)
+                if order_price < min_safe_price:
+                    self.logger.warning(
+                        f"Rejecting SELL @ {order_price:.8f}: below safe price {min_safe_price:.8f} "
+                        f"(best_bid={best_bid:.8f}, would execute immediately)"
+                    )
+                    return False
+            
+            elif side == 'BUY':
+                # Buy orders must be below best ask to avoid instant execution
+                max_safe_price = best_ask * (1 - fee_rate * 2 - 0.002)
+                if order_price > max_safe_price:
+                    self.logger.warning(
+                        f"Rejecting BUY @ {order_price:.8f}: above safe price {max_safe_price:.8f} "
+                        f"(best_ask={best_ask:.8f}, would execute immediately)"
+                    )
+                    return False
+                    
+        except Exception as e:
+            self.logger.warning(f"Could not fetch orderbook for price validation: {e}, proceeding with order")
+            # Don't block order placement if orderbook fetch fails
+            pass
             
         try:
             if self.simulation_mode:
@@ -2757,10 +2793,10 @@ class GridTrader:
             historical_klines = self._get_cached_klines(
                 symbol=self.symbol, 
                 interval="4h",  # 4-hour candles balance detail and noise reduction
-                limit=360       # ~60 days for statistical significance
+                limit=48        # ~8 days - optimized for volatile altcoins, prevents old data from dragging center
             )
             
-            if not historical_klines or len(historical_klines) < 120:  # Need at least 20 days
+            if not historical_klines or len(historical_klines) < 20:  # Need at least 20 periods (~3 days)
                 self.logger.warning("Insufficient historical data for mean reversion analysis")
                 current_price = self.binance_client.get_symbol_price(self.symbol)
                 return current_price, self.grid_range_percent
