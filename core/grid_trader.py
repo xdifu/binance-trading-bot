@@ -138,7 +138,7 @@ class GridTrader:
         
         # Smart grid recalculation tracking (Event-driven with confirmation)
         self.out_of_bounds_start_time = None  # Timestamp when price first went out of bounds
-        self.out_of_bounds_confirmation_threshold = 2 * 60 * 60  # 2 hours in seconds
+        self.out_of_bounds_confirmation_threshold = 30 * 60  # 30 minutes in seconds (optimized from 2h)
         self.price_out_of_upper_bound = False  # Track if price is above upper limit
         self.price_out_of_lower_bound = False  # Track if price is below lower limit
     

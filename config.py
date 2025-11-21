@@ -57,12 +57,12 @@ CORE_GRID_RATIO = 0.6  # 核心区域网格点比例，增大可在中心区域�
 #############################################
 
 # 订单管理
-MAX_ORDER_AGE_HOURS = 168  # 订单最长存在时间(小时)，减小可更频繁更新长期未成交订单
-PRICE_DEVIATION_THRESHOLD = 0.005  # 过期订单距离当前价格阈值，减小可更激进地更新订单
+MAX_ORDER_AGE_HOURS = 336  # 订单最长存在时间(小时)，增加到14天以减少震荡磨损
+PRICE_DEVIATION_THRESHOLD = 0.02  # 过期订单距离当前价格阈值，增加到2%以适应高波动
 
 # 交易参数
 TRADING_FEE_RATE = 0.001  # 单向交易手续费率 (0.1%)
-PROFIT_MARGIN_MULTIPLIER = 2.5  # 要求利润必须是手续费的倍数
+PROFIT_MARGIN_MULTIPLIER = 2.0  # 要求利润必须是手续费的倍数，降低到2.0以保护更多微利订单
 BUY_SELL_SPREAD = 0.0025  # 买卖价差 (0.25%)
 MIN_NOTIONAL_VALUE = 5  # 最小订单价值(USDT)，低于此值的订单将被跳过
 
