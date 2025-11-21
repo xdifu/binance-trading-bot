@@ -1048,6 +1048,23 @@ class GridTrader:
                 )
 
             self.current_grid_levels = actual_grid_levels
+            # Snapshot the generated grid for troubleshooting (helps explain why orders may not be placed)
+            try:
+                lowest = min(l["price"] for l in grid_levels)
+                highest = max(l["price"] for l in grid_levels)
+                self.logger.info(
+                    "Grid ready: total=%s (BUY=%s, SELL=%s), center=%.8f, range=%.4f%%, price band=%.8f-%.8f",
+                    actual_grid_levels,
+                    final_buy_count,
+                    final_sell_count,
+                    grid_center,
+                    grid_range_percent * 100,
+                    lowest,
+                    highest,
+                )
+            except Exception:
+                # Do not block on logging issues
+                pass
             return grid_levels
 
         except Exception as e:
