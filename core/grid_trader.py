@@ -915,9 +915,9 @@ class GridTrader:
                 # Fallback: use grid_center logic if live price fails
                 live_current_price = grid_center
 
-            # 2. Pre-calculate Trend Factor
+            # 2. Pre-calculate Trend Factor (Unified)
             # This determines the asymmetry of the grid (skewness).
-            # We need to calculate this NOW to predict where the theoretical upper/lower bounds will be.
+            # Calculated ONCE here to ensure consistency between validation and generation.
             atr_value, trend_strength = self.calculate_market_metrics()
             if atr_value is not None:
                 self.last_atr_value = atr_value
@@ -929,8 +929,9 @@ class GridTrader:
             
             # 3. Define Safety Buffer
             # Exchanges often reject Sell orders if Price <= BestBid * (1+Fee).
-            # We add a 0.5% buffer to ensure the generated boundary orders are valid limit orders.
-            safety_buffer = 0.005
+            # We add a 1.0% buffer to ensure the generated boundary orders are valid limit orders.
+            # Increased to 1.0% to safely cover spread, fees, and volatility slippage.
+            safety_buffer = 0.01
             min_valid_upper = live_current_price * (1 + safety_buffer)
             max_valid_lower = live_current_price * (1 - safety_buffer)
             
@@ -954,7 +955,7 @@ class GridTrader:
                 new_center = min_valid_upper / (1 + grid_range_percent * trend_factor)
                 
                 self.logger.warning(
-                    f"🚨 GRID SUBMERGED (Crash Protection Activated): "
+                    f"GRID SUBMERGED (Crash Protection): "
                     f"Theoretical Upper {theoretical_upper:.2f} < Min Valid {min_valid_upper:.2f}. "
                     f"Trend: {trend_strength:.2f}. "
                     f"Snapping Center UP: {original_center:.2f} -> {new_center:.2f} (Creating Safety Gap)"
@@ -972,7 +973,7 @@ class GridTrader:
                 new_center = max_valid_lower / (1 - grid_range_percent * (1 - trend_factor))
                 
                 self.logger.warning(
-                    f"🚨 GRID FLOATING (Pump Protection Activated): "
+                    f"GRID FLOATING (Pump Protection): "
                     f"Theoretical Lower {theoretical_lower:.2f} > Min Valid {max_valid_lower:.2f}. "
                     f"Trend: {trend_strength:.2f}. "
                     f"Snapping Center DOWN: {original_center:.2f} -> {new_center:.2f} (Creating Safety Gap)"
@@ -985,7 +986,7 @@ class GridTrader:
 
             # ==================== End of Strategy ====================
 
-            # CRITICAL FIX: Update instance variable to persist the corrected center
+            # Update instance variable to persist the corrected center
             self.grid_center = grid_center 
             
             # Update local variable 'current_price' which is used for grid generation below.
@@ -997,13 +998,11 @@ class GridTrader:
                 self.logger.error(f"Invalid grid center price: {current_price}")
                 return []
             
-            # Store grid center for reference, but keep live price separate
-            # self.current_market_price should only be updated from live ticker
+            # Calculate grid range based on the (potentially corrected) center
             grid_range = current_price * grid_range_percent
             
-            # --- Step 3: Define grid boundaries with asymmetric trend adaptation ---
-            # Overall grid boundaries adjusted by trend direction
-            trend_factor = 0.5 + (trend_strength * 0.3)  # Range 0.2-0.8 based on trend
+            # Calculate final grid boundaries
+            # We reuse 'trend_factor' from above to ensure the Snap logic matches the Generation logic exactly.
             upper_bound = current_price + (grid_range * trend_factor)
             lower_bound = current_price - (grid_range * (1 - trend_factor))
     
