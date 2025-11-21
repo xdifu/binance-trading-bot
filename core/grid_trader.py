@@ -484,8 +484,8 @@ class GridTrader:
         base_value_in_usdt = base_balance * current_price
         total_value_in_usdt = base_value_in_usdt + usdt_balance
         
-        # Target ratio: 40% base asset, 60% USDT - optimal for most grid setups
-        target_base_ratio = 0.4
+        # Target ratio: 50% base asset, 50% USDT - safer for dynamic grid requirements
+        target_base_ratio = 0.5
         current_base_ratio = base_value_in_usdt / total_value_in_usdt if total_value_in_usdt > 0 else 0
         
         # Log the accurate asset balance after canceling orders
