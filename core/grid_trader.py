@@ -903,13 +903,94 @@ class GridTrader:
 
            # Use mean reversion optimized center instead of current market price FOR GRID POSITIONING
             grid_center, grid_range_percent = self.calculate_optimal_grid_center()
+
+            # ==================== Dynamic Boundary Snap (Snap to Edge) ====================
             
-            # CRITICAL FIX: Store grid center separately, don't overwrite real-time price tracker
-            self.grid_center = grid_center  # Store for grid positioning logic
-            # DO NOT set self.current_market_price = grid_center (that was the bug!)
+            # 1. Fetch live price for strict boundary validation
+            # We must ensure the grid covers the REAL market price to avoid order rejection.
+            try:
+                live_current_price = float(self.binance_client.get_symbol_price(self.symbol))
+            except Exception as e:
+                self.logger.error(f"Failed to get live price for grid validation: {e}")
+                # Fallback: use grid_center logic if live price fails
+                live_current_price = grid_center
+
+            # 2. Pre-calculate Trend Factor
+            # This determines the asymmetry of the grid (skewness).
+            # We need to calculate this NOW to predict where the theoretical upper/lower bounds will be.
+            atr_value, trend_strength = self.calculate_market_metrics()
+            if atr_value is not None:
+                self.last_atr_value = atr_value
             
-            # Use grid_center for grid positioning calculations
-            current_price = grid_center  # Local variable for grid positioning
+            # Trend Factor logic: 
+            # Trend = -1.0 (Crash) -> factor = 0.2 (Small upper space, defensive)
+            # Trend = 1.0 (Pump) -> factor = 0.8 (Large upper space, aggressive)
+            trend_factor = 0.5 + (trend_strength * 0.3)
+            
+            # 3. Define Safety Buffer
+            # Exchanges often reject Sell orders if Price <= BestBid * (1+Fee).
+            # We add a 0.5% buffer to ensure the generated boundary orders are valid limit orders.
+            safety_buffer = 0.005
+            min_valid_upper = live_current_price * (1 + safety_buffer)
+            max_valid_lower = live_current_price * (1 - safety_buffer)
+            
+            # 4. Calculate Theoretical Boundaries based on Historical Center
+            raw_range_val = grid_center * grid_range_percent
+            theoretical_upper = grid_center + (raw_range_val * trend_factor)
+            theoretical_lower = grid_center - (raw_range_val * (1 - trend_factor))
+            
+            is_snapped = False
+            original_center = grid_center
+
+            # 5. Reverse Calculation Logic (Snap to Edge)
+            
+            # CASE A: Price Pump / Crash Trend (Current ZEC Scenario)
+            # The theoretical upper bound is BELOW the current price. We cannot place Sell orders.
+            # Fix: Calculate the minimum Grid Center needed so that Upper Bound == min_valid_upper.
+            if theoretical_upper < min_valid_upper:
+                # Derivation: 
+                # Upper = Center * (1 + RangePct * TrendFactor)
+                # -> Center = Upper / (1 + RangePct * TrendFactor)
+                new_center = min_valid_upper / (1 + grid_range_percent * trend_factor)
+                
+                self.logger.warning(
+                    f"🚨 GRID SUBMERGED (Crash Protection Activated): "
+                    f"Theoretical Upper {theoretical_upper:.2f} < Min Valid {min_valid_upper:.2f}. "
+                    f"Trend: {trend_strength:.2f}. "
+                    f"Snapping Center UP: {original_center:.2f} -> {new_center:.2f} (Creating Safety Gap)"
+                )
+                grid_center = new_center
+                is_snapped = True
+
+            # CASE B: Price Crash / Pump Trend
+            # The theoretical lower bound is ABOVE the current price. We cannot place Buy orders.
+            # Fix: Calculate the maximum Grid Center needed so that Lower Bound == max_valid_lower.
+            elif theoretical_lower > max_valid_lower:
+                # Derivation:
+                # Lower = Center * (1 - RangePct * (1 - TrendFactor))
+                # -> Center = Lower / (1 - RangePct * (1 - TrendFactor))
+                new_center = max_valid_lower / (1 - grid_range_percent * (1 - trend_factor))
+                
+                self.logger.warning(
+                    f"🚨 GRID FLOATING (Pump Protection Activated): "
+                    f"Theoretical Lower {theoretical_lower:.2f} > Min Valid {max_valid_lower:.2f}. "
+                    f"Trend: {trend_strength:.2f}. "
+                    f"Snapping Center DOWN: {original_center:.2f} -> {new_center:.2f} (Creating Safety Gap)"
+                )
+                grid_center = new_center
+                is_snapped = True
+
+            if is_snapped:
+                self.logger.info(f"Grid Center Optimization: {original_center:.2f} -> {grid_center:.2f}")
+
+            # ==================== End of Strategy ====================
+
+            # CRITICAL FIX: Update instance variable to persist the corrected center
+            self.grid_center = grid_center 
+            
+            # Update local variable 'current_price' which is used for grid generation below.
+            # Note: We do NOT update self.current_market_price as that should reflect the actual ticker.
+            current_price = grid_center
 
             # Check validity of calculated center
             if current_price <= 0:
@@ -919,11 +1000,6 @@ class GridTrader:
             # Store grid center for reference, but keep live price separate
             # self.current_market_price should only be updated from live ticker
             grid_range = current_price * grid_range_percent
-            
-            # --- Step 2: Calculate trend-based offset and strength ---
-            atr_value, trend_strength = self.calculate_market_metrics()
-            if atr_value is not None:
-                self.last_atr_value = atr_value  # Update stored ATR value
             
             # --- Step 3: Define grid boundaries with asymmetric trend adaptation ---
             # Overall grid boundaries adjusted by trend direction
