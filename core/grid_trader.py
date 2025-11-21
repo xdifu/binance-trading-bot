@@ -406,14 +406,18 @@ class GridTrader:
         warnings = []
         insufficient_funds = False
 
+        # Use relative tolerance (0.1%) instead of absolute to handle varying order sizes
+        # This prevents false "insufficient funds" when available ≈ required due to float precision
+        quote_tolerance = max(usdt_needed * 0.001, 0.01)  # 0.1% or min 0.01 USDT
+        base_tolerance = max(base_needed * 0.001, 1e-6)   # 0.1% or min 1e-6 base asset
+        
         # Check if we have enough quote asset (USDT)
-        tolerance = 1e-6  # Small tolerance to account for floating-point rounding issues
-        if available_quote + tolerance < usdt_needed and not simulation:
+        if available_quote + quote_tolerance < usdt_needed and not simulation:
             warnings.append(f"Insufficient {quote_asset}: Required {usdt_needed:.2f}, Available {available_quote:.2f}")
             insufficient_funds = True
 
         # Also check if we have enough base asset (e.g., BTC, ETH)
-        if available_base + tolerance < base_needed and not simulation:
+        if available_base + base_tolerance < base_needed and not simulation:
             warnings.append(f"Insufficient {base_asset}: Required {base_needed:.2f}, Available {available_base:.2f}")
             insufficient_funds = True
 
