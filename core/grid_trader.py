@@ -409,7 +409,7 @@ class GridTrader:
         # Use relative tolerance (0.1%) instead of absolute to handle varying order sizes
         # This prevents false "insufficient funds" when available ≈ required due to float precision
         quote_tolerance = max(usdt_needed * 0.001, 0.01)  # 0.1% or min 0.01 USDT
-        base_tolerance = max(base_needed * 0.001, 1e-6)   # 0.1% or min 1e-6 base asset
+        base_tolerance = max(base_needed * 0.001, 0.001)  # 0.1% or min 0.001 base asset (0.1%)
         
         # Check if we have enough quote asset (USDT)
         if available_quote + quote_tolerance < usdt_needed and not simulation:
