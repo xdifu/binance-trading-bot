@@ -2313,7 +2313,8 @@ class GridTrader:
             allocation = base_capital * edge_discount
         
         # Ensure we meet minimum notional value required by exchange
-        min_required_capital = config.MIN_NOTIONAL_VALUE
+        # CRITICAL FIX: Add 10% buffer to prevent precision rounding errors from dropping below min notional
+        min_required_capital = config.MIN_NOTIONAL_VALUE * 1.1
         return max(min_required_capital, allocation)
     
     def _lock_funds(self, asset, amount):
