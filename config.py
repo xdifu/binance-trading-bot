@@ -98,9 +98,9 @@ ENABLE_PROTECTIVE_MODE = True  # Global switch; if False, only auto mode may ena
 AUTO_PROTECTIVE_FOR_NON_MAJOR = True  # Auto-enable protections when symbol not in MAJOR_SYMBOLS
 MAJOR_SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"]
 MIN_EXPECTED_PROFIT_BUFFER = 0.0002  # Minimum expected profit after fees and slippage (decimal, e.g., 0.0002 = 0.02%)
+PROTECTIVE_TREND_LEVEL_REDUCTION = 1.0  # Trend market level reduction factor (1.0 = no reduction, 0.5 = half levels)
 MAX_CENTER_DEVIATION = 0.03  # Max allowed deviation between grid center and current price (e.g., 0.03 = 3%)
 PROTECTIVE_PAUSE_STRONG_TREND = True  # Pause new grid orders in strong trends (PUMP/CRASH)
-PROTECTIVE_TREND_LEVEL_REDUCTION = 0.8  # Scale grid levels in strong trends (0.5 keeps half the levels)
 
 def validate_config():
     """验证配置参数的有效性，检测不合理设置"""
