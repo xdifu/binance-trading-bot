@@ -638,8 +638,24 @@ class BinanceClient:
         if cached:
             return cached
 
-        resp = self._execute_with_fallback("book_ticker", "ticker_book_ticker", symbol=symbol)
-        ticker = self._unwrap_response(resp)
+        ticker = None
+        try:
+            resp = self._execute_with_fallback("book_ticker", "book_ticker", symbol=symbol)
+            ticker = self._unwrap_response(resp)
+        except ClientError as e:
+            # WS-API may return -1099 on certain accounts/endpoints; per AGENTS, downgrade to REST after WS failure
+            if getattr(e, "error_code", None) == -1099 and self.rest_client:
+                self.logger.warning("WS bookTicker returned -1099 (unauthorized/not found); falling back to REST book_ticker")
+                self.websocket_available = False  # Trigger reconnection attempts later
+                ticker = self.rest_client.book_ticker(symbol=symbol)
+            else:
+                raise
+        except Exception:
+            # Any unexpected failure: try REST once if available
+            if self.rest_client:
+                ticker = self.rest_client.book_ticker(symbol=symbol)
+            else:
+                raise
 
         if not isinstance(ticker, dict) or "bidPrice" not in ticker or "askPrice" not in ticker:
             raise ValueError(f"Unexpected book ticker response for {symbol}: {ticker}")
