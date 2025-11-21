@@ -731,7 +731,8 @@ class GridTrader:
         
         # CRITICAL FIX: Account for maximum 1.5x amplification in core zone
         # Use conservative estimate with safety margin
-        max_capital_per_level = self.capital_per_level * 1.6  # 1.5x + 10% safety margin
+        # Adjusted to 1.2x to match actual config (1.16x) and allow more levels
+        max_capital_per_level = self.capital_per_level * 1.2  # 1.16x + safety margin
         
         if max_capital_per_level <= 0:
             return 0
@@ -758,7 +759,8 @@ class GridTrader:
         base_asset = self.symbol.replace('USDT', '')
         effective_base = max(base_balance - self.pending_locks.get(base_asset, 0), 0)
         # CRITICAL FIX: Account for maximum 1.5x amplification in core zone
-        max_capital_per_level = self.capital_per_level * 1.6  # 1.5x + 10% safety margin
+        # Adjusted to 1.2x to match actual config (1.16x) and allow more levels
+        max_capital_per_level = self.capital_per_level * 1.2  # 1.16x + safety margin
         sell_quantity_per_level = max_capital_per_level / current_price if current_price > 0 else 0
         
         if sell_quantity_per_level <= 0:
