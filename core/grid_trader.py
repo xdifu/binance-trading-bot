@@ -2867,15 +2867,18 @@ class GridTrader:
             price_deviation = abs(current_price - historical_center) / historical_center
             
             # 10. Determine final weights based on price deviation and oscillation
+            # CRITICAL FIX: Increase base weight to 0.80 (80%) for current price to prevent
+            # grid center from deviating too far from market price in trending markets.
+            # This fixes the bug where sell orders were generated below current price.
             if price_deviation > 0.15:
-                # Large deviation - possible market structure change, more weight to current price
-                current_weight = 0.35
+                # Large deviation - possible market structure change, maximum weight to current price
+                current_weight = 0.85
             elif price_deviation > 0.08:
                 # Moderate deviation
-                current_weight = 0.25
+                current_weight = 0.82
             else:
-                # Small deviation - rely more on historical center
-                current_weight = 0.15 + (0.1 * (1 - oscillation_index))  # 0.15-0.25 range
+                # Small deviation - still prioritize current price heavily
+                current_weight = 0.80  # Base 80% weight for current price
                 
             # 11. Calculate final grid center
             grid_center = (historical_center * (1 - current_weight) + 

@@ -29,7 +29,7 @@ WS_RECONNECT_DELAY = 5  # 重连间隔时间(秒)，增大可避免频繁重连�
 #############################################
 
 SYMBOL = "ZECUSDT"  # 主网实盘交易对
-CAPITAL_PER_LEVEL = 6  # 每个网格的资金(USDT)，增加可提高利润但需要更多总资金
+CAPITAL_PER_LEVEL = 11  # 每个网格的资金(USDT)，提高到11以避免NOTIONAL过滤器错误(最小值5)
 CAPITAL_SIZE = "small"  # 资金规模，可选值："small"(小资金优化) 或 "standard"(标准资金)
 
 #############################################
