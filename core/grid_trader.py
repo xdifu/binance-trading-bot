@@ -501,7 +501,8 @@ class GridTrader:
             needed_base_value = target_base_value - base_value_in_usdt
             
             # Apply safety constraints to purchase amount
-            min_purchase = float(getattr(config, 'MIN_NOTIONAL_VALUE', 6))
+            # CRITICAL FIX: Add 20% buffer to prevent precision rounding errors from dropping below min notional
+            min_purchase = float(getattr(config, 'MIN_NOTIONAL_VALUE', 6)) * 1.2
             
             if needed_base_value > (total_value_in_usdt * 0.05) and usdt_balance >= min_purchase:
                 # Calculate purchase amount with safety cap
@@ -2313,8 +2314,8 @@ class GridTrader:
             allocation = base_capital * edge_discount
         
         # Ensure we meet minimum notional value required by exchange
-        # CRITICAL FIX: Add 10% buffer to prevent precision rounding errors from dropping below min notional
-        min_required_capital = config.MIN_NOTIONAL_VALUE * 1.1
+        # CRITICAL FIX: Add 20% buffer to prevent precision rounding errors from dropping below min notional
+        min_required_capital = config.MIN_NOTIONAL_VALUE * 1.2
         return max(min_required_capital, allocation)
     
     def _lock_funds(self, asset, amount):
