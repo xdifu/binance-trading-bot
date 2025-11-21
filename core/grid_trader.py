@@ -408,18 +408,18 @@ class GridTrader:
 
         # Use relative tolerance (0.1%) instead of absolute to handle varying order sizes
         # This prevents false "insufficient funds" when available ≈ required due to float precision
-        quote_tolerance = max(usdt_needed * 0.001, 0.01)  # 0.1% or min 0.01 USDT
-        base_tolerance = max(base_needed * 0.001, 0.001)  # 0.1% or min 0.001 base asset (0.1%)
+        quote_tolerance = max(usdt_needed * 0.01, 0.01)  # 1% or min 0.01 USDT
+        base_tolerance = max(base_needed * 0.01, 0.001)  # 1% or min 0.001 base asset
         
         # Check if we have enough quote asset (USDT)
-        if available_quote + quote_tolerance < usdt_needed and not simulation:
+        # Use subtraction to avoid accumulation of floating-point errors
+        if available_quote < (usdt_needed - quote_tolerance) and not simulation:
             warnings.append(f"Insufficient {quote_asset}: Required {usdt_needed:.2f}, Available {available_quote:.2f}")
             insufficient_funds = True
 
-
         # Also check if we have enough base asset (e.g., BTC, ETH)
-        self.logger.debug(f"Balance check: base_needed={base_needed:.8f}, available_base={available_base:.8f}, base_tolerance={base_tolerance:.8f}, check={(available_base + base_tolerance):.8f} < {base_needed:.8f} = {available_base + base_tolerance < base_needed}")
-        if available_base + base_tolerance < base_needed and not simulation:
+        self.logger.debug(f"Balance check: base_needed={base_needed:.8f}, available_base={available_base:.8f}, base_tolerance={base_tolerance:.8f}, threshold={(base_needed - base_tolerance):.8f}, check={available_base:.8f} < {(base_needed - base_tolerance):.8f} = {available_base < (base_needed - base_tolerance)}")
+        if available_base < (base_needed - base_tolerance) and not simulation:
             warnings.append(f"Insufficient {base_asset}: Required {base_needed:.2f}, Available {available_base:.2f}")
             insufficient_funds = True
 
