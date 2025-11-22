@@ -1575,18 +1575,65 @@ class GridTrader:
     def _initialize_grid_orders(self):
         """
         Place all grid orders with unified logic for both WebSocket and REST APIs.
-        Processes all grid levels sequentially.
+        Processes all grid levels sequentially, adopting existing orders where possible.
         """
         orders_placed = 0
+        orders_adopted = 0
+        
+        # Fetch all open orders once to check for existing ones
+        try:
+            open_orders = self.binance_client.get_open_orders(self.symbol)
+            # Create a mapping for efficient lookup: (side, price) -> order_id
+            # We use a small tolerance for price matching
+            existing_orders = []
+            for order in open_orders:
+                existing_orders.append({
+                    'orderId': order['orderId'],
+                    'price': float(order['price']),
+                    'side': order['side'],
+                    'origQty': float(order['origQty'])
+                })
+            self.logger.info(f"Found {len(existing_orders)} existing open orders on exchange")
+        except Exception as e:
+            self.logger.error(f"Failed to fetch open orders during initialization: {e}")
+            existing_orders = []
+
         for level in self.grid:
             # Validate grid level data before placing the order
             if 'price' not in level or 'side' not in level or level['price'] <= 0 or level['side'] not in ['BUY', 'SELL']:
                 self.logger.error(f"Invalid grid level data: {level}. Skipping order placement.")
                 continue
+            
+            # Check if we can adopt an existing order
+            matched_order = None
+            target_price = level['price']
+            target_side = level['side']
+            
+            for order in existing_orders:
+                # Check side match
+                if order['side'] != target_side:
+                    continue
+                    
+                # Check price match with small tolerance (0.1%)
+                price_diff = abs(order['price'] - target_price) / target_price
+                if price_diff < 0.001:  # 0.1% tolerance
+                    matched_order = order
+                    break
+            
+            if matched_order:
+                # Adopt the existing order
+                level['order_id'] = matched_order['orderId']
+                self.logger.info(f"Adopting existing {target_side} order {matched_order['orderId']} at {matched_order['price']} (Target: {target_price})")
+                orders_adopted += 1
                 
-            # Call the single order placement method for each level
-            if self._place_grid_order(level):
-                orders_placed += 1
+                # Remove from existing_orders so we don't match it again (though unlikely with grid spacing)
+                existing_orders.remove(matched_order)
+            else:
+                # Call the single order placement method for each level
+                if self._place_grid_order(level):
+                    orders_placed += 1
+        
+        self.logger.info(f"Grid initialization complete: {orders_placed} new orders placed, {orders_adopted} existing orders adopted")
         
         self.logger.info(f"Grid setup complete: {orders_placed} orders placed out of {len(self.grid)} grid levels")
         return orders_placed > 0
