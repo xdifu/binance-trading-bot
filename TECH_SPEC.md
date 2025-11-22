@@ -75,8 +75,8 @@
 *   **Execution & Regeneration**:
     *   当收到 `FILLED` 事件（`ExecutionReport`）时，`handle_order_update` 被触发，首先将该层级的 `order_id` 清零，避免重复处理。
     *   **Opposite Order Logic**:
-        *   若买单成交 ($P_{\text{buy}}$)，系统在相邻网格层级挂出卖单，价格基于网格间距计算： $P_{\text{sell}} = P_{\text{buy}} + (P_{\text{buy}} \times \text{Grid Spacing})$。
-        *   **Profit Margin Check**: 执行前验证 $(P_{\text{sell}} - P_{\text{buy}}) / P_{\text{buy}} > \text{PROFIT\_MARGIN\_MULTIPLIER} \times \text{TRADING\_FEE\_RATE}$，确保净利润高于双边手续费的 2 倍。
+        *   若买单成交 ($P_{\text{buy}}$)，系统在相邻网格层级挂出卖单，价格为： $P_{\text{sell}} = P_{\text{buy}} \times (1 + \text{BUY\_SELL\_SPREAD})$，其中 `BUY_SELL_SPREAD` = 0.0025 (0.25%)。
+        *   **Profit Margin Check**: 执行前验证 $\text{effective\_profit} > \text{round\_trip\_fee} \times \text{PROFIT\_MARGIN\_MULTIPLIER}$，其中 `effective_profit = expected_profit - round_trip_fee - slippage`，确保净利润高于双边手续费的 2 倍。
 
 ## 4. Risk Management System (风险管理系统)
 
