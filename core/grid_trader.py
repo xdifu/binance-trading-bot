@@ -3039,7 +3039,7 @@ class GridTrader:
             historical_klines = self._get_cached_klines(
                 symbol=self.symbol, 
                 interval="4h",  # 4-hour candles balance detail and noise reduction
-                limit=48        # ~8 days - optimized for volatile altcoins, prevents old data from dragging center
+                limit=400       # ~66 days - sufficient for 60-day lookback (limit=48 was insufficient)
             )
             
             if not historical_klines or len(historical_klines) < 20:  # Need at least 20 periods (~3 days)

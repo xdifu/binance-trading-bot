@@ -62,6 +62,17 @@
     $$ P_{\text{center}} = P_{\text{historical}} \times (1 - w_{\text{current}}) + P_{\text{current}} \times w_{\text{current}} $$
     其中 $w_{\text{current}}$ 主要根据**价格偏离度**（Price Deviation）动态调整，基础值为 0.8。当当前价格显著偏离历史中心时（Deviation > 15%），$w_{\text{current}}$ 提升至 0.85 以快速跟随行情；反之则保持 0.80 以保留均值回归特性。趋势强度（Trend Strength）主要影响 $P_{\text{historical}}$ 的内部构成权重。
 
+*   **Historical Center Calculation (历史中心计算)**:
+    $P_{\text{historical}}$ 采用多时间段加权平均（Multi-Period Weighted Average）以平滑噪音并捕捉长期价值：
+    
+    $$ P_{\text{historical}} = P_{\text{recent}} \times w_r + P_{\text{medium}} \times w_m + P_{\text{long}} \times w_l $$
+    
+    *   **Recent** (最近7天, 42根4h K线): $w_r$ = 0.45~0.55 (根据震荡指数动态调整)
+    *   **Medium** (7-21天前, 84根4h K线): $w_m$ = 0.30
+    *   **Long** (第21-66天, 274根4h K线，实际覆盖约46天): $w_l$ = 0.15~0.25
+    
+    > **Note**: 系统从 Binance 请求 **400根4小时K线**（约66天数据）以支持该多时间段分析。每段内部采用线性加权，越近期的K线权重越高。
+
 
 *   **Asymmetric Distribution (非对称分布)**:
     系统将网格划分为 **Core Zone (核心区)** 和 **Edge Zone (边缘区)**。
@@ -156,3 +167,4 @@
 *   **`PROFIT_MARGIN_MULTIPLIER` (2.0)**: 最小利润系数。要求 (卖价 - 买价) 至少是交易手续费的 2 倍,防止无效交易 (给交易所打工)。
 *   **`ENABLE_COMPOUND_INTEREST` (True)**: 启用复利模式。开启后,系统根据账户总价值动态调整每格资金量,实现自动复利。
 *   **`CAPITAL_PERCENTAGE_PER_LEVEL` (0.01)**: 每格资金占总资金的百分比。默认 1% 表示账户总价值的 1% 用于单个网格层级,兼顾稳健性与资金利用率。
+*   **`HISTORICAL_KLINE_LIMIT` (400)**: 用于网格中心计算的历史K线数量。必须 ≥ 360 才能支持60天回溯分析，实际设置为 400 以提供安全缓冲。
