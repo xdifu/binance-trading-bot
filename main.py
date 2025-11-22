@@ -23,18 +23,25 @@ GRID_RECALCULATION_INTERVAL = 5 * 60  # 5 minutes in seconds (smart check with 2
 WEBSOCKET_RECONNECT_INTERVAL = 60  # 60 seconds
 MAINTENANCE_THREAD_SLEEP = 60  # 60 seconds
 
-# Configure logging
+# Configure logging with rotation to prevent disk exhaustion
+from logging.handlers import RotatingFileHandler
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler('grid_bot.log')
+        RotatingFileHandler(
+            'grid_bot.log',
+            maxBytes=200*1024*1024,  # 200MB per file
+            backupCount=4,            # Keep 4 backup files (800MB total, ~1 day of logs)
+            encoding='utf-8'
+        )
     ]
 )
 
 logger = logging.getLogger(__name__)
-logging.getLogger('binance_api').setLevel(logging.DEBUG)
+logging.getLogger('binance_api').setLevel(logging.INFO)  # Changed from DEBUG to reduce log noise
 
 class GridTradingBot:
     def __init__(self):
