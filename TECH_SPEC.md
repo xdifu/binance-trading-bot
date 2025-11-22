@@ -65,8 +65,23 @@
 
 *   **Asymmetric Distribution (非对称分布)**:
     系统将网格划分为 **Core Zone (核心区)** 和 **Edge Zone (边缘区)**。
-    *   **Core Zone**: 范围定义为 $P_{\text{center}} \pm \text{CORE\_ZONE\_PERCENTAGE}$。在此区域内，网格密度更高，且资金分配系数 $\alpha > 1.0$ (如 1.5x)，以最大化高频成交收益。
-    *   **Edge Zone**: 远离中心区域，网格稀疏，资金分配系数 $\alpha < 1.0$，主要用于捕捉极端行情下的反弹或回调，降低资金占用。
+    *   **Core Zone**: 范围定义为 $P_{\text{center}} \pm \text{CORE\_ZONE\_PERCENTAGE}$。在此区域内,网格密度更高,且资金分配系数 $\alpha > 1.0$ (如 1.5x),以最大化高频成交收益。
+    *   **Edge Zone**: 远离中心区域,网格稀疏,资金分配系数 $\alpha < 1.0$,主要用于捕捉极端行情下的反弹或回调,降低资金占用。
+
+*   **Dynamic Position Sizing (动态仓位管理 - 复利机制)**:
+    当启用 `ENABLE_COMPOUND_INTEREST = True` 时,系统实现自动复利增长:
+    *   **Dynamic Capital Calculation**:
+        $$ C_{\text{per\_level}} = \max(C_{\text{min}}, V_{\text{available}} \times R_{\text{capital}}) $$
+        其中:
+        *   $V_{\text{available}} = (B_{\text{USDT}} - L_{\text{USDT}}) + (B_{\text{base}} - L_{\text{base}}) \times P_{\text{current}}$ (可用账户价值, 扣除锁定资金)
+        *   $R_{\text{capital}}$ = `CAPITAL_PERCENTAGE_PER_LEVEL` (默认 0.01 即 1%)
+        *   $C_{\text{min}} = \text{MIN\_NOTIONAL\_VALUE} \times 1.1$ (交易所最小订单要求 + 10% 安全边际)
+    *   **Execution Timing**: 每次网格重算时 (24小时周期或价格突破触发),系统动态调整 `capital_per_level`。
+    *   **Risk Management**: 
+        *   **盈利时**: 利润自动滚入本金,放大后续网格订单金额,实现复利增长。
+        *   **亏损时**: 仓位自动缩减 (反马丁格尔策略),降低风险暴露,延长生存周期。
+        *   **Solvency Check**: 系统通过 `_calculate_max_buy_levels` 和 `_calculate_max_sell_levels` 严格验证资金充足性,自动调整网格层数以防止透支,优先保证偿付能力 (Solvency) 而非维持固定网格数量。
+
 
 ### 3.3 Order Lifecycle Management (订单生命周期)
 *   **Placement**:
@@ -136,6 +151,8 @@
 *   **Pending Locks**: `Dict[Asset, Amount]`。记录当前正在处理中但尚未成交的订单所占用的资金，用于精确的余额计算。
 
 ### Configuration Parameters (`config.py`)
-*   **`ATR_PERIOD` (14)**: 计算波动率的时间窗口。值越小，网格对短期波动越敏感，间距调整越频繁。
+*   **`ATR_PERIOD` (14)**: 计算波动率的时间窗口。值越小,网格对短期波动越敏感,间距调整越频繁。
 *   **`CORE_ZONE_PERCENTAGE` (0.5)**: 定义核心区范围。设置为 0.5 表示价格中心上下 50% 的网格范围为核心区。
-*   **`PROFIT_MARGIN_MULTIPLIER` (2.0)**: 最小利润系数。要求 (卖价 - 买价) 至少是交易手续费的 2 倍，防止无效交易（给交易所打工）。
+*   **`PROFIT_MARGIN_MULTIPLIER` (2.0)**: 最小利润系数。要求 (卖价 - 买价) 至少是交易手续费的 2 倍,防止无效交易 (给交易所打工)。
+*   **`ENABLE_COMPOUND_INTEREST` (True)**: 启用复利模式。开启后,系统根据账户总价值动态调整每格资金量,实现自动复利。
+*   **`CAPITAL_PERCENTAGE_PER_LEVEL` (0.01)**: 每格资金占总资金的百分比。默认 1% 表示账户总价值的 1% 用于单个网格层级,兼顾稳健性与资金利用率。

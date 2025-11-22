@@ -849,6 +849,48 @@ class GridTrader:
             # Get current price for calculations
             live_current_price = self.binance_client.get_symbol_price(self.symbol)
             
+            # COMPOUND INTEREST LOGIC
+            # If enabled, dynamically calculate capital per level based on total account value
+            if getattr(config, 'ENABLE_COMPOUND_INTEREST', False):
+                try:
+                    # Reset capital to config value first to prevent drift
+                    self.capital_per_level = config.CAPITAL_PER_LEVEL
+                    
+                    # Calculate available funds (Free Balance - Pending Locks)
+                    # This ensures we don't count funds that are already committed to other orders
+                    free_usdt = max(usdt_balance - self.pending_locks.get('USDT', 0), 0)
+                    free_base = max(base_balance - self.pending_locks.get(base_asset, 0), 0)
+                    
+                    # Calculate total available account value in USDT
+                    total_available_value = free_usdt + (free_base * live_current_price)
+                    
+                    # Calculate dynamic capital per level
+                    percentage = getattr(config, 'CAPITAL_PERCENTAGE_PER_LEVEL', 0.01)
+                    dynamic_capital = total_available_value * percentage
+                    
+                    # Ensure it meets minimum requirements
+                    min_notional = getattr(config, 'MIN_NOTIONAL_VALUE', 5)
+                    # Add 10% buffer to minimum to be safe
+                    safe_min_capital = min_notional * 1.1
+                    
+                    # Apply dynamic capital, but respect a safety cap (e.g., 5x config capital) to prevent extreme outliers
+                    # Also ensure we don't go below the safe minimum
+                    new_capital = max(safe_min_capital, dynamic_capital)
+                    
+                    # Log the adjustment if it's significantly different
+                    if abs(new_capital - self.capital_per_level) > 1.0:
+                        self.logger.info(
+                            f"Compound Interest: Adjusting capital per level from {self.capital_per_level:.2f} "
+                            f"to {new_capital:.2f} USDT (Available Value: {total_available_value:.2f}, Rate: {percentage*100}%)"
+                        )
+                    
+                    # Update the instance variable
+                    self.capital_per_level = new_capital
+                    
+                except Exception as e:
+                    self.logger.error(f"Failed to calculate compound interest capital: {e}")
+                    # Fallback to config value is handled by the reset at the start of the block
+            
             # Calculate maximum levels supported by each asset
             max_buy_levels = self._calculate_max_buy_levels(usdt_balance, live_current_price)
             max_sell_levels = self._calculate_max_sell_levels(base_balance, live_current_price)

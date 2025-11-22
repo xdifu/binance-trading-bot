@@ -73,7 +73,11 @@ class FakeBinanceClient:
         return [[0, 0, 0, 0, 100.0] for _ in range(limit)]
 
     def check_balance(self, asset):
-        return self.balance
+        if asset == "USDT":
+            return self.balance
+        # For base asset, assume price is 100.0 (as returned by get_symbol_price)
+        # So return balance / 100 to keep value equivalent
+        return self.balance / 100.0
 
 
 @pytest.fixture
@@ -81,7 +85,8 @@ def patched_trader():
     client = FakeBinanceClient()
     with mock.patch.object(GridTrader, "_get_current_atr", return_value=0.01), \
         mock.patch.object(GridTrader, "calculate_market_metrics", return_value=(0.01, 0.0)), \
-        mock.patch.object(GridTrader, "calculate_optimal_grid_center", return_value=(100.0, 0.12)):
+        mock.patch.object(GridTrader, "calculate_optimal_grid_center", return_value=(100.0, 0.12)), \
+        mock.patch('config.ENABLE_COMPOUND_INTEREST', False):
         trader = GridTrader(client)
         trader.logger = logging.getLogger("grid_trader_test")
         yield trader, client

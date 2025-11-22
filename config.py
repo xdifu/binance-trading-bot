@@ -32,6 +32,11 @@ SYMBOL = "ZECUSDT"  # 主网实盘交易对
 CAPITAL_PER_LEVEL = 9  # 每个网格的资金(USDT)，增加到11以确保满足最小订单要求(0.02 ZEC > 10 USDT)
 CAPITAL_SIZE = "small"  # 资金规模，可选值："small"(小资金优化) 或 "standard"(标准资金)
 
+# 复利设置 (Compound Interest)
+ENABLE_COMPOUND_INTEREST = True  # 是否启用复利模式 (利滚利)
+CAPITAL_PERCENTAGE_PER_LEVEL = 0.01  # 每格资金占总资金的百分比 (例如 0.01 代表 1%)
+
+
 #############################################
 # 网格参数 (全部以小数形式表示)
 #############################################
@@ -161,6 +166,11 @@ def validate_config():
     # 验证最小订单价值
     if MIN_NOTIONAL_VALUE <= 0:
         errors.append(f"MIN_NOTIONAL_VALUE必须大于0，当前值: {MIN_NOTIONAL_VALUE}")
+
+    # 验证复利参数
+    if ENABLE_COMPOUND_INTEREST:
+        if not 0 < CAPITAL_PERCENTAGE_PER_LEVEL <= 1:
+            errors.append(f"CAPITAL_PERCENTAGE_PER_LEVEL必须在0和1之间，当前值: {CAPITAL_PERCENTAGE_PER_LEVEL}")
     
     return errors
 
