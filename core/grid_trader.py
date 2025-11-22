@@ -1591,7 +1591,8 @@ class GridTrader:
                     'orderId': order['orderId'],
                     'price': float(order['price']),
                     'side': order['side'],
-                    'origQty': float(order['origQty'])
+                    'origQty': float(order['origQty']),
+                    'orderListId': order.get('orderListId', -1)
                 })
             self.logger.info(f"Found {len(existing_orders)} existing open orders on exchange")
         except Exception as e:
@@ -1634,6 +1635,22 @@ class GridTrader:
                     orders_placed += 1
         
         self.logger.info(f"Grid initialization complete: {orders_placed} new orders placed, {orders_adopted} existing orders adopted")
+
+        # Cleanup: Cancel any remaining orders that were not adopted (duplicates)
+        # CRITICAL: Do NOT cancel OCO orders (orderListId != -1) as they are managed by RiskManager
+        if existing_orders:
+            self.logger.info(f"Cleaning up {len(existing_orders)} unadopted orders...")
+            for order in existing_orders:
+                # Check for OCO order (orderListId is usually -1 for standard orders)
+                if order.get('orderListId', -1) != -1:
+                    self.logger.info(f"Skipping cleanup of OCO order {order['orderId']} (ListId: {order['orderListId']})")
+                    continue
+                
+                try:
+                    self.logger.warning(f"Cancelling unadopted duplicate order: {order['side']} @ {order['price']} (ID: {order['orderId']})")
+                    self.binance_client.cancel_order(symbol=self.symbol, order_id=order['orderId'])
+                except Exception as e:
+                    self.logger.error(f"Failed to cleanup order {order['orderId']}: {e}")
         
         self.logger.info(f"Grid setup complete: {orders_placed} orders placed out of {len(self.grid)} grid levels")
         return orders_placed > 0
