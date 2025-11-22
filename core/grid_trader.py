@@ -431,13 +431,25 @@ class GridTrader:
                 self.telegram_bot.send_message(error_message)
             return error_message  # Exit immediately without cancelling orders or setting is_running
         
+        
         # Only cancel orders after fund validation passes
         self._cancel_all_open_orders()
-        self.is_running = True  # Mark running only after all validations pass
+        
+        # CRITICAL: Do NOT set is_running yet to prevent race condition
+        # Setting is_running=True before grid setup completes causes:
+        # 1. _setup_grid() places first order → balance changes
+        # 2. Binance sends outboundAccountPosition event via WebSocket
+        # 3. main.py handler sees is_running=True and spawns _check_for_unfilled_grid_slots()
+        # 4. Maintenance thread places orders for "empty" slots that initialization hasn't reached yet
+        # 5. Result: duplicate orders at same price
         
         simulation_status = "Simulation mode: ON" if self.simulation_mode else "Simulation mode: OFF"
         message = f"Grid trading system started!\nCurrent price: {self.current_market_price}\nGrid range: {len(self.grid)} levels\nUsing {api_type}\n{simulation_status}"
         self._setup_grid()
+        
+        # FIX: Set is_running ONLY after grid initialization is complete
+        # This prevents WebSocket event handlers from triggering maintenance logic during setup
+        self.is_running = True
         
         message = f"Grid trading system started!\nCurrent price: {self.current_market_price}\nGrid range: {len(self.grid)} levels\nUsing {api_type}"
         self.logger.info(message)
@@ -1076,6 +1088,29 @@ class GridTrader:
                     current_price, core_upper, core_lower, upper_bound, lower_bound, edge_levels
                 )
                 grid_levels.extend(edge_grid)
+            
+            # --- CRITICAL FIX: Remove duplicate price levels ---
+            # Duplicates can occur due to:
+            # 1. Mathematical rounding when calculating level prices
+            # 2. Overlap between core and edge zones
+            # 3. Small grid spacing relative to price precision
+            # Without deduplication, the bot would place multiple orders at the same price
+            unique_levels = {}
+            for level in grid_levels:
+                # Use price-adjusted key to account for precision
+                price_key = f"{level['side']}_{self._adjust_price_precision(level['price'])}"
+                if price_key not in unique_levels:
+                    unique_levels[price_key] = level
+                else:
+                    # If duplicate found, keep the one with higher capital allocation
+                    if level['capital'] > unique_levels[price_key]['capital']:
+                        self.logger.debug(f"Replacing duplicate {price_key} with higher capital version")
+                        unique_levels[price_key] = level
+                    else:
+                        self.logger.debug(f"Skipping duplicate {price_key}")
+            
+            grid_levels = list(unique_levels.values())
+            self.logger.info(f"Deduplication: {len(grid_levels)} unique levels after removing duplicates")
             
             # --- Step 5: Sort and validate the grid ---
             grid_levels.sort(key=lambda x: x["price"])
