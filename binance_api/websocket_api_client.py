@@ -374,7 +374,6 @@ class BinanceWebSocketAPIClient:
                 # Handle different frame types
                 if op_code == ABNF.OPCODE_TEXT:
                     message = frame.data.decode("utf-8")
-                    print(f"DEBUG_LISTEN: Received TEXT frame, length={len(message)}", flush=True)
                     self._handle_message(message)
                 elif op_code == ABNF.OPCODE_BINARY:
                     self.logger.debug("Received binary frame")
@@ -514,9 +513,6 @@ class BinanceWebSocketAPIClient:
             message: JSON message received from server
         """
         try:
-            # DEBUG: Print to stdout
-            print(f"DEBUG_WS_MSG: {message[:200]}", flush=True)
-
             # Parse message
             data = json.loads(message)
             request_id = data.get('id')

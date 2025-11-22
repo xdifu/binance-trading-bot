@@ -360,59 +360,42 @@ class GridTradingBot:
             logger.error(f"Failed to reconnect WebSocket: {e}")
     
     def _setup_user_data_stream(self):
-        """Set up user data stream for order updates with WS-API preferred."""
-        logger.info("=== Starting User Data Stream Setup ===")
+        """
+        Set up user data stream for order updates using ListenKey.
+        
+        Reference: binance-spot-api-docs/user-data-stream.md
+        """
+        logger.info("=== Starting User Data Stream Setup (ListenKey Mode) ===")
         try:
-            client_status = self.binance_client.get_client_status()
-            logger.info(f"Client status: websocket_available={client_status['websocket_available']}, ws_client={self.binance_client.ws_client is not None}")
-
-            # 1) Preferred path: WebSocket API subscription (no listenKey)
-            if client_status["websocket_available"] and self.binance_client.ws_client:
-                logger.info("Attempting WS-API user data stream subscription...")
-                def _on_event(event_payload, subscription_id=None):
-                    try:
-                        logger.info(f"Received user data event: {str(event_payload)[:200]}")
-                        self._handle_websocket_message(event_payload)
-                    except Exception as e:
-                        logger.error(f"Failed to process WS-API user event: {e}")
-
-                subscription_result = self.binance_client.start_user_data_stream(on_event=_on_event)
-                logger.info(f"WS-API subscription result: {subscription_result}")
-                if subscription_result:
-                    self.user_stream_subscription_id = self.binance_client.user_stream_subscription_id
-                    logger.info(f"✓ User data stream subscribed via WS API (subscriptionId={self.user_stream_subscription_id})")
-                    return  # No listenKey setup needed
-                else:
-                    logger.warning("WS-API subscription returned False, falling back to listenKey")
-            else:
-                logger.info(f"Skipping WS-API path: websocket_available={client_status['websocket_available']}, ws_client exists={self.binance_client.ws_client is not None}")
-
-            # 2) Fallback: legacy listenKey stream via REST + market stream client
+            # Ensure WebSocket manager is initialized
             if not self.ws_manager:
                 logger.error("Cannot set up user data stream: WebSocket manager not initialized")
                 return
 
+            # 1. Get ListenKey via REST API (POST /api/v3/userDataStream)
             try:
                 listen_key_response = self.binance_client.rest_client.new_listen_key()
                 if listen_key_response and 'listenKey' in listen_key_response:
                     self.listen_key = listen_key_response['listenKey']
+                    logger.info(f"Obtained listenKey: {self.listen_key[:5]}...")
                 else:
-                    logger.error("Failed to get listen key from REST API")
+                    logger.error("Failed to get listen key from REST API: No listenKey in response")
                     return
             except Exception as e:
                 logger.error(f"Failed to get listen key from REST API: {e}")
                 return
 
+            # 2. Start User Data Stream via WebSocket (wss://stream.binance.com:9443/ws/<listenKey>)
             self.binance_client.user_stream_mode = "listen_key"
-            # Start user data stream with the listen key (stream API)
             self.ws_manager.start_user_data_stream(self.listen_key)
-            logger.info("User data stream started via stream.listenKey fallback")
+            logger.info("User data stream started via MarketDataWebsocketManager")
 
-            # Start keep-alive thread with thread safety
+            # 3. Start Keep-Alive Thread (PUT /api/v3/userDataStream every 30m)
             with self.state_lock:
                 if not self.keep_alive_thread or not self.keep_alive_thread.is_alive():
                     self.keep_alive_thread = Thread(target=self._keep_alive_listen_key_thread, daemon=True)
                     self.keep_alive_thread.start()
+                    logger.info("ListenKey keep-alive thread started")
 
         except Exception as e:
             logger.error(f"Failed to set up user data stream: {e}")

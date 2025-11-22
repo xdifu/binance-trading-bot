@@ -554,6 +554,7 @@ class MarketDataWebsocketManager:
         """Ensure WebSocket client is initialized"""
         if not self.ws_client:
             self.ws_client = SpotWebsocketStreamClient(
+                stream_url=self.stream_url,
                 on_message=self._message_handler, 
                 on_error=self._error_handler,
                 is_combined=True  # Use combined streams to save connections
