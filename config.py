@@ -28,7 +28,7 @@ WS_RECONNECT_DELAY = 5  # 重连间隔时间(秒)，增大可避免频繁重连�
 # 交易基本设置
 #############################################
 
-SYMBOL = "ZECUSDT"  # 主网实盘交易对
+SYMBOL = "SANTOSUSDT"  # 主网实盘交易对
 CAPITAL_PER_LEVEL = 9  # 每个网格的资金(USDT)，增加到11以确保满足最小订单要求(0.02 ZEC > 10 USDT)
 CAPITAL_SIZE = "small"  # 资金规模，可选值："small"(小资金优化) 或 "standard"(标准资金)
 
