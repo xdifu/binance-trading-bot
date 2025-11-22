@@ -78,13 +78,21 @@ class GridTradingBot:
         )
         logger.info("Grid trading strategy initialized successfully")
         
-        # Initialize risk management
-        self.risk_manager = RiskManager(
-            binance_client=self.binance_client,
-            telegram_bot=self.telegram_bot,
-            grid_trader=self.grid_trader  # Add reference to grid_trader
-        )
-        logger.info("Risk management module initialized successfully")
+        # Initialize risk management (OCO orders) only if enabled
+        # For small capital (<100 USDT), OCO is not recommended as:
+        # 1. Minimum order size (5-10 USDT) often cannot be met
+        # 2. Capital tied up in OCO reduces grid density
+        # 3. OCO triggers rarely occur within tight grid ranges
+        if getattr(config, 'ENABLE_OCO', True):
+            self.risk_manager = RiskManager(
+                binance_client=self.binance_client,
+                telegram_bot=self.telegram_bot,
+                grid_trader=self.grid_trader
+            )
+            logger.info("Risk management module initialized successfully")
+        else:
+            self.risk_manager = None
+            logger.info("Risk management disabled via ENABLE_OCO=False - all capital allocated to grid")
         
         # Update Telegram bot references
         if self.telegram_bot:

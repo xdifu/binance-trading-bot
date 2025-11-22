@@ -102,6 +102,11 @@ PROTECTIVE_TREND_LEVEL_REDUCTION = 1.0  # Trend market level reduction factor (1
 MAX_CENTER_DEVIATION = 0.03  # Max allowed deviation between grid center and current price (e.g., 0.03 = 3%)
 PROTECTIVE_PAUSE_STRONG_TREND = True  # Pause new grid orders in strong trends (PUMP/CRASH)
 
+# OCO (One-Cancels-Other) Risk Management
+ENABLE_OCO = False  # Enable/disable OCO stop-loss/take-profit orders
+                     # Recommended: False for capital < 100 USDT (insufficient for min notional)
+                     #             True for capital > 200 USDT (allows proper risk management)
+
 def validate_config():
     """验证配置参数的有效性，检测不合理设置"""
     errors = []
