@@ -10,6 +10,8 @@ from utils.format_utils import format_price, format_quantity, get_precision_from
 import config
 from enum import Enum
 import numpy as np
+import json
+import os
 
 class MarketState(Enum):
     """
@@ -60,7 +62,7 @@ class GridTrader:
         self.quantity_precision = self._get_quantity_precision()
         
         # Get current market price
-        self.current_market_price = self.binance_client.get_symbol_price(self.symbol)
+        self.current_market_price = self._get_symbol_price_safe("initialization") or 0.0
         
         # Apply optimized settings for small capital accounts ($64)
         # Increase grid levels for more frequent trading opportunities
@@ -70,7 +72,7 @@ class GridTrader:
         
         # Calculate dynamic grid spacing based on market volatility using ATR
         initial_atr = self._get_current_atr()
-        if initial_atr:
+        if initial_atr and self.current_market_price > 0:
             # Use ATR_RATIO from config for spacing calculation
             atr_ratio = config.ATR_RATIO
             atr_based_spacing = initial_atr / self.current_market_price * atr_ratio
@@ -86,7 +88,10 @@ class GridTrader:
         else:
             # Fallback with configured values when ATR calculation fails
             self.grid_spacing = min(config.GRID_SPACING, config.MAX_GRID_SPACING)
-            self.logger.info(f"Using fallback grid spacing: {self.grid_spacing*100:.2f}%")
+            if initial_atr and self.current_market_price <= 0:
+                self.logger.warning("Missing or invalid current price during init; using configured grid spacing fallback.")
+            else:
+                self.logger.info(f"Using fallback grid spacing: {self.grid_spacing*100:.2f}%")
         
         # CRITICAL FIX: Initialize K-line cache BEFORE any market metrics calculation
         self._kline_cache = {}
@@ -230,6 +235,26 @@ class GridTrader:
         fallback_step_size = getattr(config, 'FALLBACK_STEP_SIZE', 1.0)  # Configurable fallback
         self.logger.warning(f"No LOT_SIZE filter found for {self.symbol}, using fallback step size {fallback_step_size}")
         return fallback_step_size  # Use configurable fallback
+
+    def _get_symbol_price_safe(self, context=""):
+        """
+        Fetch current symbol price as a positive float with graceful fallback.
+        Returns None when no valid price is available.
+        """
+        try:
+            price = self.binance_client.get_symbol_price(self.symbol)
+            price = float(price)
+            if price <= 0:
+                raise ValueError(f"non-positive price {price}")
+            return price
+        except Exception as e:
+            context_msg = f" during {context}" if context else ""
+            self.logger.warning(f"Failed to fetch valid price{context_msg}: {e}")
+            last_price = getattr(self, "current_market_price", None)
+            if isinstance(last_price, (int, float)) and last_price > 0:
+                self.logger.debug(f"Using last known price {last_price} for {self.symbol}")
+                return float(last_price)
+            return None
     
     def _get_cached_klines(self, symbol, interval, limit):
         """
@@ -350,7 +375,12 @@ class GridTrader:
         self.logger.info(f"Starting grid trading using {api_type}")
         
         # Get current market price
-        self.current_market_price = self.binance_client.get_symbol_price(self.symbol)
+        latest_price = self._get_symbol_price_safe("start")
+        if latest_price is None:
+            error_msg = f"Failed to get valid market price for {self.symbol}"
+            self.logger.error(error_msg)
+            return f"Error: {error_msg}"
+        self.current_market_price = latest_price
         self.last_recalculation = datetime.now()
         
         # Check balances before starting
@@ -481,7 +511,7 @@ class GridTrader:
             time.sleep(2)
         
         # Get current market price
-        current_price = self.binance_client.get_symbol_price(self.symbol)
+        current_price = self._get_symbol_price_safe("balanced grid start")
         if not current_price or current_price <= 0:
             error_msg = f"Failed to get valid market price for {self.symbol}"
             self.logger.error(error_msg)
@@ -823,7 +853,198 @@ class GridTrader:
                 min_levels,
             )
 
+        if affordable_levels < min_levels and configured_levels >= min_levels:
+            self.logger.warning(
+                "Available funds support fewer than minimum grid levels; using safety minimum of %s",
+                min_levels,
+            )
+
         return available_levels
+
+    # ==================================================================================
+    # DEADLOCK RECOVERY & COOLDOWN MECHANISM
+    # ==================================================================================
+
+    def _get_cooldown_file_path(self):
+        """Get path to the cooldown state file"""
+        return os.path.join(os.path.dirname(os.path.dirname(__file__)), '.gemini', 'cooldown_state.json')
+
+    def _save_cooldown_state(self):
+        """Save current time as last market order time to persistent storage"""
+        try:
+            file_path = self._get_cooldown_file_path()
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            
+            state = {
+                'last_market_order_time': time.time()
+            }
+            
+            with open(file_path, 'w') as f:
+                json.dump(state, f)
+                
+            self.logger.info(f"Cooldown state saved: {state}")
+        except Exception as e:
+            self.logger.error(f"Failed to save cooldown state: {e}")
+
+    def _load_cooldown_state(self):
+        """Load last market order time from persistent storage"""
+        try:
+            file_path = self._get_cooldown_file_path()
+            if not os.path.exists(file_path):
+                return 0
+                
+            with open(file_path, 'r') as f:
+                state = json.load(f)
+                return state.get('last_market_order_time', 0)
+        except Exception as e:
+            self.logger.error(f"Failed to load cooldown state: {e}")
+            return 0
+
+    def _check_market_order_cooldown(self):
+        """
+        Check if we are in a cooldown period after a market order.
+        Returns True if in cooldown (should block market orders), False otherwise.
+        """
+        last_time = self._load_cooldown_state()
+        if last_time == 0:
+            return False
+            
+        elapsed = time.time() - last_time
+        cooldown_duration = 3600  # 1 hour
+        
+        if elapsed < cooldown_duration:
+            self.logger.warning(f"Market order cooldown active: {elapsed/60:.1f} min elapsed (required 60 min)")
+            return True
+            
+        return False
+
+    def _execute_market_rebalance(self, target_ratio=0.5):
+        """
+        Execute a market order to rebalance assets to the target ratio.
+        Used for 'Reset' strategy in deadlock recovery.
+        """
+        try:
+            # 1. Check cooldown
+            if self._check_market_order_cooldown():
+                self.logger.warning("Skipping market rebalance due to cooldown")
+                return False
+
+            # 2. Get current status
+            current_price = self._get_symbol_price_safe("market rebalance")
+            if current_price is None:
+                self.logger.error("Cannot execute market rebalance without a valid price.")
+                return False
+            base_asset = self.symbol.replace('USDT', '')
+            base_balance = self.binance_client.check_balance(base_asset)
+            usdt_balance = self.binance_client.check_balance('USDT')
+            
+            # 3. Calculate value
+            base_val = base_balance * current_price
+            total_val = base_val + usdt_balance
+            
+            if total_val < 12:
+                self.logger.error(f"Total value {total_val:.2f} too low for rebalance")
+                return False
+
+            # 4. Determine action
+            current_ratio = base_val / total_val
+            diff = target_ratio - current_ratio
+            
+            # Threshold to avoid tiny trades (e.g. 5% deviation)
+            if abs(diff) < 0.05:
+                self.logger.info(f"Portfolio balanced enough ({current_ratio:.2f}), skipping rebalance")
+                return True
+
+            # 5. Execute Trade
+            if diff > 0:
+                # Need to BUY base asset
+                usdt_to_spend = total_val * diff
+                # Safety cap: don't spend more than 90% of available USDT
+                usdt_to_spend = min(usdt_to_spend, usdt_balance * 0.9)
+                
+                qty = usdt_to_spend / current_price
+                formatted_qty = self._adjust_quantity_precision(qty)
+                
+                self.logger.info(f"REBALANCE: Buying {formatted_qty} {base_asset} (~{usdt_to_spend:.2f} USDT)")
+                if self.telegram_bot:
+                    self.telegram_bot.send_message(f"🔄 Deadlock Recovery: Buying {formatted_qty} {base_asset} to reset grid")
+                    
+                self.binance_client.place_market_order(self.symbol, 'BUY', formatted_qty)
+                
+            else:
+                # Need to SELL base asset
+                # diff is negative, so we sell -diff amount
+                base_to_sell = (total_val * abs(diff)) / current_price
+                # Safety cap: don't sell more than 90% of available base
+                base_to_sell = min(base_to_sell, base_balance * 0.9)
+                
+                formatted_qty = self._adjust_quantity_precision(base_to_sell)
+                
+                self.logger.info(f"REBALANCE: Selling {formatted_qty} {base_asset}")
+                if self.telegram_bot:
+                    self.telegram_bot.send_message(f"🔄 Deadlock Recovery: Selling {formatted_qty} {base_asset} to reset grid")
+                    
+                self.binance_client.place_market_order(self.symbol, 'SELL', formatted_qty)
+
+            # 6. Save Cooldown
+            self._save_cooldown_state()
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Market rebalance failed: {e}")
+            return False
+
+    def _handle_asset_depletion(self, max_buy, max_sell, trend_strength):
+        """
+        Determine strategy when assets are depleted (one side is 0).
+        Returns: 'idle', 'one_sided_buy', 'one_sided_sell', 'reset'
+        """
+        # 1. Check Minimum Capital
+        base_asset = self.symbol.replace('USDT', '')
+        usdt_balance = self.binance_client.check_balance('USDT')
+        base_balance = self.binance_client.check_balance(base_asset)
+        current_price = self._get_symbol_price_safe("asset depletion")
+        if current_price is None:
+            self.logger.error("Unable to assess asset depletion without a valid price.")
+            return 'idle'
+        
+        total_val = usdt_balance + (base_balance * current_price)
+        if total_val < 12:
+            self.logger.error(f"Total capital {total_val:.2f} < 12 USDT. Stopping.")
+            if self.telegram_bot:
+                self.telegram_bot.send_message(f"⚠️ Critical: Capital {total_val:.2f} USDT too low to operate.")
+            return 'idle'
+
+        # 2. All USDT Case (max_sell == 0)
+        if max_sell == 0:
+            if trend_strength < -0.4:
+                self.logger.info(f"All USDT + Trend {trend_strength:.2f} (< -0.4) -> IDLE")
+                return 'idle'
+            elif trend_strength <= 0.5:
+                self.logger.info(f"All USDT + Trend {trend_strength:.2f} (-0.4 ~ 0.5) -> ONE_SIDED_BUY")
+                return 'one_sided_buy'
+            else:
+                self.logger.info(f"All USDT + Trend {trend_strength:.2f} (> 0.5) -> RESET")
+                return 'reset'
+
+        # 3. All Coin Case (max_buy == 0)
+        if max_buy == 0:
+            if trend_strength < -0.5:
+                self.logger.info(f"All Coin + Trend {trend_strength:.2f} (< -0.5) -> FULL_LIQUIDATION (Reset to USDT)")
+                # Full liquidation is effectively a reset to 0% coin, then idle. 
+                # But our 'reset' logic targets 50%. 
+                # For simplicity in this function, we return 'reset' but with a special flag?
+                # Or we handle it here?
+                # Let's use 'reset_sell_all'
+                return 'reset_sell_all'
+            elif trend_strength < -0.2:
+                self.logger.info(f"All Coin + Trend {trend_strength:.2f} (-0.5 ~ -0.2) -> REDUCE_50_PERCENT")
+                return 'reduce_50'
+            else:
+                self.logger.info(f"All Coin + Trend {trend_strength:.2f} (> -0.2) -> ONE_SIDED_SELL")
+                return 'one_sided_sell'
+
+        return 'normal'
 
     def _calculate_grid_levels(self):
         """
@@ -847,7 +1068,10 @@ class GridTrader:
             base_balance = self.binance_client.check_balance(base_asset)
             
             # Get current price for calculations
-            live_current_price = self.binance_client.get_symbol_price(self.symbol)
+            live_current_price = self._get_symbol_price_safe("grid calculation")
+            if live_current_price is None:
+                self.logger.error("Cannot calculate grid levels without a valid market price.")
+                return []
             
             # COMPOUND INTEREST LOGIC
             # If enabled, dynamically calculate capital per level based on total account value
@@ -907,27 +1131,92 @@ class GridTrader:
             # CRITICAL FIX: Validate dual-sided grid capability
             self.max_affordable_buy_levels = max_buy_levels
             self.max_affordable_sell_levels = max_sell_levels
+
+            # 2. Pre-calculate Trend Factor (Unified) - MOVED UP for Deadlock Detection
+            # This determines the asymmetry of the grid (skewness).
+            # Calculated ONCE here to ensure consistency between validation and generation.
+            atr_value, trend_strength = self.calculate_market_metrics()
+            if atr_value is not None:
+                self.last_atr_value = atr_value
             
             # CRITICAL: Reject if cannot support both BUY and SELL
-            if max_buy_levels == 0:
-                self.logger.error(
-                    f"Cannot start grid: insufficient USDT for any BUY orders. "
-                    f"Available USDT: {usdt_balance:.2f}, Required per level: {self.capital_per_level * 1.6:.2f}"
-                )
-                return []  # Must have BUY capability for hedging
-            
-            if max_sell_levels == 0:
-                self.logger.error(
-                    f"Cannot start grid: insufficient {base_asset} for any SELL orders. "
-                    f"Available {base_asset}: {base_balance:.6f}"
-                )
-                return []  # Must have SELL capability for hedging
+            # MODIFIED: Use Deadlock Recovery Strategy
+            strategy = 'normal'
+            if max_buy_levels == 0 or max_sell_levels == 0:
+                self.logger.warning(f"Deadlock detected: BUY={max_buy_levels}, SELL={max_sell_levels}. Checking recovery strategy...")
+                strategy = self._handle_asset_depletion(max_buy_levels, max_sell_levels, trend_strength)
+                
+                if strategy == 'idle':
+                    self.logger.warning("Strategy is IDLE. Returning empty grid.")
+                    return []
+                    
+                elif strategy == 'reset':
+                    self.logger.info("Strategy is RESET. Executing market rebalance...")
+                    if self._execute_market_rebalance(target_ratio=0.5):
+                        # Recursively recalculate after rebalance
+                        # Add a flag to prevent infinite recursion if needed, but balances should change
+                        return self._calculate_grid_levels()
+                    else:
+                        self.logger.warning("Reset failed (cooldown or error). Falling back to IDLE/One-Sided.")
+                        # If reset failed (e.g. cooldown), what do we do?
+                        # If cooldown active, we should probably fall back to one-sided if possible, or idle.
+                        # For All USDT + Uptrend, one-sided buy is not possible (price too high).
+                        # For All Coin + Downtrend, one-sided sell is possible.
+                        if max_sell_levels > 0:
+                            strategy = 'one_sided_sell'
+                        elif max_buy_levels > 0:
+                            strategy = 'one_sided_buy'
+                        else:
+                            return []
+
+                elif strategy == 'reset_sell_all':
+                    self.logger.info("Strategy is FULL LIQUIDATION. Selling all coin...")
+                    if self._execute_market_rebalance(target_ratio=0.0): # Target 0% coin
+                        return [] # After selling all, we are All USDT + Downtrend -> IDLE
+                    else:
+                         # Fallback if failed
+                        if max_sell_levels > 0: strategy = 'one_sided_sell'
+                        else: return []
+
+                elif strategy == 'reduce_50':
+                    self.logger.info("Strategy is REDUCE 50%. Selling half of coin...")
+                    # We want to sell 50% of CURRENT coin holdings.
+                    # _execute_market_rebalance targets a portfolio ratio.
+                    # If we are All Coin, ratio is 1.0. We want to go to 0.5?
+                    # Yes, reduce_50 implies going to balanced state, then one-sided sell?
+                    # Wait, the table says: "Sell 50% coin -> Single Sided Sell Grid"
+                    # So we rebalance to 50/50, then force Sell Only?
+                    # Or we just sell 50% and then let the grid logic handle it?
+                    # If we have 50% USDT, max_buy will be > 0. So it becomes normal grid?
+                    # But the strategy says "Single-sided sell grid".
+                    # Let's target 0.5 ratio.
+                    if self._execute_market_rebalance(target_ratio=0.5):
+                        # After rebalance, we have USDT. 
+                        # But we want to force ONE SIDED SELL?
+                        # The table says: "Market Sell 50% -> One Sided Sell Grid"
+                        # If we have USDT, why not buy? Because Trend is -0.5 ~ -0.2 (Downtrend).
+                        # We don't want to buy in downtrend.
+                        strategy = 'one_sided_sell'
+                        # We need to refresh balances to calculate levels for the one-sided grid
+                        usdt_balance = self.binance_client.check_balance('USDT')
+                        base_balance = self.binance_client.check_balance(base_asset)
+                        max_buy_levels = self._calculate_max_buy_levels(usdt_balance, live_current_price)
+                        max_sell_levels = self._calculate_max_sell_levels(base_balance, live_current_price)
+                    else:
+                        if max_sell_levels > 0: strategy = 'one_sided_sell'
+                        else: return []
+
+            # Determine actual grid levels we can support
+            self.max_affordable_buy_levels = max_buy_levels
+            self.max_affordable_sell_levels = max_sell_levels
             
             total_supported_levels = max_buy_levels + max_sell_levels
             available_grid_levels = min(level_cap, total_supported_levels)
             
             # Ensure minimum viable grid (at least 1 BUY + 1 SELL)
-            min_viable_levels = 2
+            # MODIFIED: Allow 1 level if one-sided
+            min_viable_levels = 1 if strategy in ['one_sided_buy', 'one_sided_sell'] else 2
+            
             if available_grid_levels < min_viable_levels:
                 self.logger.warning(
                     f"Insufficient assets for grid trading: max_buy={max_buy_levels}, max_sell={max_sell_levels}. "
@@ -971,19 +1260,16 @@ class GridTrader:
             
             # 1. Fetch live price for strict boundary validation
             # We must ensure the grid covers the REAL market price to avoid order rejection.
-            try:
-                live_current_price = float(self.binance_client.get_symbol_price(self.symbol))
-            except Exception as e:
-                self.logger.error(f"Failed to get live price for grid validation: {e}")
-                # Fallback: use grid_center logic if live price fails
+            validation_price = self._get_symbol_price_safe("grid validation")
+            if validation_price is not None:
+                live_current_price = validation_price
+            else:
+                self.logger.error("Failed to get live price for grid validation; using grid center as fallback.")
                 live_current_price = grid_center
 
             # 2. Pre-calculate Trend Factor (Unified)
-            # This determines the asymmetry of the grid (skewness).
-            # Calculated ONCE here to ensure consistency between validation and generation.
-            atr_value, trend_strength = self.calculate_market_metrics()
-            if atr_value is not None:
-                self.last_atr_value = atr_value
+            # Already calculated at start of method for Deadlock Detection
+            # atr_value and trend_strength are available in local scope
             
             # Trend Factor logic: 
             # Trend = -1.0 (Crash) -> factor = 0.2 (Small upper space, defensive)
@@ -1156,7 +1442,10 @@ class GridTrader:
             
             # --- Step 5: Sort and validate the grid ---
             grid_levels.sort(key=lambda x: x["price"])
-            grid_levels = self._ensure_balanced_grid(grid_levels, upper_bound, lower_bound)
+            
+            # MODIFIED: Only ensure balanced grid if strategy is 'normal'
+            if strategy == 'normal':
+                grid_levels = self._ensure_balanced_grid(grid_levels, upper_bound, lower_bound)
             
             # CRITICAL FIX: Enforce BUY/SELL limits based on available assets
             buy_count = sum(1 for level in grid_levels if level['side'] == 'BUY')
@@ -1191,12 +1480,27 @@ class GridTrader:
             final_buy_count = sum(1 for level in grid_levels if level['side'] == 'BUY')
             final_sell_count = sum(1 for level in grid_levels if level['side'] == 'SELL')
             
-            if final_buy_count == 0 or final_sell_count == 0:
-                self.logger.error(
-                    f"Grid imbalanced after trimming: BUY={final_buy_count}, SELL={final_sell_count}. "
-                    f"Cannot operate with one-sided grid. Rejecting grid generation."
-                )
-                return []  # Reject unbalanced grid
+            # MODIFIED: Allow one-sided grids if strategy dictates
+            if strategy == 'one_sided_buy':
+                # Force remove any SELL orders (shouldn't be there if max_sell=0, but just in case)
+                grid_levels = [l for l in grid_levels if l['side'] == 'BUY']
+                if not grid_levels:
+                    self.logger.warning("Strategy is ONE_SIDED_BUY but no BUY levels generated.")
+                    return []
+            elif strategy == 'one_sided_sell':
+                # Force remove any BUY orders
+                grid_levels = [l for l in grid_levels if l['side'] == 'SELL']
+                if not grid_levels:
+                    self.logger.warning("Strategy is ONE_SIDED_SELL but no SELL levels generated.")
+                    return []
+            else:
+                # Normal strategy: must have both
+                if final_buy_count == 0 or final_sell_count == 0:
+                    self.logger.error(
+                        f"Grid imbalanced after trimming: BUY={final_buy_count}, SELL={final_sell_count}. "
+                        f"Cannot operate with one-sided grid in NORMAL mode. Rejecting grid generation."
+                    )
+                    return []  # Reject unbalanced grid
 
             actual_grid_levels = len(grid_levels)
             if actual_grid_levels != grid_level_limit:
@@ -2032,11 +2336,24 @@ class GridTrader:
         if trend_change > 0.5:  # Check if trend changed significantly (50% of the -1 to 1 range)
             self.logger.info(f"Significant trend change detected: {trend_change:.2f}, considering grid adjustment")
         
+        # NEW: Deadlock Detection
+        # If we have 0 active orders (or very few) but are supposed to be running, trigger a recalc
+        # This ensures _calculate_grid_levels is called, which now contains the recovery logic
+        active_orders = len(self.grid)
+        deadlock_recalc = False
+        if active_orders == 0 and self.is_running:
+             # Check if we are in a cooldown (don't spam logs/recalcs if just cooling down)
+            if not self._check_market_order_cooldown():
+                self.logger.warning("Deadlock detected (0 active orders). Triggering recalculation to attempt recovery.")
+                deadlock_recalc = True
+            else:
+                 self.logger.info("Deadlock detected but cooldown active. Waiting...")
+
         # NEW: Apply market state-based adjustments to grid parameters
         self._adjust_grid_based_on_market_state(current_state)
         
-        # Handle full grid recalculation (includes out-of-bounds confirmation, time-based, and volatility triggers)
-        if time_based_recalc or volatility_based_recalc or out_of_bounds_recalc:
+        # Handle full grid recalculation (includes out-of-bounds confirmation, time-based, volatility, and deadlock triggers)
+        if time_based_recalc or volatility_based_recalc or out_of_bounds_recalc or deadlock_recalc:
             try:
                 # Cancel all orders
                 self._cancel_all_open_orders()
@@ -3044,7 +3361,7 @@ class GridTrader:
             
             if not historical_klines or len(historical_klines) < 20:  # Need at least 20 periods (~3 days)
                 self.logger.warning("Insufficient historical data for mean reversion analysis")
-                current_price = self.binance_client.get_symbol_price(self.symbol)
+                current_price = self._get_symbol_price_safe("grid center fallback") or 0.0
                 return current_price, self.grid_range_percent
             
             # 3. Segment data into time periods

@@ -14,34 +14,38 @@ class TestGridCalculation(unittest.TestCase):
         # Patch config
         self.config_patcher = patch('core.grid_trader.config')
         self.mock_config = self.config_patcher.start()
-        self.mock_config.SYMBOL = "BTCUSDT"
-        self.mock_config.GRID_LEVELS = 10
-        self.mock_config.RECALCULATION_PERIOD = 300
-        self.mock_config.ATR_PERIOD = 14
-        self.mock_config.ATR_RATIO = 0.5
-        self.mock_config.GRID_SPACING = 0.01
-        self.mock_config.MAX_GRID_SPACING = 0.05
-        self.mock_config.GRID_RANGE_PERCENT = 0.1
-        self.mock_config.MAX_GRID_RANGE = 0.2
-        self.mock_config.CAPITAL_PER_LEVEL = 10
-        self.mock_config.ENABLE_PROTECTIVE_MODE = False
-        self.mock_config.AUTO_PROTECTIVE_FOR_NON_MAJOR = True
-        self.mock_config.MAJOR_SYMBOLS = ["BTCUSDT", "ETHUSDT"]
-        self.mock_config.CORE_ZONE_PERCENTAGE = 0.5
-        self.mock_config.MIN_NOTIONAL_VALUE = 5.0
-        self.mock_config.ENABLE_COMPOUND_INTEREST = False
-        self.mock_config.CAPITAL_PERCENTAGE_PER_LEVEL = 0.01
-        self.mock_config.MAX_CENTER_DEVIATION = 0.05
-        self.mock_config.CORE_CAPITAL_RATIO = 0.7
-        self.mock_config.LEVEL_REDUCTION_FACTOR = 1.0
-        self.mock_config.CORE_GRID_RATIO = 0.6
-        self.mock_config.FALLBACK_TICK_SIZE = 0.01
-        self.mock_config.FALLBACK_STEP_SIZE = 0.00001
-        self.mock_config.MIN_EXPECTED_PROFIT_BUFFER = 0.0
-        self.mock_config.MAX_ORDER_AGE_HOURS = 4
-        self.mock_config.PRICE_DEVIATION_THRESHOLD = 0.015
-        self.mock_config.PROTECTIVE_TREND_LEVEL_REDUCTION = 0.5
-        self.mock_config.PROTECTIVE_PAUSE_STRONG_TREND = True
+        
+        # Use configure_mock to set attributes as real values, not MagicMocks
+        self.mock_config.configure_mock(**{
+            'SYMBOL': "BTCUSDT",
+            'GRID_LEVELS': 10,
+            'RECALCULATION_PERIOD': 300,
+            'ATR_PERIOD': 14,
+            'ATR_RATIO': 0.5,
+            'GRID_SPACING': 0.01,
+            'MAX_GRID_SPACING': 0.05,
+            'GRID_RANGE_PERCENT': 0.1,
+            'MAX_GRID_RANGE': 0.2,
+            'CAPITAL_PER_LEVEL': 10,
+            'ENABLE_PROTECTIVE_MODE': False,
+            'AUTO_PROTECTIVE_FOR_NON_MAJOR': True,
+            'MAJOR_SYMBOLS': ["BTCUSDT", "ETHUSDT"],
+            'CORE_ZONE_PERCENTAGE': 0.5,
+            'MIN_NOTIONAL_VALUE': 5.0,
+            'ENABLE_COMPOUND_INTEREST': False,
+            'CAPITAL_PERCENTAGE_PER_LEVEL': 0.01,
+            'MAX_CENTER_DEVIATION': 0.05,
+            'CORE_CAPITAL_RATIO': 0.7,
+            'LEVEL_REDUCTION_FACTOR': 1.0,
+            'CORE_GRID_RATIO': 0.6,
+            'FALLBACK_TICK_SIZE': 0.01,
+            'FALLBACK_STEP_SIZE': 0.00001,
+            'MIN_EXPECTED_PROFIT_BUFFER': 0.0,
+            'MAX_ORDER_AGE_HOURS': 4,
+            'PRICE_DEVIATION_THRESHOLD': 0.015,
+            'PROTECTIVE_TREND_LEVEL_REDUCTION': 0.5,
+            'PROTECTIVE_PAUSE_STRONG_TREND': True,
+        })
 
         self.mock_client = MagicMock()
         
@@ -68,7 +72,10 @@ class TestGridCalculation(unittest.TestCase):
             }]
         }
         
-        self.grid_trader = GridTrader(self.mock_client)
+        # Mock _get_current_atr to return a real number instead of MagicMock
+        # This is called in __init__ and needs to return numeric value
+        with patch.object(GridTrader, '_get_current_atr', return_value=100.0):
+            self.grid_trader = GridTrader(self.mock_client)
         # self.grid_trader.symbol is now set from mock_config.SYMBOL
         self.grid_trader.logger = MagicMock()
 
@@ -83,7 +90,7 @@ class TestGridCalculation(unittest.TestCase):
         # Mock current price
         self.mock_client.get_symbol_price.return_value = 100.0
         
-        # Mock historical klines (400 candles of price 100)
+        # Mock historical klines (400 candles as per actual implementation)
         # Format: [open_time, open, high, low, close, volume, ...]
         mock_klines = [[0, 0, 0, 0, "100.0", 0] for _ in range(400)]
         self.grid_trader._get_cached_klines = MagicMock(return_value=mock_klines)
@@ -91,7 +98,7 @@ class TestGridCalculation(unittest.TestCase):
         # Run calculation
         center, range_val = self.grid_trader.calculate_optimal_grid_center()
         
-        # Verify _get_cached_klines was called with correct limit
+        # Verify _get_cached_klines was called with correct limit (400 as per line 3322)
         self.grid_trader._get_cached_klines.assert_called_with(
             symbol="BTCUSDT",
             interval="4h",

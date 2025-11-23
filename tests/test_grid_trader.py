@@ -82,8 +82,22 @@ def create_trader(simulation_mode, risk_manager):
     trader.tick_size = 0.01
     trader.price_precision = 2
     trader.quantity_precision = 6
-    trader._adjust_quantity_precision = MagicMock(side_effect=lambda qty: f"{qty:.6f}")
-    trader._adjust_price_precision = MagicMock(side_effect=lambda price: f"{price:.2f}")
+    
+    # Safe formatters that handle both float and MagicMock
+    def safe_format_qty(qty):
+        try:
+            return f"{float(qty):.6f}"
+        except (TypeError, ValueError):
+            return "0.000000"
+    
+    def safe_format_price(price):
+        try:
+            return f"{float(price):.2f}"
+        except (TypeError, ValueError):
+            return "0.00"
+    
+    trader._adjust_quantity_precision = MagicMock(side_effect=safe_format_qty)
+    trader._adjust_price_precision = MagicMock(side_effect=safe_format_price)
     trader._calculate_dynamic_capital_for_level = MagicMock(return_value=10)
     trader._place_replacement_grid_order = MagicMock()
     trader._lock_funds = MagicMock(return_value=True)
@@ -94,7 +108,15 @@ def create_trader(simulation_mode, risk_manager):
 
 
 class ProcessFilledOrderRiskTests(unittest.TestCase):
-    def test_risk_manager_triggered_after_sell_fill_live_mode(self):
+    @patch('core.grid_trader.config')
+    def test_risk_manager_triggered_after_sell_fill_live_mode(self, mock_config):
+        # Setup config mocks
+        mock_config.BUY_SELL_SPREAD = 0.005
+        mock_config.TRADING_FEE_RATE = 0.001
+        mock_config.PROFIT_MARGIN_MULTIPLIER = 1.2
+        mock_config.MIN_EXPECTED_PROFIT_BUFFER = 0.0
+        mock_config.MIN_NOTIONAL_VALUE = 5.0
+        
         risk_manager = create_risk_manager()
         trader = create_trader(simulation_mode=False, risk_manager=risk_manager)
         trader.grid = [{'order_id': 111, 'side': 'SELL', 'price': 100.0}]
@@ -110,7 +132,14 @@ class ProcessFilledOrderRiskTests(unittest.TestCase):
         )
         trader.binance_client.place_limit_order.assert_called_once()
 
-    def test_risk_manager_triggered_after_sell_fill_simulation_mode(self):
+    @patch('core.grid_trader.config')
+    def test_risk_manager_triggered_after_sell_fill_simulation_mode(self, mock_config):
+        # Setup config mocks
+        mock_config.BUY_SELL_SPREAD = 0.005
+        mock_config.TRADING_FEE_RATE = 0.001
+        mock_config.PROFIT_MARGIN_MULTIPLIER = 1.2
+        mock_config.MIN_EXPECTED_PROFIT_BUFFER = 0.0
+        mock_config.MIN_NOTIONAL_VALUE = 5.0
         risk_manager = create_risk_manager()
         trader = create_trader(simulation_mode=True, risk_manager=risk_manager)
         trader.grid = [{'order_id': 222, 'side': 'SELL', 'price': 100.0}]

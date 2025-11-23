@@ -118,7 +118,8 @@
     *   **Edge Zone**: Sparse grid, <1.0x capital weight, for catching knives/wicks.
 
 *   **Dynamic Position Sizing (动态仓位管理)**:
-    *   **Solvency Check**: Before placing orders, `_calculate_max_buy_levels` and `_calculate_max_sell_levels` verify if sufficient USDT/Base asset exists.
+    *   **Solvency Check**: Before placing orders, `_calculate_max_buy_levels` and `_calculate_max_sell_levels` verify asset availability.
+    *   **One-Sided Grid Support**: Unlike the strict dual-sided requirement in initial versions, the system now supports **One-Sided Grids** (Buy-Only or Sell-Only) during recovery phases or specific market conditions, provided the "Deadlock Recovery" logic approves it.
     *   **Auto-Adjustment**: If funds are insufficient for the configured 9 levels, the bot automatically reduces the number of levels (e.g., to 5 or 7) to maintain valid order sizes (`MIN_NOTIONAL`).
 
 
@@ -170,6 +171,29 @@
     
 *   **极端市场状态 (Extreme Market State)**:
     *   检测到 `MarketState.PUMP` 或 `MarketState.CRASH`，立即触发重算以适应趋势。
+
+### 3.6 Deadlock Recovery Strategy (死锁恢复策略)
+为解决资产耗尽导致的“0订单”死锁状态，系统引入了基于趋势和资产状态的自动恢复机制。
+
+*   **Trigger**: 当 `_calculate_grid_levels` 返回 `max_buy_levels == 0` (全USDT) 或 `max_sell_levels == 0` (全币) 时触发。
+*   **Minimum Capital**: 仅当总账户价值 ≥ 12 USDT 时启用，否则停止运行并报警。
+
+*   **Strategy Matrix (策略矩阵)**:
+
+| 资产状态 | Trend 区间 | 策略 | 操作 | 市价交易 |
+|:---|:---|:---|:---|:---|
+| **全 USDT** | **< -0.4** | 装死 (Idle) | 不挂单，避险 | ❌ |
+| **全 USDT** | **-0.4 ~ 0.5** | 单边买网格 | 仅挂下方买单 | ❌ |
+| **全 USDT** | **> 0.5** | 市价重置 | 买入50%币 → 双边网格 | ✅ |
+| **全 币** | **< -0.5** | 全部清仓 | 卖出100%币 → 装死 | ✅ |
+| **全 币** | **-0.5 ~ -0.2** | 减仓50% | 卖出50%币 → 单边卖网格 | ✅ |
+| **全 币** | **-0.2 ~ 0.5** | 单边卖网格 | 仅挂上方卖单 | ❌ |
+| **全 币** | **> 0.5** | 单边卖网格 | 仅挂上方卖单 | ❌ |
+
+*   **Cooldown Mechanism (冷却机制)**:
+    *   任何涉及**市价交易**的操作（重置、清仓、减仓）后，触发 **1小时冷却期**。
+    *   冷却期内禁止再次执行市价交易，防止震荡磨损。
+    *   状态持久化至 `.gemini/cooldown_state.json`，防止重启丢失。
 
 ## 4. Risk Management System (风险管理系统)
 
