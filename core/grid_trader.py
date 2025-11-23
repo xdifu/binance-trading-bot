@@ -146,6 +146,7 @@ class GridTrader:
         self.out_of_bounds_confirmation_threshold = 30 * 60  # 30 minutes in seconds (optimized from 2h)
         self.price_out_of_upper_bound = False  # Track if price is above upper limit
         self.price_out_of_lower_bound = False  # Track if price is below lower limit
+        self._last_realtime_recalc = 0  # Throttle WS-triggered recalculations
     
     def _get_symbol_info(self):
         """
@@ -2506,6 +2507,39 @@ class GridTrader:
             self.logger.info(f"Rebalanced {stale_orders_count} stale orders")
         
         return False
+
+    def handle_realtime_price(self, price, source="ws"):
+        """
+        Fast path trigger from real-time WebSocket price (bookTicker/kline).
+        Keeps WS-first behavior: we act immediately on pushes instead of waiting for the 60s loop.
+        """
+        try:
+            if not self.is_running or not self.grid:
+                return
+            if not price or price <= 0:
+                return
+            # Throttle to avoid hammering recalc on every tick
+            now = time.time()
+            min_interval = getattr(config, "REALTIME_RECALC_COOLDOWN", 30)
+            if now - self._last_realtime_recalc < min_interval:
+                return
+
+            prices = [lvl["price"] for lvl in self.grid if "price" in lvl]
+            if not prices:
+                return
+            lower = min(prices)
+            upper = max(prices)
+            if price < lower or price > upper:
+                self.logger.info(
+                    f"Real-time price {price:.8f} out of grid [{lower:.8f}, {upper:.8f}] from {source}; triggering immediate recalculation"
+                )
+                # Cancel and rebuild grid quickly
+                self._cancel_all_open_orders()
+                self._setup_grid()
+                self.last_recalculation = datetime.now()
+                self._last_realtime_recalc = now
+        except Exception as exc:
+            self.logger.error(f"Realtime price handler failed: {exc}")
     
     def _reconcile_grid_with_open_orders(self):
         """

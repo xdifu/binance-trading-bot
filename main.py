@@ -165,6 +165,9 @@ class GridTradingBot:
                 price = float(message.k.c)
                 
                 if symbol == config.SYMBOL:
+                    # WS-first fast path for grid recalculation on live price
+                    if self.grid_trader:
+                        self.grid_trader.handle_realtime_price(price, source="kline")
                     # Check risk management conditions if active
                     if self.risk_manager and self.risk_manager.is_active:
                         self.risk_manager.check_price(price)
@@ -180,6 +183,23 @@ class GridTradingBot:
             # Handle account balance/position updates
             elif hasattr(message, 'e') and message.e in ('outboundAccountPosition', 'balanceUpdate'):
                 self._handle_account_position_update(message)
+            
+            # Handle bookTicker without 'e' field (from MarketDataWebsocketManager)
+            elif isinstance(message, dict) and all(k in message for k in ('s', 'b', 'a')):
+                sym = message.get('s')
+                if sym == config.SYMBOL and self.grid_trader:
+                    try:
+                        mid_price = (float(message['b']) + float(message['a'])) / 2
+                        self.grid_trader.handle_realtime_price(mid_price, source="bookTicker")
+                    except Exception:
+                        pass
+            elif hasattr(message, 'b') and hasattr(message, 'a') and hasattr(message, 's'):
+                if getattr(message, 's') == config.SYMBOL and self.grid_trader:
+                    try:
+                        mid_price = (float(message.b) + float(message.a)) / 2
+                        self.grid_trader.handle_realtime_price(mid_price, source="bookTicker")
+                    except Exception:
+                        pass
                 
         except AttributeError:
             # Handle dict-format messages as fallback
