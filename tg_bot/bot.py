@@ -174,13 +174,50 @@ class TelegramBot:
 
         # Price and grid
         symbol = getattr(gt, "symbol", "N/A")
-        price = getattr(gt, "current_market_price", None)
+        price = None
+        try:
+            # Prefer live price via client to avoid stale cache
+            price = gt.binance_client.get_symbol_price(symbol)
+        except Exception as e:
+            self.logger.warning(f"Failed to fetch live price for {symbol}: {e}")
+            price = getattr(gt, "current_market_price", None)
         price_text = f"{price:.8f}" if isinstance(price, (int, float)) else "N/A"
         grid_levels = gt.grid if getattr(gt, "grid", None) else []
+
+        # Try to refresh live orders from exchange to avoid stale state
+        live_order_ids = set()
+        try:
+            open_orders = gt.binance_client.get_open_orders(symbol)
+            live_order_ids = {str(o.get("orderId")) for o in open_orders}
+        except Exception as e:
+            self.logger.debug(f"Live open orders fetch failed: {e}")
+
         total_levels = len(grid_levels)
-        live_orders = sum(1 for lvl in grid_levels if lvl.get("order_id"))
-        buy_orders = sum(1 for lvl in grid_levels if lvl.get("order_id") and lvl.get("side") == "BUY")
-        sell_orders = sum(1 for lvl in grid_levels if lvl.get("order_id") and lvl.get("side") == "SELL")
+        live_orders = 0
+        buy_orders = 0
+        sell_orders = 0
+        for lvl in grid_levels:
+            oid = lvl.get("order_id")
+            side = lvl.get("side")
+            # consider live only if exchange confirms or local id exists
+            is_live = False
+            if oid:
+                if not live_order_ids or str(oid) in live_order_ids:
+                    is_live = True
+            if is_live:
+                live_orders += 1
+                if side == "BUY":
+                    buy_orders += 1
+                elif side == "SELL":
+                    sell_orders += 1
+
+        grid_band = "N/A"
+        if grid_levels:
+            prices = [lvl["price"] for lvl in grid_levels if "price" in lvl]
+            if prices:
+                lower = min(prices)
+                upper = max(prices)
+                grid_band = f"{lower:.8f} → {upper:.8f}"
 
         # API mode
         api_mode = "WebSocket API" if getattr(gt, "using_websocket", False) else "REST API"
@@ -203,6 +240,7 @@ class TelegramBot:
             f"Trend: {trend_val:+.2f} {trend_bar}",
             f"Market State: {market_state_label}",
             f"Grid: {live_orders}/{total_levels} live orders (Buy {buy_orders} / Sell {sell_orders})",
+            f"Grid Band: {grid_band}",
             f"API: {api_mode}",
             f"Risk: {risk_text}",
         ]
