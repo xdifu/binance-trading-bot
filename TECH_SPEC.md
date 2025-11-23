@@ -44,54 +44,82 @@
 
 ## 3. Core Trading Logic & Algorithms (核心交易逻辑与算法)
 
-### 3.1 Market State Detection (市场状态检测)
-在 `core/grid_trader.py` 中，`calculate_market_metrics` 方法负责计算关键指标，这些指标随后被用于判断市场状态：
+### 3.0 Calculation Frequencies (计算频率汇总)
 
-*   **Metrics Calculation**:
-    $$ \text{Trend} = 0.2 \cdot T_{15m} + 0.5 \cdot T_{1h} + 0.3 \cdot T_{4h} $$
-    系统采用多时间框架加权平均（Multi-Timeframe Weighted Average）来计算趋势强度，结合 15分钟 ATR (Average True Range) 评估波动率。
+| Metric/Operation | Frequency | Trigger |
+|:---|:---|:---|
+| **ATR & Trend Strength** | Every 5 min | `_grid_maintenance_thread` |
+| **Grid Center & Boundaries** | Every 5 min | `_grid_maintenance_thread` |
+| **Order Placement (Opposite)** | Real-time (<50ms) | WebSocket `ExecutionReport` |
+| **Balance & Price Updates** | Real-time | WebSocket Stream |
+| **Unfilled Order Check** | Every 60 sec | `_grid_maintenance_thread` |
+| **OCO Integrity Check** | Every 5 min | `_grid_maintenance_thread` |
+
+### 3.1 Market State Detection (市场状态检测)
+在 `core/grid_trader.py` 中，`calculate_market_metrics` 方法负责计算关键指标，这些指标随后被用于判断市场状态。所有指标每 **5分钟** (`GRID_RECALCULATION_INTERVAL`) 重新计算一次。
+
+*   **ATR (Average True Range)**:
+    *   **Source**: 15-minute K-lines.
+    *   **Period**: 14 (default).
+    *   **Purpose**: Measures market volatility to dynamically adjust grid range width.
+
+*   **Trend Strength (趋势强度)**:
+    *   **Algorithm**: Multi-Timeframe Weighted Average.
+    *   **Formula**:
+        $$ \text{Trend} = 0.2 \cdot T_{15m} + 0.5 \cdot T_{1h} + 0.3 \cdot T_{4h} $$
+    *   **Components**:
+        *   15m Trend (20% weight): Short-term momentum.
+        *   1h Trend (50% weight): Mid-term direction (Primary driver).
+        *   4h Trend (30% weight): Long-term bias.
+    *   **Single Timeframe Calculation** (`_calculate_single_timeframe_trend`):
+        1. Extract last `lookback` (default 20) close prices.
+        2. Calculate period-to-period changes: $\text{change}_i = \frac{P_{i} - P_{i-1}}{P_{i-1}}$.
+        3. Compute **Short Trend**: Sum of last 5 changes (70% weight in final).
+        4. Compute **Overall Trend**: Time-weighted sum with weight $w_i = 0.5 + \frac{i}{2 \cdot \text{lookback}}$ (newer candles weighted higher, 30% in final).
+        5. Combine: $\text{Combined} = (\text{Short} \times 0.7) + (\text{Overall} \times 0.3)$.
+        6. Normalize: $\text{Trend} = \text{clamp}(\text{Combined} \times 50, -1.0, 1.0)$.
+    *   **Range**: -1.0 (Strong Crash) to +1.0 (Strong Pump).
+
 *   **State Classification**:
-    *   **RANGING (震荡)**: 默认状态。当趋势强度弱且波动率适中时。
-    *   **BREAKOUT (突破)**: 当趋势强度超过阈值且成交量显著放大时。
-    *   **PUMP/CRASH**: 极端行情状态，通常由短期均线与长期均线的剧烈偏离及 RSI 指标触发。
+    *   **RANGING (震荡)**: Default state. Weak trend strength and moderate volatility.
+    *   **BREAKOUT (突破)**: Strong trend strength + High volume.
+    *   **PUMP/CRASH**: Extreme trend values detected by moving average divergence and RSI.
 
 ### 3.2 Optimal Grid Calculation (最优网格计算)
-`_calculate_grid_levels` 方法摒弃了简单的“当前价格即中心”的逻辑，采用均值回归思想：
+`_calculate_grid_levels` 方法每 5 分钟执行一次，采用均值回归思想结合实时趋势跟随：
 
 *   **Grid Center Theory** (`calculate_optimal_grid_center`):
-    $$ P_{\text{center}} = P_{\text{historical}} \times (1 - w_{\text{current}}) + P_{\text{current}} \times w_{\text{current}} $$
-    其中 $w_{\text{current}}$ 主要根据**价格偏离度**（Price Deviation）动态调整，基础值为 0.8。当当前价格显著偏离历史中心时（Deviation > 15%），$w_{\text{current}}$ 提升至 0.85 以快速跟随行情；反之则保持 0.80 以保留均值回归特性。趋势强度（Trend Strength）主要影响 $P_{\text{historical}}$ 的内部构成权重。
+    *   **Formula**:
+        $$ P_{\text{center}} = P_{\text{historical}} \times 0.20 + P_{\text{current}} \times 0.80 $$
+    *   **Logic**: 
+        *   **80% Weight on Current Price**: Ensures the grid always follows the market ("Follow the Price"), preventing the bot from trading against a strong trend.
+        *   **20% Weight on Historical Price**: Provides a "mean reversion" gravity, keeping the grid anchored to value zones.
+    *   **Historical Data**: Uses **400 candles of 4h K-lines** (~66 days).
+        *   **Recent** (Last 7 days): 45-55% weight (Dynamic based on oscillation).
+        *   **Medium** (7-21 days ago): 30% weight.
+        *   **Long** (21-66 days ago): 15-25% weight.
 
-*   **Historical Center Calculation (历史中心计算)**:
-    $P_{\text{historical}}$ 采用多时间段加权平均（Multi-Period Weighted Average）以平滑噪音并捕捉长期价值：
-    
-    $$ P_{\text{historical}} = P_{\text{recent}} \times w_r + P_{\text{medium}} \times w_m + P_{\text{long}} \times w_l $$
-    
-    *   **Recent** (最近7天, 42根4h K线): $w_r$ = 0.45~0.55 (根据震荡指数动态调整)
-    *   **Medium** (7-21天前, 84根4h K线): $w_m$ = 0.30
-    *   **Long** (第21-66天, 274根4h K线，实际覆盖约46天): $w_l$ = 0.15~0.25
-    
-    > **Note**: 系统从 Binance 请求 **400根4小时K线**（约66天数据）以支持该多时间段分析。每段内部采用线性加权，越近期的K线权重越高。
-
+*   **Grid Boundary Generation (边界生成逻辑)**:
+    1.  **Trend Factor**:
+        $$ F_{\text{trend}} = 0.5 + (\text{TrendStrength} \times 0.3) $$
+        Range: 0.2 (Crash) to 0.8 (Pump). Determines asymmetry.
+    2.  **Theoretical Boundaries**:
+        *   Upper = Center + (Range × $F_{\text{trend}}$)
+        *   Lower = Center - (Range × $(1 - F_{\text{trend}})$)
+    3.  **Safety Validation**:
+        *   Checks boundaries against `current_price ± 1%` safety buffer.
+    4.  **Dynamic Snapping (关键保护机制)**:
+        *   **Crash Protection**: If `Theoretical Upper < Min Valid Upper` (Grid submerged), the Center is snapped UP to ensure the grid covers the current price.
+        *   **Pump Protection**: If `Theoretical Lower > Max Valid Lower` (Grid floating), the Center is snapped DOWN.
+        *   **Result**: The grid automatically "slides" to cover the current price even in extreme trends, ensuring valid order placement.
 
 *   **Asymmetric Distribution (非对称分布)**:
-    系统将网格划分为 **Core Zone (核心区)** 和 **Edge Zone (边缘区)**。
-    *   **Core Zone**: 范围定义为 $P_{\text{center}} \pm \text{CORE\_ZONE\_PERCENTAGE}$。在此区域内,网格密度更高,且资金分配系数 $\alpha > 1.0$ (如 1.5x),以最大化高频成交收益。
-    *   **Edge Zone**: 远离中心区域,网格稀疏,资金分配系数 $\alpha < 1.0$,主要用于捕捉极端行情下的反弹或回调,降低资金占用。
+    *   **Core Zone**: $P_{\text{center}} \pm \text{CORE\_ZONE\_PERCENTAGE}$. High density, 1.5x capital weight.
+    *   **Edge Zone**: Sparse grid, <1.0x capital weight, for catching knives/wicks.
 
-*   **Dynamic Position Sizing (动态仓位管理 - 复利机制)**:
-    当启用 `ENABLE_COMPOUND_INTEREST = True` 时,系统实现自动复利增长:
-    *   **Dynamic Capital Calculation**:
-        $$ C_{\text{per\_level}} = \max(C_{\text{min}}, V_{\text{available}} \times R_{\text{capital}}) $$
-        其中:
-        *   $V_{\text{available}} = (B_{\text{USDT}} - L_{\text{USDT}}) + (B_{\text{base}} - L_{\text{base}}) \times P_{\text{current}}$ (可用账户价值, 扣除锁定资金)
-        *   $R_{\text{capital}}$ = `CAPITAL_PERCENTAGE_PER_LEVEL` (默认 0.01 即 1%)
-        *   $C_{\text{min}} = \text{MIN\_NOTIONAL\_VALUE} \times 1.1$ (交易所最小订单要求 + 10% 安全边际)
-    *   **Execution Timing**: 每次网格重算时 (24小时周期或价格突破触发),系统动态调整 `capital_per_level`。
-    *   **Risk Management**: 
-        *   **盈利时**: 利润自动滚入本金,放大后续网格订单金额,实现复利增长。
-        *   **亏损时**: 仓位自动缩减 (反马丁格尔策略),降低风险暴露,延长生存周期。
-        *   **Solvency Check**: 系统通过 `_calculate_max_buy_levels` 和 `_calculate_max_sell_levels` 严格验证资金充足性,自动调整网格层数以防止透支,优先保证偿付能力 (Solvency) 而非维持固定网格数量。
+*   **Dynamic Position Sizing (动态仓位管理)**:
+    *   **Solvency Check**: Before placing orders, `_calculate_max_buy_levels` and `_calculate_max_sell_levels` verify if sufficient USDT/Base asset exists.
+    *   **Auto-Adjustment**: If funds are insufficient for the configured 9 levels, the bot automatically reduces the number of levels (e.g., to 5 or 7) to maintain valid order sizes (`MIN_NOTIONAL`).
 
 
 ### 3.3 Order Lifecycle Management (订单生命周期)
@@ -104,26 +132,106 @@
         *   若买单成交 ($P_{\text{buy}}$)，系统在相邻网格层级挂出卖单，价格为： $P_{\text{sell}} = P_{\text{buy}} \times (1 + \text{BUY\_SELL\_SPREAD})$，其中 `BUY_SELL_SPREAD` = 0.0025 (0.25%)。
         *   **Profit Margin Check**: 执行前验证 $\text{effective\_profit} > \text{round\_trip\_fee} \times \text{PROFIT\_MARGIN\_MULTIPLIER}$，其中 `effective_profit = expected_profit - round_trip_fee - slippage`，确保净利润高于双边手续费的 2 倍。
 
+### 3.4 Compound Interest Mechanism (复利机制)
+如果启用 `ENABLE_COMPOUND_INTEREST = True`，系统每次重算网格时自动调整单格资金量：
+
+*   **计算公式**:
+    $$ \text{Capital\_Per\_Level} = (\text{Free\_USDT} + \text{Free\_Base} \times P_{\text{current}}) \times \text{CAPITAL\_PERCENTAGE\_PER\_LEVEL} $$
+    
+*   **安全限制**:
+    *   **最小值**: $\max(\text{MIN\_NOTIONAL} \times 1.1, \text{Dynamic\_Capital})$，确保满足交易所最小订单要求（加10%安全边际）。
+    *   **Pending Locks**: 计算中扣除已挂单锁定的资金 (`pending_locks`)，防止重复计算。
+    
+*   **效果**: 随着账户盈利增长，单格资金量自动增加，实现加速复利。亏损时自动降低仓位，控制风险暴露。
+
+### 3.5 Grid Recalculation Triggers (网格重算触发条件)
+系统通过 `check_grid_recalculation` (每5分钟执行) 监控市场变化，满足以下**任一条件**时触发全网格重算：
+
+*   **时间触发 (Time-Based)**:
+    *   距离上次重算 ≥ `recalculation_period` (默认 7 天)。
+    
+*   **价格突破确认 (Out-of-Bounds Recalc)**:
+    *   价格超出网格上界或下界 **持续 2 小时** (`out_of_bounds_confirmation_threshold = 7200s`)。
+    *   **防止假突破**: 若价格在2小时内回归网格，计时器重置，不触发重算。
+    *   实现逻辑：
+        ```python
+        if currently_out_of_bounds:
+            if out_of_bounds_start_time is None:
+                out_of_bounds_start_time = current_time  # 开始计时
+            elif current_time - out_of_bounds_start_time >= 7200:
+                trigger_recalculation()  # 确认突破
+        else:
+            out_of_bounds_start_time = None  # 价格回归，重置
+        ```
+
+*   **波动率剧变 (Volatility-Based)**:
+    *   **Major Change**: ATR 变化 > 20% (`atr_change > 0.2`)，触发完全重算。
+    *   **Moderate Change**: ATR 变化 10-20%，仅调整网格间距 (`partial_adjustment`)，不撤销现有订单。
+    
+*   **极端市场状态 (Extreme Market State)**:
+    *   检测到 `MarketState.PUMP` 或 `MarketState.CRASH`，立即触发重算以适应趋势。
+
 ## 4. Risk Management System (风险管理系统)
 
-### OCO Mechanics
+> [!IMPORTANT]
+> 对于小资金账户（<100 USDT），OCO功能默认**禁用**（`ENABLE_OCO = False`）。原因：
+> 1. 最小订单金额（5-10 USDT）难以满足。
+> 2. OCO占用的资金会降低网格密度。
+> 3. 在紧密网格范围内，OCO触发概率极低。
+
+### 4.1 OCO Mechanics (OCO机制)
 `RiskManager` 利用 Binance OCO 订单实现原子化风控：
 *   **Structure**: 一个 OCO 订单包含一个限价单（Limit Maker，用于止盈）和一个止损限价单（Stop-Loss Limit，用于止损）。
 *   **Execution**:
     *   **Take Profit**: 当价格上涨至 $P_{\text{TP}}$，Limit Maker 单成交，Stop-Loss 单自动撤销。
     *   **Stop Loss**: 当价格下跌至 $P_{\text{SL\_Trigger}}$，Stop-Loss Limit 单被激活并提交到撮合引擎，Limit Maker 单自动撤销。
 
-### Trailing Logic (追踪机制)
-`check_price` 函数实现了动态追踪止损：
-*   **Trigger Condition**:
+### 4.2 Trailing Stop Loss (追踪止损)
+`check_price` 函数实现了动态追踪止损，每次价格更新时调用：
+
+*   **Trigger Condition（触发条件）**:
     $$ \frac{P_{\text{new\_SL}} - P_{\text{curr\_SL}}}{P_{\text{curr\_SL}}} > \text{Threshold}_{\text{update}} $$
     仅当新的止损位（基于当前最高价计算）比当前止损位高出一定阈值（如 `min_update_threshold_percent` = 0.5%）时，才触发更新。
-*   **Cooling Period**: 引入 `min_update_interval_seconds` (如 300s)，防止在剧烈波动中频繁撤单重发 OCO 导致触发 API Rate Limit。
+    
+*   **Calculation Formula（计算公式）**:
+    *   **New Stop Loss**: $P_{\text{new\_SL}} = P_{\text{current}} \times (1 - \text{trailing\_stop\_loss\_percent})$
+    *   **New Take Profit**: $P_{\text{new\_TP}} = P_{\text{current}} \times (1 + \text{trailing\_take\_profit\_percent})$
+    *   **Ratchet Mechanism（棘轮机制）**: 止损位只能上移，不能下降（`if new_stop_loss > self.stop_loss_price`）。
+    
+*   **Cooling Period（冷却期）**: 
+    *   引入 `min_update_interval_seconds` (默认 300s)。
+    *   防止在剧烈波动中频繁撤单重发 OCO 导致触发 API Rate Limit。
+    ```python
+    if time_since_last_update >= min_update_interval_seconds:
+        _cancel_oco_orders()
+        _place_oco_orders()
+    ```
 
-### Volatility Adjustment
-*   当 `ATR` (平均真实波幅) 飙升，指示市场进入高波动状态时，系统自动收紧风控参数：
-    *   $\text{Stop Loss \%} = \text{Original SL \%} \cdot 0.8$ (收紧 20%)
-    *   这能更早地截断亏损，防止在流动性枯竭的暴跌中滑点过大。
+### 4.3 Volatility-Based Parameter Adjustment (基于波动率的参数调整)
+
+系统每小时检查一次市场波动率（通过 `check_price` 中的 Volatility Block），动态调整风控参数：
+
+*   **Trigger（触发条件）**:
+    $$ \text{Volatility\_Percent} = \frac{\text{ATR}_{1h}}{P_{\text{current}}} $$
+    当 $\text{Volatility\_Percent} > 1.5\%$ 时，判定为高波动环境。
+
+*   **High Volatility Adjustment（高波环境调整）**:
+    ```python
+    trailing_stop_loss_percent *= 0.8   # 收紧 20% (e.g., 5% → 4%)
+    trailing_take_profit_percent *= 0.8 # 收紧 20% (e.g., 3% → 2.4%)
+    ```
+    *   **目的**: 在高波动时更早止损/止盈，防止流动性枯竭导致滑点过大。
+
+*   **Normal Volatility Reset（正常环境恢复）**:
+    当波动率回落至正常水平时，系统自动恢复为配置文件中的默认参数：
+    ```python
+    base_stop_loss = config.TRAILING_STOP_LOSS_PERCENT / 100
+    base_take_profit = config.TRAILING_TAKE_PROFIT_PERCENT / 100
+    # Apply capital size adjustment if needed
+    trailing_stop_loss_percent = max(0.015, base_stop_loss * capital_adjustment_factor)
+    ```
+
+*   **检查频率**: 每 `volatility_check_interval` (默认 3600s = 1小时) 执行一次。
 
 ## 5. Infrastructure & Resilience (基础设施与韧性)
 
