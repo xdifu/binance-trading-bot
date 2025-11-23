@@ -956,6 +956,8 @@ class GridTrader:
                 return True
 
             # 5. Execute Trade
+            trade_executed = False
+
             if diff > 0:
                 # Need to BUY base asset
                 usdt_to_spend = total_val * diff
@@ -970,25 +972,61 @@ class GridTrader:
                     self.telegram_bot.send_message(f"🔄 Deadlock Recovery: Buying {formatted_qty} {base_asset} to reset grid")
                     
                 self.binance_client.place_market_order(self.symbol, 'BUY', formatted_qty)
+                trade_executed = True
                 
             else:
                 # Need to SELL base asset
                 # diff is negative, so we sell -diff amount
                 base_to_sell = (total_val * abs(diff)) / current_price
-                # Safety cap: don't sell more than 90% of available base
-                base_to_sell = min(base_to_sell, base_balance * 0.9)
+                available_base = max(base_balance - self.pending_locks.get(base_asset, 0), 0)
+                # Do not exceed available base; target 100% when reset_sell_all requests it
+                target_qty = min(base_to_sell, available_base)
                 
-                formatted_qty = self._adjust_quantity_precision(base_to_sell)
-                
-                self.logger.info(f"REBALANCE: Selling {formatted_qty} {base_asset}")
-                if self.telegram_bot:
-                    self.telegram_bot.send_message(f"🔄 Deadlock Recovery: Selling {formatted_qty} {base_asset} to reset grid")
+                if target_qty <= 0:
+                    self.logger.error(f"No available {base_asset} to sell for rebalance.")
+                    return False
+
+                # Iteratively back off quantity on precision/min-notional errors
+                # Start from full target, then trim slightly to handle rounding
+                backoff_factors = [1.0, 0.995, 0.99, 0.98, 0.97, 0.95, 0.9]
+                min_notional = getattr(config, 'MIN_NOTIONAL_VALUE', 5)
+
+                for factor in backoff_factors:
+                    qty = target_qty * factor
+                    notional = qty * current_price
+                    if notional < min_notional:
+                        self.logger.warning(
+                            f"Sell attempt skipped: qty {qty:.8f} (< min notional {min_notional} USDT)."
+                        )
+                        continue
+
+                    formatted_qty = self._adjust_quantity_precision(qty)
                     
-                self.binance_client.place_market_order(self.symbol, 'SELL', formatted_qty)
+                    try:
+                        self.logger.info(
+                            f"REBALANCE: Selling {formatted_qty} {base_asset} (factor {factor:.3f}, target {target_qty:.8f})"
+                        )
+                        if self.telegram_bot:
+                            self.telegram_bot.send_message(
+                                f"🔄 Deadlock Recovery: Selling {formatted_qty} {base_asset} to reset grid"
+                            )
+                        self.binance_client.place_market_order(self.symbol, 'SELL', formatted_qty)
+                        trade_executed = True
+                        break
+                    except Exception as sell_err:
+                        self.logger.warning(
+                            f"Sell attempt failed at factor {factor:.3f} (qty {formatted_qty}): {sell_err}"
+                        )
+                        continue
+
+                if not trade_executed:
+                    self.logger.error("All sell attempts failed; rebalance aborted.")
+                    return False
 
             # 6. Save Cooldown
-            self._save_cooldown_state()
-            return True
+            if trade_executed:
+                self._save_cooldown_state()
+            return trade_executed
 
         except Exception as e:
             self.logger.error(f"Market rebalance failed: {e}")
@@ -1013,6 +1051,8 @@ class GridTrader:
             self.logger.error(f"Total capital {total_val:.2f} < 12 USDT. Stopping.")
             if self.telegram_bot:
                 self.telegram_bot.send_message(f"⚠️ Critical: Capital {total_val:.2f} USDT too low to operate.")
+            # TECH_SPEC: insufficient capital should halt to avoid fee churn
+            self.is_running = False
             return 'idle'
 
         # 2. All USDT Case (max_sell == 0)
@@ -1157,26 +1197,16 @@ class GridTrader:
                         # Add a flag to prevent infinite recursion if needed, but balances should change
                         return self._calculate_grid_levels()
                     else:
-                        self.logger.warning("Reset failed (cooldown or error). Falling back to IDLE/One-Sided.")
-                        # If reset failed (e.g. cooldown), what do we do?
-                        # If cooldown active, we should probably fall back to one-sided if possible, or idle.
-                        # For All USDT + Uptrend, one-sided buy is not possible (price too high).
-                        # For All Coin + Downtrend, one-sided sell is possible.
-                        if max_sell_levels > 0:
-                            strategy = 'one_sided_sell'
-                        elif max_buy_levels > 0:
-                            strategy = 'one_sided_buy'
-                        else:
-                            return []
+                        self.logger.warning("Reset failed (cooldown or error). Staying idle per TECH_SPEC to avoid unintended orders.")
+                        return []
 
                 elif strategy == 'reset_sell_all':
                     self.logger.info("Strategy is FULL LIQUIDATION. Selling all coin...")
                     if self._execute_market_rebalance(target_ratio=0.0): # Target 0% coin
                         return [] # After selling all, we are All USDT + Downtrend -> IDLE
                     else:
-                         # Fallback if failed
-                        if max_sell_levels > 0: strategy = 'one_sided_sell'
-                        else: return []
+                        self.logger.warning("Full liquidation failed (cooldown or error). Staying idle per TECH_SPEC.")
+                        return []
 
                 elif strategy == 'reduce_50':
                     self.logger.info("Strategy is REDUCE 50%. Selling half of coin...")
@@ -1203,8 +1233,8 @@ class GridTrader:
                         max_buy_levels = self._calculate_max_buy_levels(usdt_balance, live_current_price)
                         max_sell_levels = self._calculate_max_sell_levels(base_balance, live_current_price)
                     else:
-                        if max_sell_levels > 0: strategy = 'one_sided_sell'
-                        else: return []
+                        self.logger.warning("Reduce 50% failed (cooldown or error). Staying idle per TECH_SPEC.")
+                        return []
 
             # Determine actual grid levels we can support
             self.max_affordable_buy_levels = max_buy_levels
