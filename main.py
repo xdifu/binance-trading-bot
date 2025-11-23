@@ -376,18 +376,31 @@ class GridTradingBot:
     
     def _setup_user_data_stream(self):
         """
-        Set up user data stream for order updates using ListenKey.
-        
-        Reference: binance-spot-api-docs/user-data-stream.md
+        Set up user data stream for order updates.
+        Prefer WebSocket API userDataStream.subscribe per binance-spot-api-docs/web-socket-api.md,
+        fallback to REST listenKey stream if WS-API is unavailable.
         """
-        logger.info("=== Starting User Data Stream Setup (ListenKey Mode) ===")
+        logger.info("=== Starting User Data Stream Setup (WS-first) ===")
         try:
-            # Ensure WebSocket manager is initialized
+            try:
+                ws_started = self.binance_client.start_user_data_stream(
+                    on_event=self._handle_websocket_message
+                )
+                if ws_started:
+                    with self.state_lock:
+                        self.listen_key = None
+                    logger.info("User data stream started via WebSocket API (userDataStream.subscribe)")
+                    return
+                logger.warning("WebSocket API user data stream unavailable; falling back to REST listenKey")
+            except Exception as e:
+                logger.warning(f"WebSocket API user data stream failed ({e}); falling back to REST listenKey")
+
+            # Ensure WebSocket manager is initialized for REST listenKey fallback
             if not self.ws_manager:
-                logger.error("Cannot set up user data stream: WebSocket manager not initialized")
+                logger.error("Cannot set up REST listenKey stream: WebSocket manager not initialized")
                 return
 
-            # 1. Get ListenKey via REST API (POST /api/v3/userDataStream)
+            # REST listenKey fallback per user-data-stream.md
             try:
                 listen_key_response = self.binance_client.rest_client.new_listen_key()
                 if listen_key_response and 'listenKey' in listen_key_response:
@@ -400,12 +413,11 @@ class GridTradingBot:
                 logger.error(f"Failed to get listen key from REST API: {e}")
                 return
 
-            # 2. Start User Data Stream via WebSocket (wss://stream.binance.com:9443/ws/<listenKey>)
             self.binance_client.user_stream_mode = "listen_key"
             self.ws_manager.start_user_data_stream(self.listen_key)
-            logger.info("User data stream started via MarketDataWebsocketManager")
+            logger.info("User data stream started via MarketDataWebsocketManager (REST listenKey fallback)")
 
-            # 3. Start Keep-Alive Thread (PUT /api/v3/userDataStream every 30m)
+            # Start Keep-Alive Thread (PUT /api/v3/userDataStream every 30m)
             with self.state_lock:
                 if not self.keep_alive_thread or not self.keep_alive_thread.is_alive():
                     self.keep_alive_thread = Thread(target=self._keep_alive_listen_key_thread, daemon=True)

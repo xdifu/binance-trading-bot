@@ -476,6 +476,15 @@ class GridTrader:
         simulation_status = "Simulation mode: ON" if self.simulation_mode else "Simulation mode: OFF"
         message = f"Grid trading system started!\nCurrent price: {self.current_market_price}\nGrid range: {len(self.grid)} levels\nUsing {api_type}\n{simulation_status}"
         self._setup_grid()
+
+        # Abort start if grid setup failed (no levels generated)
+        if not self.grid:
+            self.is_running = False
+            error_msg = "Error: Grid setup failed; no grid levels or orders were created."
+            self.logger.error(error_msg)
+            if self.telegram_bot:
+                self.telegram_bot.send_message(f"⚠️ {error_msg}")
+            return error_msg
         
         # FIX: Set is_running ONLY after grid initialization is complete
         # This prevents WebSocket event handlers from triggering maintenance logic during setup
@@ -779,9 +788,11 @@ class GridTrader:
         effective_usdt = max(usdt_balance - self.pending_locks.get('USDT', 0), 0)
         
         # CRITICAL FIX: Account for maximum 1.5x amplification in core zone
-        # Use conservative estimate with safety margin
-        # Adjusted to 1.2x to match actual config (1.16x) and allow more levels
-        max_capital_per_level = self.capital_per_level * 1.2  # 1.16x + safety margin
+        # Use conservative estimate with safety margin that matches placement logic
+        max_capital_per_level = max(
+            self.capital_per_level * 1.5,               # Core-zone amplification used in placement
+            getattr(config, "MIN_NOTIONAL_VALUE", 5) * 1.2  # Notional buffer applied during order placement
+        )
         
         if max_capital_per_level <= 0:
             return 0
@@ -808,8 +819,10 @@ class GridTrader:
         base_asset = self.symbol.replace('USDT', '')
         effective_base = max(base_balance - self.pending_locks.get(base_asset, 0), 0)
         # CRITICAL FIX: Account for maximum 1.5x amplification in core zone
-        # Adjusted to 1.2x to match actual config (1.16x) and allow more levels
-        max_capital_per_level = self.capital_per_level * 1.2  # 1.16x + safety margin
+        max_capital_per_level = max(
+            self.capital_per_level * 1.5,
+            getattr(config, "MIN_NOTIONAL_VALUE", 5) * 1.2
+        )
         sell_quantity_per_level = max_capital_per_level / current_price if current_price > 0 else 0
         
         if sell_quantity_per_level <= 0:
@@ -2369,12 +2382,12 @@ class GridTrader:
         # NEW: Deadlock Detection
         # If we have 0 active orders (or very few) but are supposed to be running, trigger a recalc
         # This ensures _calculate_grid_levels is called, which now contains the recovery logic
-        active_orders = len(self.grid)
+        active_orders = sum(1 for level in self.grid if level.get('order_id'))
         deadlock_recalc = False
         if active_orders == 0 and self.is_running:
              # Check if we are in a cooldown (don't spam logs/recalcs if just cooling down)
             if not self._check_market_order_cooldown():
-                self.logger.warning("Deadlock detected (0 active orders). Triggering recalculation to attempt recovery.")
+                self.logger.warning("Deadlock detected (0 active live orders). Triggering recalculation to attempt recovery.")
                 deadlock_recalc = True
             else:
                  self.logger.info("Deadlock detected but cooldown active. Waiting...")

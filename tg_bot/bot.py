@@ -154,11 +154,74 @@ class TelegramBot:
         """Handle /status command"""
         async def handler(update):
             if self.grid_trader:
-                status = self.grid_trader.get_status()
+                status = self._format_status_message()
                 await update.message.reply_text(status)
             else:
                 await update.message.reply_text("Grid trading system not initialized")
         await self._handle_authorized_command(update, handler)
+
+    def _format_status_message(self):
+        """Build a rich status view for Telegram in English."""
+        gt = self.grid_trader
+        is_running = getattr(gt, "is_running", False)
+
+        # Market and trend
+        trend_val = float(getattr(gt, "trend_strength", 0) or 0)
+        trend_val = max(min(trend_val, 1.0), -1.0)
+        trend_bar = self._trend_meter(trend_val)
+        market_state = getattr(gt, "current_market_state", None)
+        market_state_label = market_state.name if market_state else "UNKNOWN"
+
+        # Price and grid
+        symbol = getattr(gt, "symbol", "N/A")
+        price = getattr(gt, "current_market_price", None)
+        price_text = f"{price:.8f}" if isinstance(price, (int, float)) else "N/A"
+        grid_levels = gt.grid if getattr(gt, "grid", None) else []
+        total_levels = len(grid_levels)
+        live_orders = sum(1 for lvl in grid_levels if lvl.get("order_id"))
+        buy_orders = sum(1 for lvl in grid_levels if lvl.get("order_id") and lvl.get("side") == "BUY")
+        sell_orders = sum(1 for lvl in grid_levels if lvl.get("order_id") and lvl.get("side") == "SELL")
+
+        # API mode
+        api_mode = "WebSocket API" if getattr(gt, "using_websocket", False) else "REST API"
+
+        # Risk manager
+        rm = getattr(self, "risk_manager", None)
+        risk_text = "N/A"
+        if rm and getattr(rm, "is_active", False):
+            sl = getattr(rm, "stop_loss_price", None)
+            tp = getattr(rm, "take_profit_price", None)
+            risk_text = f"Active | SL: {sl:.8f} | TP: {tp:.8f}" if isinstance(sl, (int, float)) and isinstance(tp, (int, float)) else "Active"
+        elif rm:
+            risk_text = "Inactive"
+
+        # Compose message
+        lines = [
+            f"Status: {'RUNNING [ON]' if is_running else 'STOPPED [OFF]'}",
+            f"Symbol: {symbol}",
+            f"Price: {price_text}",
+            f"Trend: {trend_val:+.2f} {trend_bar}",
+            f"Market State: {market_state_label}",
+            f"Grid: {live_orders}/{total_levels} live orders (Buy {buy_orders} / Sell {sell_orders})",
+            f"API: {api_mode}",
+            f"Risk: {risk_text}",
+        ]
+        return "\n".join(lines)
+
+    def _trend_meter(self, value):
+        """Render a simple ASCII meter for trend in range [-1, 1]."""
+        width = 20
+        # Map [-1,1] to [0,width]
+        filled = int(round((value + 1) / 2 * width))
+        filled = max(0, min(width, filled))
+        bar = "[" + "=" * filled + "." * (width - filled) + "]"
+        if value > 0.25:
+            label = "Bullish"
+        elif value < -0.25:
+            label = "Bearish"
+        else:
+            label = "Neutral"
+        return f"{bar} {label}"
     
     async def _handle_start_grid(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /startgrid command"""

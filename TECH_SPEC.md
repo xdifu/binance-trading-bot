@@ -32,7 +32,7 @@
         *   每 `GRID_RECALCULATION_INTERVAL` (5分钟) 触发 `grid_trader.check_grid_recalculation()`，评估是否需要重置网格。
         *   每 60 秒触发 `grid_trader._check_for_unfilled_grid_slots()`，修复因网络波动导致的漏单。
         *   每 5 分钟触发 `risk_manager._check_for_missing_oco_orders()`，确保风控单在线。
-    *   **`_keep_alive_listen_key_thread`**: 每 30 分钟通过 REST API 延长 ListenKey 有效期，维持 User Data Stream 的心跳。
+    *   **User Data Stream**: 优先通过 WebSocket API `userDataStream.subscribe` 订阅账户/订单事件（参考 binance-spot-api-docs/web-socket-api.md）；仅在 WS-API 不可用时才启用 REST listenKey，并由 `_keep_alive_listen_key_thread` 每 30 分钟续期。
 4.  **Event-Driven Updates**: `MarketDataWebsocketManager` 接收 WebSocket 推送（Kline, ExecutionReport, OutboundAccountPosition），并通过回调函数 (`_handle_websocket_message`) 实时驱动 `GridTrader` 和 `RiskManager` 更新状态。
 
 ### Module Interaction
