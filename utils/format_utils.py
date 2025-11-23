@@ -235,7 +235,7 @@ def validate_price_quantity(price, quantity, symbol_info):
                     return False, f"Quantity {quantity} not a multiple of step size {step_size}"
                     
             # 市值验证
-            elif f['filterType'] == 'NOTIONAL':
+            elif f['filterType'] in ('NOTIONAL', 'MIN_NOTIONAL'):
                 min_notional = Decimal(f['minNotional'])
                 notional = decimal_price * decimal_quantity
                 

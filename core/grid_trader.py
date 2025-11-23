@@ -443,13 +443,18 @@ class GridTrader:
         
         # Check if we have enough quote asset (USDT)
         # Use subtraction to avoid accumulation of floating-point errors
-        if available_quote < (usdt_needed - quote_tolerance) and not simulation:
+        if available_quote < max(usdt_needed - quote_tolerance, 0.0) and not simulation:
             warnings.append(f"Insufficient {quote_asset}: Required {usdt_needed:.2f}, Available {available_quote:.2f}")
             insufficient_funds = True
 
         # Also check if we have enough base asset (e.g., BTC, ETH)
         self.logger.info(f"Balance check: base_needed={base_needed:.8f}, available_base={available_base:.8f}, base_tolerance={base_tolerance:.8f}, threshold={(base_needed - base_tolerance):.8f}, check={available_base:.8f} < {(base_needed - base_tolerance):.8f} = {available_base < (base_needed - base_tolerance)}")
-        if available_base < (base_needed - base_tolerance) and not simulation:
+        # Use relative tolerance only; avoid tolerance >= need when base_needed is tiny by applying a floor at 1% of need
+        if base_needed > 0:
+            tolerance = base_needed * 0.01
+        else:
+            tolerance = 0
+        if available_base < max(base_needed - tolerance, 0.0) and not simulation:
             warnings.append(f"Insufficient {base_asset}: Required {base_needed:.2f}, Available {available_base:.2f}")
             insufficient_funds = True
 
@@ -475,7 +480,21 @@ class GridTrader:
         
         simulation_status = "Simulation mode: ON" if self.simulation_mode else "Simulation mode: OFF"
         message = f"Grid trading system started!\nCurrent price: {self.current_market_price}\nGrid range: {len(self.grid)} levels\nUsing {api_type}\n{simulation_status}"
-        self._setup_grid()
+        try:
+            self._setup_grid()
+        except Exception as e:
+            # Cleanup any partial state if setup fails
+            self.logger.error(f"Grid setup failed: {e}", exc_info=True)
+            try:
+                self._cancel_all_open_orders()
+            except Exception as cancel_err:
+                self.logger.error(f"Cleanup cancel failed after setup error: {cancel_err}")
+            self.grid = []
+            self.is_running = False
+            error_msg = f"Error: Failed to start grid trading due to setup error: {e}"
+            if self.telegram_bot:
+                self.telegram_bot.send_message(f"❌ {error_msg}")
+            return error_msg
 
         # Abort start if grid setup failed (no levels generated)
         if not self.grid:
@@ -937,6 +956,33 @@ class GridTrader:
         Used for 'Reset' strategy in deadlock recovery.
         """
         try:
+            symbol_info = getattr(self, "symbol_info", {}) or {}
+            order_types = symbol_info.get("orderTypes", []) if isinstance(symbol_info, dict) else []
+            market_supported = "MARKET" in order_types
+
+            def _place_rebalance_order(side, qty):
+                """Try market first (if supported), otherwise use aggressive limit at best bid/ask."""
+                try:
+                    formatted_qty = self._adjust_quantity_precision(qty)
+                    if market_supported:
+                        try:
+                            self.binance_client.place_market_order(self.symbol, side, formatted_qty)
+                            return True
+                        except Exception as market_err:
+                            self.logger.warning(f"Market {side} failed during rebalance, falling back to limit: {market_err}")
+                    # Limit fallback using best bid/ask
+                    best_bid, best_ask = self.binance_client.get_best_bid_ask(self.symbol)
+                    if side == "BUY":
+                        limit_price = best_ask * 1.001  # small buffer to get filled
+                    else:
+                        limit_price = best_bid * 0.999
+                    formatted_price = self._adjust_price_precision(limit_price)
+                    self.binance_client.place_limit_order(self.symbol, side, formatted_qty, formatted_price)
+                    return True
+                except Exception as order_err:
+                    self.logger.error(f"Rebalance {side} order failed: {order_err}")
+                    return False
+
             # 1. Check cooldown
             if self._check_market_order_cooldown():
                 self.logger.warning("Skipping market rebalance due to cooldown")
@@ -978,14 +1024,12 @@ class GridTrader:
                 usdt_to_spend = min(usdt_to_spend, usdt_balance * 0.9)
                 
                 qty = usdt_to_spend / current_price
-                formatted_qty = self._adjust_quantity_precision(qty)
                 
-                self.logger.info(f"REBALANCE: Buying {formatted_qty} {base_asset} (~{usdt_to_spend:.2f} USDT)")
+                self.logger.info(f"REBALANCE: Buying ~{qty:.8f} {base_asset} (~{usdt_to_spend:.2f} USDT)")
                 if self.telegram_bot:
-                    self.telegram_bot.send_message(f"🔄 Deadlock Recovery: Buying {formatted_qty} {base_asset} to reset grid")
+                    self.telegram_bot.send_message(f"🔄 Deadlock Recovery: Buying ~{qty:.8f} {base_asset} to reset grid")
                     
-                self.binance_client.place_market_order(self.symbol, 'BUY', formatted_qty)
-                trade_executed = True
+                trade_executed = _place_rebalance_order("BUY", qty)
                 
             else:
                 # Need to SELL base asset
@@ -1016,16 +1060,14 @@ class GridTrader:
                     formatted_qty = self._adjust_quantity_precision(qty)
                     
                     try:
-                        self.logger.info(
-                            f"REBALANCE: Selling {formatted_qty} {base_asset} (factor {factor:.3f}, target {target_qty:.8f})"
-                        )
+                        self.logger.info(f"REBALANCE: Selling {formatted_qty} {base_asset} (factor {factor:.3f}, target {target_qty:.8f})")
                         if self.telegram_bot:
                             self.telegram_bot.send_message(
                                 f"🔄 Deadlock Recovery: Selling {formatted_qty} {base_asset} to reset grid"
                             )
-                        self.binance_client.place_market_order(self.symbol, 'SELL', formatted_qty)
-                        trade_executed = True
-                        break
+                        trade_executed = _place_rebalance_order("SELL", qty)
+                        if trade_executed:
+                            break
                     except Exception as sell_err:
                         self.logger.warning(
                             f"Sell attempt failed at factor {factor:.3f} (qty {formatted_qty}): {sell_err}"
@@ -1099,7 +1141,7 @@ class GridTrader:
 
         return 'normal'
 
-    def _calculate_grid_levels(self):
+    def _calculate_grid_levels(self, recursion_depth=0):
         """
         Calculate asymmetric grid price levels with funds concentrated near the optimal center.
         Uses mean reversion principles to find the ideal grid center for oscillating markets.
@@ -1149,16 +1191,24 @@ class GridTrader:
                     min_notional = getattr(config, 'MIN_NOTIONAL_VALUE', 5)
                     # Add 10% buffer to minimum to be safe
                     safe_min_capital = min_notional * 1.1
+
+                    # Apply max cap to avoid runaway sizing (5x default config)
+                    max_cap_multiplier = getattr(config, 'CAPITAL_PER_LEVEL_MAX_MULTIPLIER', 5)
+                    max_capital_cap = config.CAPITAL_PER_LEVEL * max_cap_multiplier
                     
                     # Apply dynamic capital, but respect a safety cap (e.g., 5x config capital) to prevent extreme outliers
                     # Also ensure we don't go below the safe minimum
-                    new_capital = max(safe_min_capital, dynamic_capital)
+                    new_capital = max(safe_min_capital, min(max_capital_cap, dynamic_capital))
                     
                     # Log the adjustment if it's significantly different
                     if abs(new_capital - self.capital_per_level) > 1.0:
                         self.logger.info(
                             f"Compound Interest: Adjusting capital per level from {self.capital_per_level:.2f} "
                             f"to {new_capital:.2f} USDT (Available Value: {total_available_value:.2f}, Rate: {percentage*100}%)"
+                        )
+                    if new_capital >= max_capital_cap:
+                        self.logger.warning(
+                            f"Compound capital capped at {max_capital_cap:.2f} USDT (calculated {dynamic_capital:.2f} exceeds cap)"
                         )
                     
                     # Update the instance variable
@@ -1205,10 +1255,9 @@ class GridTrader:
                     
                 elif strategy == 'reset':
                     self.logger.info("Strategy is RESET. Executing market rebalance...")
-                    if self._execute_market_rebalance(target_ratio=0.5):
-                        # Recursively recalculate after rebalance
-                        # Add a flag to prevent infinite recursion if needed, but balances should change
-                        return self._calculate_grid_levels()
+                    if recursion_depth < 1 and self._execute_market_rebalance(target_ratio=0.5):
+                        # Recursively recalculate after rebalance (guarded depth)
+                        return self._calculate_grid_levels(recursion_depth + 1)
                     else:
                         self.logger.warning("Reset failed (cooldown or error). Staying idle per TECH_SPEC to avoid unintended orders.")
                         return []
@@ -1233,7 +1282,7 @@ class GridTrader:
                     # If we have 50% USDT, max_buy will be > 0. So it becomes normal grid?
                     # But the strategy says "Single-sided sell grid".
                     # Let's target 0.5 ratio.
-                    if self._execute_market_rebalance(target_ratio=0.5):
+                    if recursion_depth < 1 and self._execute_market_rebalance(target_ratio=0.5):
                         # After rebalance, we have USDT. 
                         # But we want to force ONE SIDED SELL?
                         # The table says: "Market Sell 50% -> One Sided Sell Grid"
@@ -2475,8 +2524,34 @@ class GridTrader:
                     order_id = str(level['order_id'])
                     # If order is in our grid but not actually open, mark it
                     if order_id not in open_order_ids:
-                        self.logger.warning(f"Order {order_id} is in grid but not found in open orders")
-                        level['order_id'] = None
+                        self.logger.warning(f"Order {order_id} is in grid but not found in open orders; verifying status")
+                        try:
+                            order_info = self.binance_client.get_order(self.symbol, order_id=order_id)
+                            status = None
+                            if isinstance(order_info, dict):
+                                status = order_info.get("status") or order_info.get("result", {}).get("status")
+                            if status == "FILLED":
+                                qty = float(order_info.get("executedQty", 0) or order_info.get("result", {}).get("executedQty", 0) or 0)
+                                # derive price from avgPrice or quote qty
+                                price_val = order_info.get("avgPrice") or order_info.get("price") or 0
+                                quote_qty = order_info.get("cummulativeQuoteQty") or order_info.get("result", {}).get("cummulativeQuoteQty")
+                                if (not price_val or float(price_val) == 0) and quote_qty and qty:
+                                    price_val = float(quote_qty) / float(qty)
+                                price_val = float(price_val) if price_val else level.get("price", 0)
+                                # Trigger filled flow
+                                idx = self.grid.index(level)
+                                self._process_filled_order(level, idx, level.get("side"), qty, price_val)
+                                continue
+                            elif status in ("CANCELED", "EXPIRED", "REJECTED"):
+                                self.logger.info(f"Order {order_id} missing because status={status}; clearing from grid")
+                                level['order_id'] = None
+                                continue
+                            else:
+                                self.logger.info(f"Order {order_id} status unknown ({status}); clearing for safety")
+                                level['order_id'] = None
+                        except Exception as e:
+                            self.logger.error(f"Failed to verify missing order {order_id}: {e}")
+                            level['order_id'] = None
                         
             self.logger.info("Grid reconciled with open orders")
         except Exception as e:
@@ -2563,6 +2638,23 @@ class GridTrader:
                 return None, None, None, None, 0, 0
                 
         return order_status, order_id, symbol, side, price, quantity
+
+    def _emergency_stop_unhedged(self, reason):
+        """
+        Stop trading when a filled order cannot be hedged, to avoid unprotected exposure.
+        """
+        self.logger.error(f"Emergency stop (unhedged position): {reason}")
+        try:
+            self._cancel_all_open_orders()
+        except Exception as e:
+            self.logger.error(f"Failed to cancel orders during emergency stop: {e}")
+        try:
+            self._reset_locks()
+        except Exception as e:
+            self.logger.error(f"Failed to reset locks during emergency stop: {e}")
+        self.is_running = False
+        if self.telegram_bot:
+            self.telegram_bot.send_message(f"🚨 Emergency stop: {reason}")
     
     # OPTIMIZED: Process filled order method separated from handler
     def _process_filled_order(self, matching_level, level_index, side, quantity, price):
@@ -2688,86 +2780,108 @@ class GridTrader:
                     asset = self.symbol.replace('USDT', '')
                     required = float(formatted_quantity)
 
-                # Try to lock the funds
-                if not self._lock_funds(asset, required):
-                    message = f"⚠️ Cannot place opposite order: Insufficient {asset} balance. Required: {required}, Available: {self.binance_client.check_balance(asset) - self.pending_locks.get(asset, 0)}"
-                    self.logger.warning(message)
-                    if self.telegram_bot:
-                        self.telegram_bot.send_message(message)
+                max_retries = 3
+                lock_acquired = False
+                for attempt in range(max_retries):
+                    if self._lock_funds(asset, required):
+                        lock_acquired = True
+                        break
+                    time.sleep(0.5)
+                if not lock_acquired:
+                    self._emergency_stop_unhedged(f"Cannot lock {asset} {required} for hedge after fill.")
                     result = False
                     break
 
-                # Place the order with error handling
-                try:
-                    order = self.binance_client.place_limit_order(
-                        self.symbol,
-                        new_side,
-                        formatted_quantity,
-                        formatted_price
+                placement_success = False
+                last_error = None
+                for attempt in range(max_retries):
+                    try:
+                        order = self.binance_client.place_limit_order(
+                            self.symbol,
+                            new_side,
+                            formatted_quantity,
+                            formatted_price
+                        )
+
+                        # Update grid level
+                        matching_level['side'] = new_side
+                        matching_level['order_id'] = order['orderId']
+
+                        # Add to pending orders tracking if using WebSocket
+                        if self.using_websocket:
+                            self.pending_orders[str(order['orderId'])] = {
+                                'grid_index': level_index,
+                                'side': new_side,
+                                'price': float(formatted_price),
+                                'quantity': float(formatted_quantity),
+                                'timestamp': int(time.time()),
+                                'asset': asset,
+                                'required': required
+                            }
+                        
+                        placement_success = True
+                        message = f"Grid trade executed: {side} {formatted_quantity} @ {price}\nOpposite order placed: {new_side} {formatted_quantity} @ {formatted_price}"
+                        self.logger.info(message)
+                        if self.telegram_bot:
+                            self.telegram_bot.send_message(message)
+                        result = True
+                        break
+                    except Exception as e:
+                        last_error = e
+                        self.logger.error(f"Failed to place opposite order (attempt {attempt+1}/{max_retries}): {e}")
+
+                        # If WebSocket connection error, try with REST API within the same attempt
+                        if "connection" in str(e).lower() and self.using_websocket:
+                            try:
+                                self.logger.warning("Connection error - falling back to REST API for opposite order")
+
+                                # Force update of client status
+                                client_status = self.binance_client.get_client_status()
+                                self.using_websocket = False  # Force REST for fallback
+
+                                # Try again with REST
+                                order = self.binance_client.place_limit_order(
+                                    self.symbol,
+                                    new_side,
+                                    formatted_quantity,
+                                    formatted_price
+                                )
+
+                                # Update grid
+                                matching_level['side'] = new_side
+                                matching_level['order_id'] = order['orderId']
+
+                                if self.using_websocket:
+                                    self.pending_orders[str(order['orderId'])] = {
+                                        'grid_index': level_index,
+                                        'side': new_side,
+                                        'price': float(formatted_price),
+                                        'quantity': float(formatted_quantity),
+                                        'timestamp': int(time.time()),
+                                        'asset': asset,
+                                        'required': required
+                                    }
+
+                                placement_success = True
+                                message = f"Grid trade executed: {side} {formatted_quantity} @ {price}\nOpposite order placed via fallback: {new_side} {formatted_quantity} @ {formatted_price}"
+                                self.logger.info(message)
+                                if self.telegram_bot:
+                                    self.telegram_bot.send_message(message)
+                                result = True
+                                break
+                            except Exception as retry_error:
+                                last_error = retry_error
+                                self.logger.error(f"Fallback order placement also failed: {retry_error}")
+                        time.sleep(0.5)
+
+                if not placement_success:
+                    self._emergency_stop_unhedged(
+                        f"Failed to place hedge {new_side} after fill of {side}; last error: {last_error}"
                     )
+                    result = False
 
-                    # Update grid level
-                    matching_level['side'] = new_side
-                    matching_level['order_id'] = order['orderId']
-
-                    # Add to pending orders tracking if using WebSocket
-                    if self.using_websocket:
-                        self.pending_orders[str(order['orderId'])] = {
-                            'grid_index': level_index,
-                            'side': new_side,
-                            'price': float(formatted_price),
-                            'quantity': float(formatted_quantity),
-                            'timestamp': int(time.time()),
-                            'asset': asset,
-                            'required': required
-                        }
-                    
-                    # Release local lock once Binance has accepted the order
-                    self._release_funds(asset, required)
-
-                    message = f"Grid trade executed: {side} {formatted_quantity} @ {price}\nOpposite order placed: {new_side} {formatted_quantity} @ {formatted_price}"
-                    self.logger.info(message)
-                    if self.telegram_bot:
-                        self.telegram_bot.send_message(message)
-                    result = True
-                except Exception as e:
-                    # Release locked funds if order placement fails
-                    self._release_funds(asset, required)
-                    self.logger.error(f"Failed to place opposite order: {e}")
-
-                    # If WebSocket connection error, try with REST API
-                    if "connection" in str(e).lower() and self.using_websocket:
-                        try:
-                            self.logger.warning("Connection error - falling back to REST API for opposite order")
-
-                            # Force update of client status
-                            client_status = self.binance_client.get_client_status()
-                            self.using_websocket = False  # Force REST for fallback
-
-                            # Try again with REST
-                            order = self.binance_client.place_limit_order(
-                                self.symbol,
-                                new_side,
-                                formatted_quantity,
-                                formatted_price
-                            )
-
-                            # Update grid
-                            matching_level['side'] = new_side
-                            matching_level['order_id'] = order['orderId']
-                            self._release_funds(asset, required)
-
-                            message = f"Grid trade executed: {side} {formatted_quantity} @ {price}\nOpposite order placed via fallback: {new_side} {formatted_quantity} @ {formatted_price}"
-                            self.logger.info(message)
-                            if self.telegram_bot:
-                                self.telegram_bot.send_message(message)
-                            result = True
-                        except Exception as retry_error:
-                            self._release_funds(asset, required)  # Make sure to release funds on retry failure
-                            self.logger.error(f"Fallback order placement also failed: {retry_error}")
-                            result = False
-                    else:
-                        result = False
+                # Release local lock once finished (success or failure)
+                self._release_funds(asset, required)
                 break
         finally:
             if risk_manager:

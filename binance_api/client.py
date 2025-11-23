@@ -795,6 +795,25 @@ class BinanceClient:
             self.logger.error(f"Failed to get open orders: {e}")
             raise
             
+    def get_order(self, symbol, order_id=None, orig_client_order_id=None):
+        """
+        Get a specific order status (WS: order.status, REST: get_order)
+        Reference: binance-spot-api-docs/web-socket-api.md order.status
+        """
+        if not order_id and not orig_client_order_id:
+            raise ValueError("order_id or orig_client_order_id is required")
+        params = {"symbol": symbol}
+        if order_id:
+            params["orderId"] = order_id
+        if orig_client_order_id:
+            params["origClientOrderId"] = orig_client_order_id
+        try:
+            resp = self._execute_with_fallback("order_status", "get_order", **params)
+            return self._unwrap_response(resp)
+        except Exception as e:
+            self.logger.error(f"Failed to get order status: {e}")
+            raise
+            
     def get_historical_klines(self, symbol, interval, start_str=None, limit=500):
         """Get historical klines data"""
         try:

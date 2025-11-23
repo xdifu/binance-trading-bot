@@ -2,6 +2,7 @@ import logging
 import time
 import config
 from datetime import datetime
+from contextlib import nullcontext
 from utils.format_utils import format_price, format_quantity, get_precision_from_filters
 
 class RiskManager:
@@ -79,6 +80,9 @@ class RiskManager:
         
         # Track pending operations for better error handling
         self.pending_oco_orders = {}
+
+        # Sync existing OCO orders to avoid duplicates after restart
+        self._load_existing_oco()
 
     def _percent_to_fraction(self, percent_value, label):
         """
@@ -166,6 +170,25 @@ class RiskManager:
             str: Formatted quantity string
         """
         return format_quantity(quantity, self.quantity_precision)
+    
+    def _load_existing_oco(self):
+        """
+        Load existing open OCO orders from exchange to prevent duplicate placement after restart.
+        """
+        try:
+            if not getattr(config, "ENABLE_OCO", False):
+                return
+            rest_client = getattr(self.binance_client, "rest_client", None)
+            if not rest_client:
+                return
+            open_ocos = rest_client.get_open_oco_orders()
+            for oco in open_ocos:
+                if oco.get("symbol") == self.symbol:
+                    self.oco_order_id = oco.get("orderListId")
+                    self.logger.info(f"Recovered existing OCO order from exchange: {self.oco_order_id}")
+                    break
+        except Exception as e:
+            self.logger.debug(f"Failed to load existing OCO orders: {e}")
         
     def activate(self, grid_lowest, grid_highest):
         """
@@ -274,6 +297,10 @@ class RiskManager:
         
         try:
             current_price = self.binance_client.get_symbol_price(self.symbol)
+            if not current_price or float(current_price) <= 0:
+                self.logger.warning("Invalid price for reserve calculation, using 0")
+                return 0.0
+            current_price = float(current_price)
             
             # Count pending BUY orders that could fill
             estimated_base_needed = 0.0
@@ -281,7 +308,8 @@ class RiskManager:
                 if level.get('side') == 'BUY' and level.get('order_id'):
                     # This BUY order is active and could fill
                     capital = level.get('capital', self.grid_trader.capital_per_level)
-                    quantity = capital / current_price if current_price > 0 else 0
+                    buy_price = level.get('price', current_price)
+                    quantity = capital / buy_price if buy_price and buy_price > 0 else 0
                     estimated_base_needed += quantity
             
             # Apply safety factor (1.3x) for price volatility
@@ -848,6 +876,9 @@ class RiskManager:
 
     def execute_stop_loss(self):
         """Execute stop loss operation"""
+        lock_ctx = nullcontext()
+        if self.grid_trader and hasattr(self.grid_trader, "balance_lock"):
+            lock_ctx = self.grid_trader.balance_lock
         try:
             # Check WebSocket availability before proceeding
             client_status = self.binance_client.get_client_status()
@@ -855,40 +886,41 @@ class RiskManager:
             api_type = "WebSocket API" if self.using_websocket else "REST API"
             
             # Get account balance and close all positions
-            balance = self.binance_client.get_account_info()
-            asset = self.symbol.replace('USDT', '')
-            
-            # Find corresponding asset balance - handle different response formats
-            asset_balance = None
-            
-            if isinstance(balance, dict):
-                if 'balances' in balance:
-                    # REST API format
-                    for item in balance['balances']:
-                        if item['asset'] == asset:
-                            asset_balance = float(item['free'])
-                            break
-                elif 'result' in balance and 'balances' in balance['result']:
-                    # WebSocket API format
-                    for item in balance['result']['balances']:
-                        if item['asset'] == asset:
-                            asset_balance = float(item['free'])
-                            break
-            
-            if asset_balance and asset_balance > 0:
-                # Format quantity
-                formatted_quantity = self._adjust_quantity_precision(asset_balance)
+            with lock_ctx:
+                balance = self.binance_client.get_account_info()
+                asset = self.symbol.replace('USDT', '')
                 
-                self.logger.info(f"Executing stop loss via {api_type}: Market selling {formatted_quantity} {asset}")
+                # Find corresponding asset balance - handle different response formats
+                asset_balance = None
                 
-                # Market sell all assets
-                self.binance_client.place_market_order(self.symbol, "SELL", formatted_quantity)
-                message = f"Stop Loss Executed via {api_type}: Market sold {formatted_quantity} {asset}"
-                self.logger.info(message)
-                if self.telegram_bot:
-                    self.telegram_bot.send_message(message)
-            else:
-                self.logger.warning(f"No {asset} balance available for stop loss")
+                if isinstance(balance, dict):
+                    if 'balances' in balance:
+                        # REST API format
+                        for item in balance['balances']:
+                            if item['asset'] == asset:
+                                asset_balance = float(item['free'])
+                                break
+                    elif 'result' in balance and 'balances' in balance['result']:
+                        # WebSocket API format
+                        for item in balance['result']['balances']:
+                            if item['asset'] == asset:
+                                asset_balance = float(item['free'])
+                                break
+                
+                if asset_balance and asset_balance > 0:
+                    # Format quantity
+                    formatted_quantity = self._adjust_quantity_precision(asset_balance)
+                    
+                    self.logger.info(f"Executing stop loss via {api_type}: Market selling {formatted_quantity} {asset}")
+                    
+                    # Market sell all assets
+                    self.binance_client.place_market_order(self.symbol, "SELL", formatted_quantity)
+                    message = f"Stop Loss Executed via {api_type}: Market sold {formatted_quantity} {asset}"
+                    self.logger.info(message)
+                    if self.telegram_bot:
+                        self.telegram_bot.send_message(message)
+                else:
+                    self.logger.warning(f"No {asset} balance available for stop loss")
                 
         except Exception as e:
             self.logger.error(f"Failed to execute stop loss: {e}")
@@ -909,49 +941,11 @@ class RiskManager:
 
     def _retry_execute_stop_loss(self):
         """Retry stop loss execution with updated client status"""
+        lock_ctx = nullcontext()
+        if self.grid_trader and hasattr(self.grid_trader, "balance_lock"):
+            lock_ctx = self.grid_trader.balance_lock
         # Get account balance and close all positions
-        balance = self.binance_client.get_account_info()
-        asset = self.symbol.replace('USDT', '')
-        
-        # Find corresponding asset balance - handle different response formats
-        asset_balance = None
-        
-        if isinstance(balance, dict):
-            if 'balances' in balance:
-                # REST API format
-                for item in balance['balances']:
-                    if item['asset'] == asset:
-                        asset_balance = float(item['free'])
-                        break
-            elif 'result' in balance and 'balances' in balance['result']:
-                # WebSocket API format
-                for item in balance['result']['balances']:
-                    if item['asset'] == asset:
-                        asset_balance = float(item['free'])
-                        break
-        
-        if asset_balance and asset_balance > 0:
-            # Format quantity
-            formatted_quantity = self._adjust_quantity_precision(asset_balance)
-            
-            self.logger.info(f"Executing stop loss via REST fallback: Market selling {formatted_quantity} {asset}")
-            
-            # Market sell all assets
-            self.binance_client.place_market_order(self.symbol, "SELL", formatted_quantity)
-            message = f"Stop Loss Executed via REST fallback: Market sold {formatted_quantity} {asset}"
-            self.logger.info(message)
-            if self.telegram_bot:
-                self.telegram_bot.send_message(message)
-
-    def execute_take_profit(self):
-        """Execute take profit operation"""
-        try:
-            # Check WebSocket availability before proceeding
-            client_status = self.binance_client.get_client_status()
-            self.using_websocket = client_status["websocket_available"]
-            api_type = "WebSocket API" if self.using_websocket else "REST API"
-            
-            # Get account balance and close all positions
+        with lock_ctx:
             balance = self.binance_client.get_account_info()
             asset = self.symbol.replace('USDT', '')
             
@@ -976,16 +970,62 @@ class RiskManager:
                 # Format quantity
                 formatted_quantity = self._adjust_quantity_precision(asset_balance)
                 
-                self.logger.info(f"Executing take profit via {api_type}: Market selling {formatted_quantity} {asset}")
+                self.logger.info(f"Executing stop loss via REST fallback: Market selling {formatted_quantity} {asset}")
                 
                 # Market sell all assets
                 self.binance_client.place_market_order(self.symbol, "SELL", formatted_quantity)
-                message = f"Take Profit Executed via {api_type}: Market sold {formatted_quantity} {asset}"
+                message = f"Stop Loss Executed via REST fallback: Market sold {formatted_quantity} {asset}"
                 self.logger.info(message)
                 if self.telegram_bot:
                     self.telegram_bot.send_message(message)
-            else:
-                self.logger.warning(f"No {asset} balance available for take profit")
+
+    def execute_take_profit(self):
+        """Execute take profit operation"""
+        lock_ctx = nullcontext()
+        if self.grid_trader and hasattr(self.grid_trader, "balance_lock"):
+            lock_ctx = self.grid_trader.balance_lock
+        try:
+            # Check WebSocket availability before proceeding
+            client_status = self.binance_client.get_client_status()
+            self.using_websocket = client_status["websocket_available"]
+            api_type = "WebSocket API" if self.using_websocket else "REST API"
+            
+            # Get account balance and close all positions
+            with lock_ctx:
+                balance = self.binance_client.get_account_info()
+                asset = self.symbol.replace('USDT', '')
+                
+                # Find corresponding asset balance - handle different response formats
+                asset_balance = None
+                
+                if isinstance(balance, dict):
+                    if 'balances' in balance:
+                        # REST API format
+                        for item in balance['balances']:
+                            if item['asset'] == asset:
+                                asset_balance = float(item['free'])
+                                break
+                    elif 'result' in balance and 'balances' in balance['result']:
+                        # WebSocket API format
+                        for item in balance['result']['balances']:
+                            if item['asset'] == asset:
+                                asset_balance = float(item['free'])
+                                break
+                
+                if asset_balance and asset_balance > 0:
+                    # Format quantity
+                    formatted_quantity = self._adjust_quantity_precision(asset_balance)
+                    
+                    self.logger.info(f"Executing take profit via {api_type}: Market selling {formatted_quantity} {asset}")
+                    
+                    # Market sell all assets
+                    self.binance_client.place_market_order(self.symbol, "SELL", formatted_quantity)
+                    message = f"Take Profit Executed via {api_type}: Market sold {formatted_quantity} {asset}"
+                    self.logger.info(message)
+                    if self.telegram_bot:
+                        self.telegram_bot.send_message(message)
+                else:
+                    self.logger.warning(f"No {asset} balance available for take profit")
                 
         except Exception as e:
             self.logger.error(f"Failed to execute take profit: {e}")
@@ -1006,39 +1046,43 @@ class RiskManager:
 
     def _retry_execute_take_profit(self):
         """Retry take profit execution with updated client status"""
+        lock_ctx = nullcontext()
+        if self.grid_trader and hasattr(self.grid_trader, "balance_lock"):
+            lock_ctx = self.grid_trader.balance_lock
         # Get account balance and close all positions
-        balance = self.binance_client.get_account_info()
-        asset = self.symbol.replace('USDT', '')
-        
-        # Find corresponding asset balance - handle different response formats
-        asset_balance = None
-        
-        if isinstance(balance, dict):
-            if 'balances' in balance:
-                # REST API format
-                for item in balance['balances']:
-                    if item['asset'] == asset:
-                        asset_balance = float(item['free'])
-                        break
-            elif 'result' in balance and 'balances' in balance['result']:
-                # WebSocket API format
-                for item in balance['result']['balances']:
-                    if item['asset'] == asset:
-                        asset_balance = float(item['free'])
-                        break
-        
-        if asset_balance and asset_balance > 0:
-            # Format quantity
-            formatted_quantity = self._adjust_quantity_precision(asset_balance)
+        with lock_ctx:
+            balance = self.binance_client.get_account_info()
+            asset = self.symbol.replace('USDT', '')
             
-            self.logger.info(f"Executing take profit via REST fallback: Market selling {formatted_quantity} {asset}")
+            # Find corresponding asset balance - handle different response formats
+            asset_balance = None
             
-            # Market sell all assets
-            self.binance_client.place_market_order(self.symbol, "SELL", formatted_quantity)
-            message = f"Take Profit Executed via REST fallback: Market sold {formatted_quantity} {asset}"
-            self.logger.info(message)
-            if self.telegram_bot:
-                self.telegram_bot.send_message(message)
+            if isinstance(balance, dict):
+                if 'balances' in balance:
+                    # REST API format
+                    for item in balance['balances']:
+                        if item['asset'] == asset:
+                            asset_balance = float(item['free'])
+                            break
+                elif 'result' in balance and 'balances' in balance['result']:
+                    # WebSocket API format
+                    for item in balance['result']['balances']:
+                        if item['asset'] == asset:
+                            asset_balance = float(item['free'])
+                            break
+            
+            if asset_balance and asset_balance > 0:
+                # Format quantity
+                formatted_quantity = self._adjust_quantity_precision(asset_balance)
+                
+                self.logger.info(f"Executing take profit via REST fallback: Market selling {formatted_quantity} {asset}")
+                
+                # Market sell all assets
+                self.binance_client.place_market_order(self.symbol, "SELL", formatted_quantity)
+                message = f"Take Profit Executed via REST fallback: Market sold {formatted_quantity} {asset}"
+                self.logger.info(message)
+                if self.telegram_bot:
+                    self.telegram_bot.send_message(message)
                 
     def get_status(self):
         """
