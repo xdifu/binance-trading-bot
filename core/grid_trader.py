@@ -984,12 +984,7 @@ class GridTrader:
                     self.logger.error(f"Rebalance {side} order failed: {order_err}")
                     return False
 
-            # 1. Check cooldown
-            if self._check_market_order_cooldown():
-                self.logger.warning("Skipping market rebalance due to cooldown")
-                return False
-
-            # 2. Get current status
+            # 1. Get current status (Moved up for dynamic cooldown check)
             current_price = self._get_symbol_price_safe("market rebalance")
             if current_price is None:
                 self.logger.error("Cannot execute market rebalance without a valid price.")
@@ -998,7 +993,7 @@ class GridTrader:
             base_balance = self.binance_client.check_balance(base_asset)
             usdt_balance = self.binance_client.check_balance('USDT')
             
-            # 3. Calculate value
+            # 2. Calculate value & imbalance
             base_val = base_balance * current_price
             total_val = base_val + usdt_balance
             
@@ -1006,7 +1001,6 @@ class GridTrader:
                 self.logger.error(f"Total value {total_val:.2f} too low for rebalance")
                 return False
 
-            # 4. Determine action
             current_ratio = base_val / total_val
             diff = target_ratio - current_ratio
             
@@ -1015,7 +1009,49 @@ class GridTrader:
                 self.logger.info(f"Portfolio balanced enough ({current_ratio:.2f}), skipping rebalance")
                 return True
 
-            # 5. Execute Trade
+            # 3. Dynamic Cooldown Logic (Smart Bypass)
+            # We check cooldown AFTER calculating diff to know the trade direction
+            last_time = self._load_cooldown_state()
+            if last_time > 0:
+                elapsed = time.time() - last_time
+                cooldown_duration = 3600  # 60 min standard
+                min_safety_cooldown = 900  # 15 min HARD limit
+                
+                # Case A: Hard Safety Limit (< 15 min) - Always Block
+                if elapsed < min_safety_cooldown:
+                    self.logger.warning(f"Skipping rebalance: Minimum safety cooldown active ({elapsed/60:.1f}/15 min)")
+                    return False
+                    
+                # Case B: Standard Cooldown (15-60 min) - Check for Trend Bypass
+                if elapsed < cooldown_duration:
+                    trend = getattr(self, 'trend_strength', 0)
+                    bypass_allowed = False
+                    reason = ""
+                    
+                    # Determine needed action
+                    need_to_buy = diff > 0
+                    need_to_sell = diff < 0
+                    
+                    # Logic: Only allow bypass if trade direction ALIGNS with strong trend
+                    if trend > 0.5 and need_to_buy:
+                        bypass_allowed = True
+                        reason = f"🚀 STRONG UPTREND ({trend:.2f}) + BUYING aligns with trend"
+                    elif trend < -0.5 and need_to_sell:
+                        bypass_allowed = True
+                        reason = f"📉 STRONG DOWNTREND ({trend:.2f}) + SELLING aligns with trend"
+                    
+                    if bypass_allowed:
+                        self.logger.warning(f"{reason}: Bypassing cooldown ({elapsed/60:.1f}/60 min)")
+                        # Proceed to execution...
+                    else:
+                        # No bypass justification
+                        self.logger.warning(
+                            f"Skipping rebalance: Cooldown active ({elapsed/60:.1f}/60 min). "
+                            f"Trend={trend:.2f}, Buy={need_to_buy}. No bypass condition met."
+                        )
+                        return False
+
+            # 4. Execute Trade
             trade_executed = False
 
             if diff > 0:
@@ -1060,29 +1096,20 @@ class GridTrader:
 
                     formatted_qty = self._adjust_quantity_precision(qty)
                     
-                    try:
-                        self.logger.info(f"REBALANCE: Selling {formatted_qty} {base_asset} (factor {factor:.3f}, target {target_qty:.8f})")
-                        if self.telegram_bot:
-                            self.telegram_bot.send_message(
-                                f"🔄 Deadlock Recovery: Selling {formatted_qty} {base_asset} to reset grid"
-                            )
-                        trade_executed = _place_rebalance_order("SELL", qty)
-                        if trade_executed:
-                            break
-                    except Exception as sell_err:
-                        self.logger.warning(
-                            f"Sell attempt failed at factor {factor:.3f} (qty {formatted_qty}): {sell_err}"
-                        )
-                        continue
-
-                if not trade_executed:
-                    self.logger.error("All sell attempts failed; rebalance aborted.")
-                    return False
-
-            # 6. Save Cooldown
+                    self.logger.info(f"REBALANCE: Selling ~{formatted_qty} {base_asset}")
+                    if self.telegram_bot:
+                        self.telegram_bot.send_message(f"🔄 Deadlock Recovery: Selling ~{formatted_qty} {base_asset} to reset grid")
+                    
+                    if _place_rebalance_order("SELL", qty):
+                        trade_executed = True
+                        break
+            
             if trade_executed:
                 self._save_cooldown_state()
-            return trade_executed
+                return True
+            else:
+                self.logger.warning("Market rebalance failed to execute any trade.")
+                return False
 
         except Exception as e:
             self.logger.error(f"Market rebalance failed: {e}")

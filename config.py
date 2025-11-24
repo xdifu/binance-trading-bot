@@ -29,19 +29,18 @@ WS_RECONNECT_DELAY = 5  # 重连间隔时间(秒)，增大可避免频繁重连�
 #############################################
 
 SYMBOL = "SANTOSUSDT"  # 主网实盘交易对
-CAPITAL_PER_LEVEL = 9  # 每个网格的资金(USDT)，增加到11以确保满足最小订单要求(0.02 ZEC > 10 USDT)
+CAPITAL_PER_LEVEL = 6  # 每个网格的资金(USDT)，定额6U以适应70U总资金
 CAPITAL_SIZE = "small"  # 资金规模，可选值："small"(小资金优化) 或 "standard"(标准资金)
 
 # 复利设置 (Compound Interest)
-ENABLE_COMPOUND_INTEREST = True  # 是否启用复利模式 (利滚利)
-CAPITAL_PERCENTAGE_PER_LEVEL = 0.01  # 每格资金占总资金的百分比 (例如 0.01 代表 1%)
-
+ENABLE_COMPOUND_INTEREST = False  # 关闭复利，避免小资金下计算干扰
+CAPITAL_PERCENTAGE_PER_LEVEL = 0.01  # (已禁用)
 
 #############################################
 # 网格参数 (全部以小数形式表示)
 #############################################
 
-GRID_LEVELS = 7  # 提高到 7 层
+GRID_LEVELS = 5  # 设定为5层，适应实际资金和保护机制
 GRID_SPACING = 0.01  # 网格间距 (1.0%)
 GRID_RANGE_PERCENT = 0.08  # 总网格价格范围 (8.0%)
 MAX_GRID_SPACING = 0.03  # 最大单网格间距 (3%)
