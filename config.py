@@ -28,8 +28,8 @@ WS_RECONNECT_DELAY = 5  # 重连间隔时间(秒)，增大可避免频繁重连�
 # 交易基本设置
 #############################################
 
-SYMBOL = "SANTOSUSDT"  # 主网实盘交易对
-CAPITAL_PER_LEVEL = 6  # 每个网格的资金(USDT)，定额6U以适应70U总资金
+SYMBOL = "BTCUSDT"  # 主网实盘交易对
+CAPITAL_PER_LEVEL = 11  # 每个网格的资金(USDT)
 CAPITAL_SIZE = "small"  # 资金规模，可选值："small"(小资金优化) 或 "standard"(标准资金)
 
 # 复利设置 (Compound Interest)
